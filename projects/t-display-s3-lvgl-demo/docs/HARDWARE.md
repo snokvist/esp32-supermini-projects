@@ -24,6 +24,15 @@
 
 No external wiring required for this LVGL demo.
 
+## Runtime Control Mapping
+
+- `BOOT` (`GPIO0`):
+  - short press: next LVGL tab (`Dash -> Inputs -> System`)
+  - long press (>1s): previous LVGL tab
+- `GPIO14`:
+  - short press: toggle accent theme color
+  - long press (>1s): reset button counters and jump to `Inputs` tab
+
 Bring-up:
 
 1. Connect T-Display-S3 over USB-C.
