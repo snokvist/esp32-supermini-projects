@@ -113,6 +113,13 @@ For every implementation task, keep docs aligned in the same change set:
 - Update the affected project's `README.md`, `docs/HARDWARE.md`, and `docs/TASK_LOG.md` when behavior, wiring, or setup changes.
 - If only infra-level files changed, update `AGENTS.md` and/or `docs/WORKFLOW.md` as needed.
 
+`README.md` is mandatory and must document how to use/interact with the project. Minimum required sections:
+
+- project summary / goal
+- how to build + flash
+- how to interact (wiring, runtime steps, operator actions)
+- expected behavior/output
+
 ## Maintenance Rule
 
 When workflow, tooling, or folder conventions change, update `AGENTS.md` immediately in the same task.
