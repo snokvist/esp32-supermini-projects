@@ -57,6 +57,13 @@ For project-level work, update:
 - `projects/<project-name>/docs/HARDWARE.md`
 - `projects/<project-name>/docs/TASK_LOG.md`
 
+`README.md` requirement (mandatory):
+
+- summary/goal
+- build + flash commands
+- how to interact with the project (wiring + runtime steps)
+- expected behavior/output
+
 Task log entry format:
 
 - date
