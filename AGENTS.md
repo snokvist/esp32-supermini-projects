@@ -41,6 +41,33 @@ At the start of a working session, Codex should:
 2. Check repository state (`git status --short`).
 3. Confirm tool availability (`pio --version`), and run `./scripts/setup.sh` if missing.
 4. If hardware work is requested, detect board/serial port before flashing.
+5. If GitHub work is requested, verify GitHub auth (`gh auth status`).
+
+## GitHub / PR Workflow
+
+Default branch and flow:
+
+1. Start from updated `main`:
+   - `git checkout main`
+   - `git pull --ff-only`
+2. Create a task branch:
+   - `git checkout -b <type>/<short-name>`
+3. Implement + validate.
+4. Commit with a clear message.
+5. Push:
+   - `git push -u origin <branch>`
+6. Open PR with GitHub CLI:
+   - `gh pr create --base main --head <branch> --title \"...\" --body-file <file>`
+
+PR body note:
+
+- Prefer `--body-file` over inline `--body` to avoid shell quoting/substitution issues.
+- Store temporary PR body files in repo root (for example `.pr_body.md`), then remove them after PR creation.
+
+Push auth fallback:
+
+- If push fails with `could not read Username for 'https://github.com'`, configure git credential helper via GitHub CLI:
+  - `git config --global credential.helper \"!$(command -v gh) auth git-credential\"`
 
 ## New ESP32 Project Checklist
 

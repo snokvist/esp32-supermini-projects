@@ -81,6 +81,31 @@ Include:
 - validation results
 - any blockers or assumptions
 
-## 8) Keep Workflow Current
+## 8) GitHub / PR Flow
+
+When asked to submit a PR:
+
+1. Sync base branch:
+   - `git checkout main`
+   - `git pull --ff-only`
+2. Create branch:
+   - `git checkout -b <type>/<short-name>`
+3. Stage and commit:
+   - `git add -A`
+   - `git commit -m \"...\"`
+4. Push:
+   - `git push -u origin <branch>`
+5. Create PR:
+   - create `.pr_body.md` in repo root
+   - `gh pr create --base main --head <branch> --title \"...\" --body-file .pr_body.md`
+   - remove `.pr_body.md` after PR is created
+
+Push auth recovery:
+
+- If push fails with `could not read Username for 'https://github.com'`:
+  - `git config --global credential.helper \"!$(command -v gh) auth git-credential\"`
+  - retry `git push -u origin <branch>`
+
+## 9) Keep Workflow Current
 
 If this process changes, update `AGENTS.md` and `docs/WORKFLOW.md` in the same task.
