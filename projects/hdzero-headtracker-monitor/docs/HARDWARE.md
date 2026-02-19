@@ -14,6 +14,13 @@
 
 - LED pin: `GPIO8` (adjust per board variant)
 - PPM input pin: `GPIO2` (configurable via `PPM_INPUT_PIN`)
+- Mode toggle button pin: `GPIO9` (onboard BOOT button, active low, internal pull-up enabled)
+
+BOOT/strapping caution:
+
+- `GPIO9` is a strapping/BOOT-related pin on ESP32-C3 boards.
+- Keep external wiring on `GPIO9` minimal and avoid forcing levels at reset/boot time.
+- This project only reads the onboard BOOT switch and does not require external button wiring.
 
 ## Wiring
 
@@ -36,8 +43,13 @@ Bring-up checklist:
 
 1. Enable head tracking on BoxPro+ menu.
 2. Plug jack and power both devices.
-3. Flash this project and open serial monitor at `115200`.
-4. Move headset and confirm `ch1/ch2/ch3` values move around center (~1500us).
+3. Flash this project.
+4. Default runtime mode emits CRSF RC channel frames on serial (`115200`).
+5. Press BOOT to switch to PPM monitor text mode when needed.
+6. In monitor mode, open serial monitor at `115200` and confirm:
+   - `win=...Hz(ok)` stays near `~50Hz` (warns outside `45..55Hz`)
+   - `ch1/ch2/ch3` move around center (~1500us)
+   - `invalid(+delta)` remains stable unless signal noise/wiring issues are present
 
 Channel interpretation for BoxPro+ (from HDZero source code, inferred):
 
