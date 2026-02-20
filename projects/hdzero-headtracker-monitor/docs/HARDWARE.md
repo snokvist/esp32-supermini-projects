@@ -12,6 +12,23 @@
 - CRSF UART link: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud
 - Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
 
+## WiFi / Web UI
+
+- AP SSID: `waybeam-backpack`
+- AP password: `waybeam-backpack`
+- AP IP: `10.100.0.1`
+- AP subnet: `255.255.255.0` (`10.100.0.x`)
+- DHCP: enabled (ESP32 SoftAP built-in DHCP server)
+- Web UI: `http://10.100.0.1/`
+- Status JSON includes `nvs_ready` (1 when preferences persistence is available).
+
+## Configurable GPIO Guardrails
+
+- Runtime pin reassignment via Web UI is restricted to:
+  - `GPIO0..GPIO10`
+  - `GPIO20`, `GPIO21`
+- This intentionally excludes USB D-/D+ pins and unsupported/unrouted GPIOs to reduce brick-risk while using native USB CDC.
+
 ## Pin Map (Initial)
 
 - LED pin: `GPIO8` (adjust per board variant)
@@ -63,8 +80,16 @@ Bring-up checklist:
    - USB CDC (`/dev/ttyACM0`, monitor at `115200`)
    - UART1 `GPIO21` TX + `GPIO20` RX at `420000`
    - PWM outputs at `100Hz` on `GPIO3/4/5` from incoming CRSF CH1/CH2/CH3
-5. Press BOOT to switch to PPM monitor text mode when needed.
-6. In monitor mode, open serial monitor at `115200` and confirm:
+5. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
+   - settings page loads
+   - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
+   - status JSON updates (CRSF RX counters / servo values)
+   - status JSON includes `nvs_ready: 1` during normal operation
+   - apply/save actions are accepted
+   - `Reset to defaults` restores firmware defaults live and persists them
+   - invalid pin selections are rejected by API validation
+6. Press BOOT to switch to PPM monitor text mode when needed.
+7. In monitor mode, open serial monitor at `115200` and confirm:
    - `win=...Hz(ok)` stays near `~50Hz` (warns outside `45..55Hz`)
    - `ch1/ch2/ch3` move around center (~1500us)
    - `invalid(+delta)` remains stable unless signal noise/wiring issues are present

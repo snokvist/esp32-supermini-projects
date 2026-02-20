@@ -114,3 +114,74 @@ Use this file as a running implementation log.
 - Updated README and hardware docs with servo wiring and runtime behavior details.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+
+### 2026-02-20 - AP Web UI + Persistent Runtime Settings
+
+- Added onboard AP + web UI configuration interface:
+  - SSID: `waybeam-backpack`
+  - password: `waybeam-backpack`
+  - IP/subnet: `10.100.0.1/24`
+  - DHCP: enabled via ESP32 SoftAP built-in DHCP server (`10.100.0.x` clients)
+- Added HTTP endpoints:
+  - `/` (single-page Web UI)
+  - `/api/settings` (GET/POST live + persistent config)
+  - `/api/status` (runtime counters and health snapshot)
+- Implemented runtime settings model and live-apply pipeline:
+  - pins (LED/PPM/button/UART/servo)
+  - CRSF UART params
+  - CRSF/PPM mapping and timeout thresholds
+  - servo channel mapping, PWM frequency, pulse bounds
+  - output-mode defaults
+- Implemented persistent settings storage in NVS (`Preferences`) with schema versioning.
+- Added settings validation and pin-conflict protection before apply/save.
+- Kept runtime behavior:
+  - CRSF serial forwarding
+  - CRSF RX -> servo PWM mapping
+  - BOOT button mode toggle
+  - monitor diagnostics
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful.
+
+### 2026-02-20 - Web UI Reset To Defaults Action
+
+- Added `Reset to defaults` button in the web UI action row.
+- Added backend endpoint `POST /api/reset_defaults`:
+  - restores firmware default settings
+  - applies defaults live immediately
+  - persists defaults to NVS
+- Added confirmation prompt client-side before reset action.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+
+### 2026-02-20 - Web UI Sectioned Layout
+
+- Reorganized the web UI inputs into logical sections for faster navigation:
+  - Pins
+  - Modes
+  - CRSF / UART
+  - Servo Outputs
+  - PPM Decode
+  - Timing / Health
+- Preserved all existing field names and API payload structure so backend behavior is unchanged.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+
+### 2026-02-20 - Production Hardening Pass
+
+- Hardened persistence and startup behavior:
+  - added explicit `Preferences` readiness tracking (`nvs_ready`)
+  - settings save now checks write success and reports failure to API callers
+  - boot now validates persisted settings and auto-restores firmware defaults if invalid/corrupt
+- Hardened runtime settings validation:
+  - added configurable GPIO allowlist for ESP32-C3 SuperMini use (`GPIO0..10, GPIO20, GPIO21`)
+  - keeps USB pins / unsupported GPIOs out of Web UI-applied pin assignments
+- Hardened main loop behavior:
+  - bounded CRSF UART RX parse work per loop iteration to avoid starvation under heavy serial input
+- Hardened web behavior:
+  - added no-cache headers for UI/settings/status responses
+  - improved Web UI fetch error handling and reporting
+  - added SoftAP startup failure logging
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful.
