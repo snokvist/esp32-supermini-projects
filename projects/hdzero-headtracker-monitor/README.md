@@ -17,6 +17,7 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini and emit CRSF RC
   - AP SSID/password: `waybeam-backpack` / `waybeam-backpack`
   - AP network: `10.100.0.x` (`ESP32 = 10.100.0.1`, built-in DHCP server enabled)
   - Web UI: `http://10.100.0.1/`
+  - configurable GPIO guardrail: `0..10, 20, 21` only (USB pins are excluded)
 
 ## Goals
 
@@ -64,6 +65,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
    - save settings to persistent storage (NVS) for next boot
    - reset all settings to firmware defaults with the `Reset to defaults` button (live + saved)
    - navigate settings in grouped sections (Pins, Modes, CRSF/UART, Servo Outputs, PPM Decode, Timing/Health)
+   - see save-state diagnostics (`nvs_ready`) in status output
 
 ## Expected Behavior
 
@@ -80,6 +82,8 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 - If CRSF RX packets go stale for >`500ms`, servo outputs return to center (`1500us`).
 - ESP32 runs a local AP (`waybeam-backpack`) and serves a Web UI on `10.100.0.1`.
 - DHCP is active on the AP and hands out addresses on the `10.100.0.x` subnet.
+- Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
+- Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`).
 - Monitor mode prints PPM status at roughly `~5Hz` with frame decode running around `~50Hz`.
 - After switching into monitor mode, first stats line appears after one monitor interval (~200ms) so `win` rate is measured over a valid window.
 - Monitor mode includes rate diagnostics:

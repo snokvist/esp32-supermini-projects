@@ -76,8 +76,13 @@ constexpr uint16_t kCrsfMaxValue = 1811;
 constexpr uint8_t kServoCount = 3;
 constexpr uint8_t kServoPwmResolutionBits = 14;
 constexpr uint8_t kServoPwmChannels[kServoCount] = {0, 1, 2};
+constexpr uint16_t kCrsfRxBytesPerLoopLimit = 256;
 
 constexpr uint16_t kSettingsVersion = 1;
+constexpr uint8_t kFirstSupportedGpio = 0;
+constexpr uint8_t kLastLowSupportedGpio = 10;
+constexpr uint8_t kFirstHighSupportedGpio = 20;
+constexpr uint8_t kLastSupportedGpio = 21;
 
 const char kWebUiHtml[] PROGMEM = R"HTML(
 <!doctype html>
@@ -169,7 +174,9 @@ function buildForm(){
 }
 
 async function loadSettings(){
-  const s=await fetch('/api/settings').then(r=>r.json());
+  const r=await fetch('/api/settings',{cache:'no-store'});
+  if(!r.ok) throw new Error(await r.text());
+  const s=await r.json();
   sections.forEach((section)=>{
     section.fields.forEach(([name])=>{
       const el=document.querySelector(`[name="${name}"]`);
@@ -179,13 +186,19 @@ async function loadSettings(){
 }
 
 async function loadStatus(){
-  const s=await fetch('/api/status').then(r=>r.json());
+  const r=await fetch('/api/status',{cache:'no-store'});
+  if(!r.ok) throw new Error(await r.text());
+  const s=await r.json();
   document.getElementById('status').textContent=JSON.stringify(s,null,2);
 }
 
 async function loadAll(){
-  await loadSettings();
-  await loadStatus();
+  try{
+    await loadSettings();
+    await loadStatus();
+  }catch(err){
+    document.getElementById('status').textContent=`Error: ${err.message}`;
+  }
 }
 
 async function submitCfg(persist){
@@ -194,7 +207,8 @@ async function submitCfg(persist){
   const body=new URLSearchParams(fd);
   const r=await fetch('/api/settings', {method:'POST', body});
   const text=await r.text();
-  alert(text);
+  alert(r.ok ? text : `Error: ${text}`);
+  if(!r.ok) return;
   await loadAll();
 }
 
@@ -202,13 +216,18 @@ async function resetDefaults(){
   if(!confirm('Reset all settings to firmware defaults and save?')) return;
   const r=await fetch('/api/reset_defaults', {method:'POST'});
   const text=await r.text();
-  alert(text);
+  alert(r.ok ? text : `Error: ${text}`);
+  if(!r.ok) return;
   await loadAll();
 }
 
 buildForm();
 loadAll();
-setInterval(loadStatus, 1000);
+setInterval(()=>{
+  loadStatus().catch((err)=>{
+    document.getElementById('status').textContent=`Error: ${err.message}`;
+  });
+}, 1000);
 </script>
 </body>
 </html>
@@ -297,6 +316,7 @@ uint8_t gAttachedButtonPin = MODE_BUTTON_PIN;
 uint8_t gAttachedServoPins[kServoCount] = {SERVO_PWM_1_PIN, SERVO_PWM_2_PIN, SERVO_PWM_3_PIN};
 
 Preferences gPrefs;
+bool gPrefsReady = false;
 WebServer gWeb(80);
 RuntimeSettings gSettings;
 
@@ -349,50 +369,64 @@ uint8_t clampU8(uint32_t value) {
   return (value > 255U) ? 255U : static_cast<uint8_t>(value);
 }
 
-void saveSettingsToNvs(const RuntimeSettings &s) {
-  gPrefs.putUShort("ver", kSettingsVersion);
-  gPrefs.putUChar("led", s.ledPin);
-  gPrefs.putUChar("ppm", s.ppmInputPin);
-  gPrefs.putUChar("btn", s.modeButtonPin);
-  gPrefs.putUChar("utx", s.crsfUartTxPin);
-  gPrefs.putUChar("urx", s.crsfUartRxPin);
-  gPrefs.putUInt("ubd", s.crsfUartBaud);
+bool validateSettings(const RuntimeSettings &s, String &error);
 
-  gPrefs.putUChar("sp1", s.servoPwmPins[0]);
-  gPrefs.putUChar("sp2", s.servoPwmPins[1]);
-  gPrefs.putUChar("sp3", s.servoPwmPins[2]);
-  gPrefs.putUShort("sfq", s.servoPwmFrequencyHz);
-  gPrefs.putUChar("sm1", s.servoMap[0]);
-  gPrefs.putUChar("sm2", s.servoMap[1]);
-  gPrefs.putUChar("sm3", s.servoMap[2]);
+bool saveSettingsToNvs(const RuntimeSettings &s) {
+  if (!gPrefsReady) {
+    return false;
+  }
 
-  gPrefs.putUShort("pmin", s.ppmMinChannelUs);
-  gPrefs.putUShort("pmax", s.ppmMaxChannelUs);
-  gPrefs.putUShort("psyn", s.ppmSyncGapUs);
+  bool ok = true;
+  ok &= (gPrefs.putUShort("ver", kSettingsVersion) == sizeof(uint16_t));
+  ok &= (gPrefs.putUChar("led", s.ledPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("ppm", s.ppmInputPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("btn", s.modeButtonPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("utx", s.crsfUartTxPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("urx", s.crsfUartRxPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUInt("ubd", s.crsfUartBaud) == sizeof(uint32_t));
 
-  gPrefs.putUInt("stmo", s.signalTimeoutMs);
-  gPrefs.putUInt("bdb", s.buttonDebounceMs);
-  gPrefs.putUInt("mpri", s.monitorPrintIntervalMs);
+  ok &= (gPrefs.putUChar("sp1", s.servoPwmPins[0]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("sp2", s.servoPwmPins[1]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("sp3", s.servoPwmPins[2]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUShort("sfq", s.servoPwmFrequencyHz) == sizeof(uint16_t));
+  ok &= (gPrefs.putUChar("sm1", s.servoMap[0]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("sm2", s.servoMap[1]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("sm3", s.servoMap[2]) == sizeof(uint8_t));
 
-  gPrefs.putFloat("ehmn", s.expectedMinFrameHz);
-  gPrefs.putFloat("ehmx", s.expectedMaxFrameHz);
+  ok &= (gPrefs.putUShort("pmin", s.ppmMinChannelUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("pmax", s.ppmMaxChannelUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("psyn", s.ppmSyncGapUs) == sizeof(uint16_t));
 
-  gPrefs.putUShort("cmn", s.crsfMapMinUs);
-  gPrefs.putUShort("cmx", s.crsfMapMaxUs);
-  gPrefs.putUInt("crxt", s.crsfRxTimeoutMs);
+  ok &= (gPrefs.putUInt("stmo", s.signalTimeoutMs) == sizeof(uint32_t));
+  ok &= (gPrefs.putUInt("bdb", s.buttonDebounceMs) == sizeof(uint32_t));
+  ok &= (gPrefs.putUInt("mpri", s.monitorPrintIntervalMs) == sizeof(uint32_t));
 
-  gPrefs.putUShort("svmn", s.servoPulseMinUs);
-  gPrefs.putUShort("svct", s.servoPulseCenterUs);
-  gPrefs.putUShort("svmx", s.servoPulseMaxUs);
+  ok &= (gPrefs.putFloat("ehmn", s.expectedMinFrameHz) == sizeof(float));
+  ok &= (gPrefs.putFloat("ehmx", s.expectedMaxFrameHz) == sizeof(float));
 
-  gPrefs.putUChar("omod", s.outputModeDefault);
+  ok &= (gPrefs.putUShort("cmn", s.crsfMapMinUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("cmx", s.crsfMapMaxUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUInt("crxt", s.crsfRxTimeoutMs) == sizeof(uint32_t));
+
+  ok &= (gPrefs.putUShort("svmn", s.servoPulseMinUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("svct", s.servoPulseCenterUs) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("svmx", s.servoPulseMaxUs) == sizeof(uint16_t));
+
+  ok &= (gPrefs.putUChar("omod", s.outputModeDefault) == sizeof(uint8_t));
+  return ok;
 }
 
 RuntimeSettings loadSettingsFromNvs() {
   RuntimeSettings s = defaultSettings();
+  if (!gPrefsReady) {
+    return s;
+  }
+
   const uint16_t version = gPrefs.getUShort("ver", 0);
   if (version != kSettingsVersion) {
-    saveSettingsToNvs(s);
+    if (!saveSettingsToNvs(s)) {
+      Serial.println("WARN: Failed to initialize settings in NVS");
+    }
     return s;
   }
 
@@ -431,6 +465,14 @@ RuntimeSettings loadSettingsFromNvs() {
   s.servoPulseMaxUs = gPrefs.getUShort("svmx", s.servoPulseMaxUs);
 
   s.outputModeDefault = gPrefs.getUChar("omod", s.outputModeDefault);
+  String validationError;
+  if (!validateSettings(s, validationError)) {
+    Serial.printf("WARN: Stored settings invalid (%s). Restoring defaults.\n", validationError.c_str());
+    s = defaultSettings();
+    if (!saveSettingsToNvs(s)) {
+      Serial.println("WARN: Failed to persist restored default settings");
+    }
+  }
   return s;
 }
 
@@ -449,7 +491,35 @@ bool pinListHasDuplicates(const RuntimeSettings &s) {
   return false;
 }
 
+bool isSupportedGpio(uint8_t pin) {
+  return ((pin >= kFirstSupportedGpio) && (pin <= kLastLowSupportedGpio)) ||
+         ((pin >= kFirstHighSupportedGpio) && (pin <= kLastSupportedGpio));
+}
+
 bool validateSettings(const RuntimeSettings &s, String &error) {
+  struct PinField {
+    const char *name;
+    uint8_t pin;
+  };
+
+  const PinField pinFields[] = {
+      {"led_pin", s.ledPin},
+      {"ppm_input_pin", s.ppmInputPin},
+      {"mode_button_pin", s.modeButtonPin},
+      {"crsf_uart_tx_pin", s.crsfUartTxPin},
+      {"crsf_uart_rx_pin", s.crsfUartRxPin},
+      {"servo_pwm_1_pin", s.servoPwmPins[0]},
+      {"servo_pwm_2_pin", s.servoPwmPins[1]},
+      {"servo_pwm_3_pin", s.servoPwmPins[2]},
+  };
+
+  for (const auto &field : pinFields) {
+    if (!isSupportedGpio(field.pin)) {
+      error = String(field.name) + " must be one of GPIO 0..10, 20, or 21";
+      return false;
+    }
+  }
+
   if (s.ppmMinChannelUs >= s.ppmMaxChannelUs) {
     error = "ppm_min_channel_us must be < ppm_max_channel_us";
     return false;
@@ -685,7 +755,8 @@ void processCrsfRxInput() {
   if (!gCrsfUartReady) {
     return;
   }
-  while (gCrsfUart.available() > 0) {
+  uint16_t budget = kCrsfRxBytesPerLoopLimit;
+  while ((budget-- > 0U) && (gCrsfUart.available() > 0)) {
     const int byteRead = gCrsfUart.read();
     if (byteRead >= 0) {
       processCrsfRxByte(static_cast<uint8_t>(byteRead));
@@ -970,7 +1041,9 @@ bool parseFloatArgOptional(const char *name, float minValue, float maxValue, flo
 }
 
 String settingsToJson() {
-  String json = "{";
+  String json;
+  json.reserve(620);
+  json = "{";
   json += "\"led_pin\":" + String(gSettings.ledPin);
   json += ",\"ppm_input_pin\":" + String(gSettings.ppmInputPin);
   json += ",\"mode_button_pin\":" + String(gSettings.modeButtonPin);
@@ -1015,10 +1088,13 @@ String statusToJson() {
   const uint32_t nowMs = millis();
   const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
 
-  String json = "{";
+  String json;
+  json.reserve(300);
+  json = "{";
   json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
   json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
   json += ",\"stations\":" + String(WiFi.softAPgetStationNum());
+  json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
   json += ",\"output_mode\":" + String(outputModeToUint(gOutputMode));
   json += ",\"frame_hz\":" + String(gFrameHz, 2);
   json += ",\"frame_hz_ema\":" + String(gFrameHzEma, 2);
@@ -1030,11 +1106,26 @@ String statusToJson() {
   return json;
 }
 
-void handleRoot() { gWeb.send_P(200, "text/html", kWebUiHtml); }
+void setNoCacheHeaders() {
+  gWeb.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  gWeb.sendHeader("Pragma", "no-cache");
+  gWeb.sendHeader("X-Content-Type-Options", "nosniff");
+}
 
-void handleGetSettings() { gWeb.send(200, "application/json", settingsToJson()); }
+void handleRoot() {
+  setNoCacheHeaders();
+  gWeb.send_P(200, "text/html", kWebUiHtml);
+}
 
-void handleGetStatus() { gWeb.send(200, "application/json", statusToJson()); }
+void handleGetSettings() {
+  setNoCacheHeaders();
+  gWeb.send(200, "application/json", settingsToJson());
+}
+
+void handleGetStatus() {
+  setNoCacheHeaders();
+  gWeb.send(200, "application/json", statusToJson());
+}
 
 void handlePostSettings() {
   RuntimeSettings candidate = gSettings;
@@ -1253,10 +1344,16 @@ void handlePostSettings() {
   gOutputMode = (requestedLiveMode == 0) ? OutputMode::kCrsfSerial : OutputMode::kPpmMonitor;
 
   const bool persist = gWeb.hasArg("persist") && (gWeb.arg("persist") == "1");
+  bool persisted = false;
   if (persist) {
-    saveSettingsToNvs(gSettings);
+    persisted = saveSettingsToNvs(gSettings);
   }
 
+  setNoCacheHeaders();
+  if (persist && !persisted) {
+    gWeb.send(500, "text/plain", "Applied live, but failed to save to NVS");
+    return;
+  }
   gWeb.send(200, "text/plain", persist ? "Applied live and saved" : "Applied live");
 }
 
@@ -1270,14 +1367,23 @@ void handleResetDefaults() {
 
   applySettings(defaults);
   gOutputMode = (defaults.outputModeDefault == 0) ? OutputMode::kCrsfSerial : OutputMode::kPpmMonitor;
-  saveSettingsToNvs(gSettings);
+  const bool saved = saveSettingsToNvs(gSettings);
+  setNoCacheHeaders();
+  if (!saved) {
+    gWeb.send(500, "text/plain", "Reset to defaults and applied live, but failed to save to NVS");
+    return;
+  }
   gWeb.send(200, "text/plain", "Reset to defaults, applied live, and saved");
 }
 
 void setupWebUi() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(kApIp, kApGateway, kApSubnet);
-  WiFi.softAP(kApSsid, kApPassword);
+  if (!WiFi.softAPConfig(kApIp, kApGateway, kApSubnet)) {
+    Serial.println("WARN: Failed to configure AP network settings");
+  }
+  if (!WiFi.softAP(kApSsid, kApPassword)) {
+    Serial.println("WARN: Failed to start SoftAP");
+  }
 
   gWeb.on("/", HTTP_GET, handleRoot);
   gWeb.on("/api/settings", HTTP_GET, handleGetSettings);
@@ -1292,7 +1398,10 @@ void setupWebUi() {
 
 void setup() {
   Serial.begin(115200);
-  gPrefs.begin("waybeam", false);
+  gPrefsReady = gPrefs.begin("waybeam", false);
+  if (!gPrefsReady) {
+    Serial.println("WARN: Preferences init failed; persistence disabled");
+  }
 
   gSettings = loadSettingsFromNvs();
   applySettings(gSettings);

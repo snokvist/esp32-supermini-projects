@@ -20,6 +20,14 @@
 - AP subnet: `255.255.255.0` (`10.100.0.x`)
 - DHCP: enabled (ESP32 SoftAP built-in DHCP server)
 - Web UI: `http://10.100.0.1/`
+- Status JSON includes `nvs_ready` (1 when preferences persistence is available).
+
+## Configurable GPIO Guardrails
+
+- Runtime pin reassignment via Web UI is restricted to:
+  - `GPIO0..GPIO10`
+  - `GPIO20`, `GPIO21`
+- This intentionally excludes USB D-/D+ pins and unsupported/unrouted GPIOs to reduce brick-risk while using native USB CDC.
 
 ## Pin Map (Initial)
 
@@ -76,8 +84,10 @@ Bring-up checklist:
    - settings page loads
    - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
    - status JSON updates (CRSF RX counters / servo values)
+   - status JSON includes `nvs_ready: 1` during normal operation
    - apply/save actions are accepted
    - `Reset to defaults` restores firmware defaults live and persists them
+   - invalid pin selections are rejected by API validation
 6. Press BOOT to switch to PPM monitor text mode when needed.
 7. In monitor mode, open serial monitor at `115200` and confirm:
    - `win=...Hz(ok)` stays near `~50Hz` (warns outside `45..55Hz`)
