@@ -15,6 +15,38 @@
 #define MODE_BUTTON_PIN 9
 #endif
 
+#ifndef CRSF_UART_TX_PIN
+#define CRSF_UART_TX_PIN 21
+#endif
+
+#ifndef CRSF_UART_RX_PIN
+#define CRSF_UART_RX_PIN 20
+#endif
+
+#ifndef CRSF_UART_BAUD
+#define CRSF_UART_BAUD 420000
+#endif
+
+#ifndef CRSF_UART_ENABLED
+#define CRSF_UART_ENABLED 1
+#endif
+
+#ifndef SERVO_PWM_1_PIN
+#define SERVO_PWM_1_PIN 3
+#endif
+
+#ifndef SERVO_PWM_2_PIN
+#define SERVO_PWM_2_PIN 4
+#endif
+
+#ifndef SERVO_PWM_3_PIN
+#define SERVO_PWM_3_PIN 5
+#endif
+
+#ifndef SERVO_PWM_FREQUENCY_HZ
+#define SERVO_PWM_FREQUENCY_HZ 100
+#endif
+
 namespace {
 constexpr uint8_t kMaxChannels = 12;
 constexpr uint8_t kMinChannelsInFrame = 3;
@@ -33,11 +65,22 @@ constexpr uint8_t kCrsfFrameTypeRcChannelsPacked = 0x16;
 constexpr uint8_t kCrsfChannelCount = 16;
 constexpr uint8_t kCrsfPayloadSize = 22;
 constexpr uint8_t kCrsfPacketSize = 26;
+constexpr uint8_t kCrsfMaxFrameLength = 62;
 constexpr uint16_t kCrsfMinValue = 172;
 constexpr uint16_t kCrsfCenterValue = 992;
 constexpr uint16_t kCrsfMaxValue = 1811;
 constexpr uint16_t kCrsfMapMinUs = 1000;
 constexpr uint16_t kCrsfMapMaxUs = 2000;
+constexpr uint32_t kCrsfRxTimeoutMs = 500;
+
+constexpr uint8_t kServoCount = 3;
+constexpr uint8_t kServoPwmResolutionBits = 14;
+constexpr uint16_t kServoPulseMinUs = 1000;
+constexpr uint16_t kServoPulseCenterUs = 1500;
+constexpr uint16_t kServoPulseMaxUs = 2000;
+
+const uint8_t kServoPins[kServoCount] = {SERVO_PWM_1_PIN, SERVO_PWM_2_PIN, SERVO_PWM_3_PIN};
+const uint8_t kServoPwmChannels[kServoCount] = {0, 1, 2};
 
 volatile uint16_t gIsrChannels[kMaxChannels] = {0};
 volatile uint8_t gIsrChannelCount = 0;
@@ -64,6 +107,17 @@ uint32_t gLatestFrameCounter = 0;
 uint32_t gLatestInvalidPulseCounter = 0;
 uint32_t gLastMonitorFrameCounter = 0;
 uint32_t gLastMonitorInvalidPulseCounter = 0;
+HardwareSerial gCrsfUart(1);
+bool gCrsfUartReady = false;
+uint8_t gCrsfRxFrameBuffer[kCrsfMaxFrameLength + 2] = {0};
+uint8_t gCrsfRxFramePos = 0;
+uint8_t gCrsfRxFrameExpected = 0;
+uint16_t gCrsfRxChannels[kCrsfChannelCount] = {0};
+uint16_t gServoPulseUs[kServoCount] = {kServoPulseCenterUs, kServoPulseCenterUs, kServoPulseCenterUs};
+uint32_t gCrsfRxPacketCounter = 0;
+uint32_t gCrsfRxInvalidCounter = 0;
+uint32_t gLastCrsfRxMs = 0;
+bool gHasCrsfRxFrame = false;
 
 enum class OutputMode : uint8_t { kCrsfSerial, kPpmMonitor };
 OutputMode gOutputMode = OutputMode::kCrsfSerial;
@@ -117,6 +171,143 @@ uint16_t mapPulseUsToCrsf(uint16_t pulseUs) {
   return static_cast<uint16_t>(kCrsfMinValue + ((numerator + (denominator / 2U)) / denominator));
 }
 
+uint16_t mapCrsfToServoUs(uint16_t crsfValue) {
+  uint16_t clamped = crsfValue;
+  if (clamped < kCrsfMinValue) {
+    clamped = kCrsfMinValue;
+  } else if (clamped > kCrsfMaxValue) {
+    clamped = kCrsfMaxValue;
+  }
+  const uint32_t numerator =
+      static_cast<uint32_t>(clamped - kCrsfMinValue) * static_cast<uint32_t>(kServoPulseMaxUs - kServoPulseMinUs);
+  const uint32_t denominator = static_cast<uint32_t>(kCrsfMaxValue - kCrsfMinValue);
+  return static_cast<uint16_t>(kServoPulseMinUs + ((numerator + (denominator / 2U)) / denominator));
+}
+
+uint32_t pulseUsToPwmDuty(uint16_t pulseUs) {
+  const uint32_t periodUs = 1000000UL / SERVO_PWM_FREQUENCY_HZ;
+  const uint32_t maxDuty = (1UL << kServoPwmResolutionBits) - 1UL;
+  return (static_cast<uint32_t>(pulseUs) * maxDuty + (periodUs / 2UL)) / periodUs;
+}
+
+void setupServoOutputs() {
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    ledcSetup(kServoPwmChannels[i], SERVO_PWM_FREQUENCY_HZ, kServoPwmResolutionBits);
+    ledcAttachPin(kServoPins[i], kServoPwmChannels[i]);
+    ledcWrite(kServoPwmChannels[i], pulseUsToPwmDuty(kServoPulseCenterUs));
+  }
+}
+
+void writeServoPulseUs(uint8_t servoIndex, uint16_t pulseUs) {
+  if (servoIndex >= kServoCount) {
+    return;
+  }
+  gServoPulseUs[servoIndex] = pulseUs;
+  ledcWrite(kServoPwmChannels[servoIndex], pulseUsToPwmDuty(pulseUs));
+}
+
+void updateServoOutputsFromCrsf() {
+  const uint32_t nowMs = millis();
+  const bool crsfFresh = gHasCrsfRxFrame && ((nowMs - gLastCrsfRxMs) <= kCrsfRxTimeoutMs);
+
+  if (!crsfFresh) {
+    for (uint8_t i = 0; i < kServoCount; ++i) {
+      writeServoPulseUs(i, kServoPulseCenterUs);
+    }
+    return;
+  }
+
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    writeServoPulseUs(i, mapCrsfToServoUs(gCrsfRxChannels[i]));
+  }
+}
+
+bool decodeCrsfRcChannels(const uint8_t *payload) {
+  uint32_t bitBuffer = 0;
+  uint8_t bitsInBuffer = 0;
+  uint8_t payloadIndex = 0;
+  uint16_t decoded[kCrsfChannelCount] = {0};
+
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    while (bitsInBuffer < 11) {
+      if (payloadIndex >= kCrsfPayloadSize) {
+        return false;
+      }
+      bitBuffer |= static_cast<uint32_t>(payload[payloadIndex++]) << bitsInBuffer;
+      bitsInBuffer += 8;
+    }
+    decoded[i] = static_cast<uint16_t>(bitBuffer & 0x07FFU);
+    bitBuffer >>= 11;
+    bitsInBuffer -= 11;
+  }
+
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    gCrsfRxChannels[i] = decoded[i];
+  }
+  gLastCrsfRxMs = millis();
+  gCrsfRxPacketCounter++;
+  gHasCrsfRxFrame = true;
+  return true;
+}
+
+void processCrsfFrame(const uint8_t *frame, uint8_t frameSize) {
+  if (frameSize < 4) {
+    gCrsfRxInvalidCounter++;
+    return;
+  }
+
+  const uint8_t length = frame[1];
+  if (length < 2 || length > kCrsfMaxFrameLength || frameSize != static_cast<uint8_t>(length + 2)) {
+    gCrsfRxInvalidCounter++;
+    return;
+  }
+
+  const uint8_t expectedCrc = frame[1 + length];
+  const uint8_t computedCrc = crc8DvbS2(&frame[2], length - 1);
+  if (expectedCrc != computedCrc) {
+    gCrsfRxInvalidCounter++;
+    return;
+  }
+
+  const uint8_t type = frame[2];
+  if (type == kCrsfFrameTypeRcChannelsPacked && length == static_cast<uint8_t>(kCrsfPayloadSize + 2)) {
+    if (!decodeCrsfRcChannels(&frame[3])) {
+      gCrsfRxInvalidCounter++;
+    }
+  }
+}
+
+void processCrsfRxByte(uint8_t byteIn) {
+  if (gCrsfRxFramePos == 0) {
+    gCrsfRxFrameBuffer[gCrsfRxFramePos++] = byteIn;
+    return;
+  }
+
+  if (gCrsfRxFramePos == 1) {
+    if (byteIn < 2 || byteIn > kCrsfMaxFrameLength) {
+      gCrsfRxFramePos = 0;
+      gCrsfRxInvalidCounter++;
+      return;
+    }
+    gCrsfRxFrameBuffer[gCrsfRxFramePos++] = byteIn;
+    gCrsfRxFrameExpected = static_cast<uint8_t>(byteIn + 2);
+    return;
+  }
+
+  if (gCrsfRxFramePos >= sizeof(gCrsfRxFrameBuffer)) {
+    gCrsfRxFramePos = 0;
+    gCrsfRxInvalidCounter++;
+    return;
+  }
+
+  gCrsfRxFrameBuffer[gCrsfRxFramePos++] = byteIn;
+  if (gCrsfRxFrameExpected > 0 && gCrsfRxFramePos == gCrsfRxFrameExpected) {
+    processCrsfFrame(gCrsfRxFrameBuffer, gCrsfRxFrameExpected);
+    gCrsfRxFramePos = 0;
+    gCrsfRxFrameExpected = 0;
+  }
+}
+
 void sendCrsfRcFrame() {
   uint16_t channels[kCrsfChannelCount];
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
@@ -156,6 +347,9 @@ void sendCrsfRcFrame() {
   }
   packet[25] = crc8DvbS2(&packet[2], 1 + kCrsfPayloadSize);
   Serial.write(packet, sizeof(packet));
+  if (gCrsfUartReady) {
+    gCrsfUart.write(packet, sizeof(packet));
+  }
 }
 
 void printPpmMonitorFrame(uint32_t invalidPulses) {
@@ -172,6 +366,8 @@ void printPpmMonitorFrame(uint32_t invalidPulses) {
   const bool rateOk = (windowHz >= kExpectedMinFrameHz) && (windowHz <= kExpectedMaxFrameHz);
   const uint32_t invalidDelta = invalidPulses - gLastMonitorInvalidPulseCounter;
   const uint32_t frameAgeMs = nowMs - gLastFrameMs;
+  const uint32_t crsfRxAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
+  const bool crsfRxFresh = gHasCrsfRxFrame && (crsfRxAgeMs <= kCrsfRxTimeoutMs);
 
   uint16_t minChannelUs = 0;
   uint16_t maxChannelUs = 0;
@@ -193,6 +389,12 @@ void printPpmMonitorFrame(uint32_t invalidPulses) {
                 static_cast<unsigned long>(frameAgeMs), static_cast<unsigned long>(invalidPulses),
                 static_cast<unsigned long>(invalidDelta), static_cast<unsigned>(minChannelUs),
                 static_cast<unsigned>(maxChannelUs));
+  Serial.printf(" | crsf_rx=%s age=%lums pkts=%lu bad=%lu",
+                crsfRxFresh ? "ok" : (gHasCrsfRxFrame ? "stale" : "none"),
+                static_cast<unsigned long>(crsfRxAgeMs), static_cast<unsigned long>(gCrsfRxPacketCounter),
+                static_cast<unsigned long>(gCrsfRxInvalidCounter));
+  Serial.printf(" | servo=%u,%u,%u", static_cast<unsigned>(gServoPulseUs[0]), static_cast<unsigned>(gServoPulseUs[1]),
+                static_cast<unsigned>(gServoPulseUs[2]));
   for (uint8_t i = 0; i < gLatestChannelCount; ++i) {
     Serial.printf(" ch%u=%u", static_cast<unsigned>(i + 1), static_cast<unsigned>(gLatestChannels[i]));
   }
@@ -281,6 +483,20 @@ void handleModeButton() {
   }
 }
 
+void drainCrsfRxInput() {
+#if CRSF_UART_ENABLED
+  if (!gCrsfUartReady) {
+    return;
+  }
+  while (gCrsfUart.available() > 0) {
+    const int byteRead = gCrsfUart.read();
+    if (byteRead >= 0) {
+      processCrsfRxByte(static_cast<uint8_t>(byteRead));
+    }
+  }
+#endif
+}
+
 void updateLed() {
   const uint32_t nowMs = millis();
   const bool hasSignal = (nowMs - gLastFrameMs) <= kSignalTimeoutMs;
@@ -299,6 +515,11 @@ void setup() {
   pinMode(PPM_INPUT_PIN, INPUT);
   pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
   Serial.begin(115200);
+#if CRSF_UART_ENABLED
+  gCrsfUart.begin(CRSF_UART_BAUD, SERIAL_8N1, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN);
+  gCrsfUartReady = true;
+#endif
+  setupServoOutputs();
   gButtonRawState = digitalRead(MODE_BUTTON_PIN);
   gButtonStableState = gButtonRawState;
   gLastButtonChangeMs = millis();
@@ -309,6 +530,8 @@ void setup() {
 void loop() {
   uint32_t invalidPulses = 0;
   const bool frameReady = copyFrameFromIsr(invalidPulses);
+  drainCrsfRxInput();
+  updateServoOutputsFromCrsf();
   handleModeButton();
 
   if (frameReady) {

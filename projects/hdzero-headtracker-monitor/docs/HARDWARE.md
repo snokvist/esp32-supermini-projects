@@ -8,13 +8,21 @@
 ## USB / Serial
 
 - Default upload/monitor port: `/dev/ttyACM0`
-- Baud: `115200`
+- USB serial monitor baud: `115200`
+- CRSF UART link: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud
+- Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
 
 ## Pin Map (Initial)
 
 - LED pin: `GPIO8` (adjust per board variant)
 - PPM input pin: `GPIO2` (configurable via `PPM_INPUT_PIN`)
 - Mode toggle button pin: `GPIO9` (onboard BOOT button, active low, internal pull-up enabled)
+- CRSF UART1 TX pin: `GPIO21` (to FC/receiver CRSF RX)
+- CRSF UART1 RX pin: `GPIO20` (from FC/receiver CRSF TX, RC packets parsed)
+- Servo PWM outputs (`100Hz`):
+  - Servo1 (CRSF CH1): `GPIO3`
+  - Servo2 (CRSF CH2): `GPIO4`
+  - Servo3 (CRSF CH3): `GPIO5`
 
 BOOT/strapping caution:
 
@@ -33,6 +41,13 @@ Connect:
 
 - BoxPro tip -> ESP32 `GPIO2`
 - BoxPro sleeve -> ESP32 `GND`
+- ESP32 `GPIO21` -> target CRSF RX
+- target CRSF TX -> ESP32 `GPIO20` (incoming CRSF RC input)
+- ESP32 `GND` -> target device GND
+- servo1 signal -> ESP32 `GPIO3`
+- servo2 signal -> ESP32 `GPIO4`
+- servo3 signal -> ESP32 `GPIO5`
+- servo GND -> ESP32 GND (use external servo power rail as needed)
 
 Recommended protection while validating unknown signal levels:
 
@@ -44,7 +59,10 @@ Bring-up checklist:
 1. Enable head tracking on BoxPro+ menu.
 2. Plug jack and power both devices.
 3. Flash this project.
-4. Default runtime mode emits CRSF RC channel frames on serial (`115200`).
+4. Default runtime mode emits CRSF RC channel frames on:
+   - USB CDC (`/dev/ttyACM0`, monitor at `115200`)
+   - UART1 `GPIO21` TX + `GPIO20` RX at `420000`
+   - PWM outputs at `100Hz` on `GPIO3/4/5` from incoming CRSF CH1/CH2/CH3
 5. Press BOOT to switch to PPM monitor text mode when needed.
 6. In monitor mode, open serial monitor at `115200` and confirm:
    - `win=...Hz(ok)` stays near `~50Hz` (warns outside `45..55Hz`)

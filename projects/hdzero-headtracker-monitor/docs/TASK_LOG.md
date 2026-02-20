@@ -59,3 +59,58 @@ Use this file as a running implementation log.
 - Initialize monitor print timer on mode switch so first `win` rate sample is based on a real ~200ms window.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+
+### 2026-02-19 - CRSF UART1 Mirror Output
+
+- Added CRSF packet mirroring to a hardware UART while keeping existing USB CDC output.
+- CRSF now transmits in CRSF mode to:
+  - USB CDC `Serial` (`/dev/ttyACM0`)
+  - UART1 TX `GPIO21` at `420000` baud
+- Added compile-time knobs in firmware:
+  - `CRSF_UART_ENABLED`
+  - `CRSF_UART_TX_PIN`
+  - `CRSF_UART_RX_PIN`
+  - `CRSF_UART_BAUD`
+- Kept mode behavior unchanged:
+  - CRSF mode outputs binary CRSF frames
+  - monitor mode remains 5Hz human-readable text
+- Updated README and hardware docs with UART wiring and USB-vs-UART behavior note.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful.
+
+### 2026-02-20 - UART1 RX/TX Wiring + PWM Pin Plan
+
+- Updated CRSF UART1 config to use both pins:
+  - TX: `GPIO21`
+  - RX: `GPIO20`
+  - Baud: `420000`
+- RX handling is currently non-parsing and non-blocking: incoming UART bytes are drained/ignored to keep room for future telemetry support.
+- Reserved 3 PWM output pins for upcoming CRSF->servo mapping at `100Hz`:
+  - `GPIO3`, `GPIO4`, `GPIO5`
+- Updated README and hardware docs with:
+  - explicit UART RX/TX wiring
+  - note that RX is currently ignored
+  - planned PWM pin assignments
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+
+### 2026-02-20 - CRSF RX To 3x Servo PWM Outputs
+
+- Replaced UART1 RX drain-only behavior with CRSF frame parsing on `GPIO20` (RX).
+- Implemented CRSF `0x16` (`RC_CHANNELS_PACKED`) decode path for incoming channel data.
+- Added 3 servo PWM outputs via LEDC:
+  - `GPIO3` <- CRSF CH1
+  - `GPIO4` <- CRSF CH2
+  - `GPIO5` <- CRSF CH3
+  - frequency: `100Hz`
+- Added CRSF RX timeout safety:
+  - if no valid CRSF RX packet for >`500ms`, all servo outputs return to center (`1500us`).
+- Added monitor-mode debug fields:
+  - CRSF RX status (`none/ok/stale`)
+  - CRSF RX age
+  - RX packet/invalid counters
+  - live servo pulse outputs
+- Updated README and hardware docs with servo wiring and runtime behavior details.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
