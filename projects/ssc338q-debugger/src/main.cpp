@@ -4,7 +4,7 @@
 // --- Pin assignments (ESP32-C3 SuperMini) ---
 #define CAMERA_TX_PIN 21  // UART1 TX -> Camera RX
 #define CAMERA_RX_PIN 20  // UART1 RX <- Camera TX
-#define RESET_PIN      3  // Open-drain reset output (active-low)
+#define RESET_PIN      4  // Push-pull reset output (active-low)
 #define LED_PIN        8  // Onboard status LED
 
 // --- UART config ---
@@ -32,9 +32,8 @@ static void start_reset() {
   g_resetting = true;
   g_reset_start_ms = millis();
   g_reset_count++;
-  // Pull reset low (active-low assert)
-  pinMode(RESET_PIN, OUTPUT);
-  digitalWrite(RESET_PIN, LOW);
+  // Drive reset LOW (active-low assert)
+  gpio_set_level(GPIO_NUM_4, 0);
   // LED solid during reset
   digitalWrite(LED_PIN, LOW);  // ESP32-C3 SuperMini LED is active-low
   Serial.printf("\r\n[debugger] Reset pulse started (%u ms) [count=%u]\r\n",
@@ -42,8 +41,8 @@ static void start_reset() {
 }
 
 static void end_reset() {
-  // Release to high-Z; camera pull-up brings RESET high
-  pinMode(RESET_PIN, INPUT);
+  // Drive reset HIGH to release
+  gpio_set_level(GPIO_NUM_4, 1);
   g_resetting = false;
   digitalWrite(LED_PIN, HIGH);  // LED off (active-low)
   Serial.printf("[debugger] Reset released, camera booting\r\n");
@@ -71,8 +70,13 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);  // OFF (active-low)
 
-  // Reset pin: high-Z by default (camera pull-up keeps RESET high)
-  pinMode(RESET_PIN, INPUT);
+  // Reset pin: push-pull, drive HIGH (inactive) by default.
+  // Camera RST pad has no pull-up, so we actively hold it HIGH.
+  // NOTE: The SSC338Q RST pin may require a devmem register write on the
+  // camera side to configure the pad as a reset input before this works.
+  gpio_reset_pin(GPIO_NUM_4);
+  gpio_set_direction(GPIO_NUM_4, GPIO_MODE_INPUT_OUTPUT);
+  gpio_set_level(GPIO_NUM_4, 1);
 
   // USB CDC serial to host
   Serial.begin(CAMERA_BAUD);

@@ -15,7 +15,7 @@ The ESP32-C3 SuperMini acts as a transparent UART bridge between a host PC (USB 
 ```
 Host PC  <-- USB CDC -->  ESP32-C3  <-- UART1 (115200) -->  Camera UART0
                               |
-                         GPIO3 (open-drain) --> Camera RESET (active-low)
+                         GPIO4 (push-pull) --> Camera RESET (active-low)
 ```
 
 ## Wiring (4 wires)
@@ -24,7 +24,7 @@ Host PC  <-- USB CDC -->  ESP32-C3  <-- UART1 (115200) -->  Camera UART0
 |--------------|------------|----------------------|
 | GPIO21 (TX)  | UART0 RX   | Yellow |
 | GPIO20 (RX)  | UART0 TX   | Green  |
-| GPIO3        | RESET (JST)| White  |
+| GPIO4        | RESET (JST)| White  |
 | GND          | GND        | Black  |
 
 See `docs/HARDWARE.md` for detailed pinout and wiring notes.
@@ -133,7 +133,7 @@ This confirms the firmware is running and the USB CDC link works.
 |---------|-------|
 | No boot message | Verify USB cable is data-capable (not charge-only). Try a different port. |
 | Boot message OK but no camera data | Check TX/RX wiring — they must be crossed (ESP TX→Camera RX, ESP RX→Camera TX). Verify camera is powered. |
-| Ctrl-R has no effect | Verify GPIO3 is wired to the camera RESET pin. Check that the camera has a pull-up on RESET. |
+| Ctrl-R has no effect | Verify GPIO4 is wired to the camera RESET pin. Check that the camera has a pull-up on RESET. |
 | Garbled camera output | Confirm camera UART is 115200 baud, 8N1. |
 | `/dev/ttyACM0` not found | Board may enumerate as a different device — check `ls /dev/ttyACM*` or `dmesg | tail`. |
 
@@ -190,7 +190,7 @@ echo "uname -a" > /dev/ttyACM0
 wait
 ```
 
-**Trigger a camera reset** (200ms active-low pulse via GPIO3):
+**Trigger a camera reset** (200ms active-low pulse via GPIO4):
 
 ```bash
 # Send Ctrl-R (0x12) to the bridge

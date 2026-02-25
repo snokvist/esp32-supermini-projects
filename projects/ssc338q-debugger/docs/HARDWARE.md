@@ -19,7 +19,7 @@
 | Status LED | GPIO8 | Output | Onboard LED, active-low |
 | Camera UART TX | GPIO21 | Output | UART1 TX -> Camera RX |
 | Camera UART RX | GPIO20 | Input  | UART1 RX <- Camera TX |
-| Camera RESET | GPIO3 | Open-drain | INPUT (high-Z) normally; OUTPUT LOW for reset pulse |
+| Camera RESET | GPIO4 | Push-pull | OUTPUT HIGH normally; OUTPUT LOW for reset pulse |
 
 ## ESP32-C3 SuperMini Pinout Reference
 
@@ -41,18 +41,23 @@ The SSC338Q exposes a 3.3V UART debug console (typically 115200 8N1). Connect:
 
 ### Reset Line (2-pin JST Header)
 
-The camera has an active-low reset line accessible via a 2-pin JST connector:
+The camera has a reset line accessible via a 2-pin JST connector:
 
-- Pin 1: RESET (active-low, camera has internal pull-up)
+- Pin 1: RESET (active-low, no internal pull-up)
 - Pin 2: GND
 
-The ESP32 drives RESET using a safe open-drain approach:
+The ESP32 drives RESET using push-pull (GPIO4):
 
-1. **Normal**: GPIO3 configured as `INPUT` (high-impedance) - camera's pull-up keeps RESET high
-2. **Reset**: GPIO3 configured as `OUTPUT`, driven `LOW` - pulls RESET to GND
-3. **Release**: GPIO3 returned to `INPUT` - camera's pull-up restores RESET high, camera boots
+1. **Normal**: GPIO4 driven `HIGH` — camera runs
+2. **Reset**: GPIO4 driven `LOW` for 200ms — camera resets
+3. **Release**: GPIO4 driven `HIGH` — camera boots
 
 No external transistor or level shifter is needed (both are 3.3V logic).
+
+**NOTE**: The SSC338Q RST pad may require a `devmem` register write on the
+camera side to configure the SoC pin as a reset input before the external
+reset signal takes effect. This is a camera-side configuration issue, not
+an ESP32 issue.
 
 ## Wiring Diagram
 
@@ -62,6 +67,6 @@ ESP32-C3 SuperMini          SSC338Q Camera
 
 GPIO21 (TX) ───────────────> UART0 RX
 GPIO20 (RX) <─────────────── UART0 TX
-GPIO3       ───────────────> RESET (JST pin 1)
+GPIO4       ───────────────> RESET (JST pin 1)
 GND         ───────────────> GND   (JST pin 2 / UART GND)
 ```
