@@ -54,10 +54,10 @@ The ESP32 drives RESET using push-pull (GPIO4):
 
 No external transistor or level shifter is needed (both are 3.3V logic).
 
-**NOTE**: The SSC338Q RST pad may require a `devmem` register write on the
-camera side to configure the SoC pin as a reset input before the external
-reset signal takes effect. This is a camera-side configuration issue, not
-an ESP32 issue.
+**NOTE**: The SSC338Q RST pad is wired to SoC GPIO 10, which is a
+general-purpose I/O — not a hardware reset input. A software daemon
+(`S99resetd`) must run on the camera to monitor this GPIO and trigger
+`reboot` when the ESP32 pulls it LOW. See `camera-scripts/S99resetd`.
 
 ## Wiring Diagram
 

@@ -1,0 +1,66 @@
+#!/bin/sh
+#
+# S99resetd - External reset monitor for SSC338Q + ESP32 debugger
+#
+# Monitors a GPIO input pin for a LOW signal from the ESP32 debug bridge.
+# When the pin is held LOW for ~0.5s, the camera reboots.
+#
+# Install on camera:
+#   scp S99resetd root@192.168.2.10:/etc/init.d/
+#   ssh root@192.168.2.10 "chmod +x /etc/init.d/S99resetd"
+#   ssh root@192.168.2.10 "reboot"
+#
+# The daemon starts automatically on boot via init.d.
+
+# GPIO pin connected to ESP32 reset output (GPIO 10 per OpenIPC SSC338Q docs)
+RESET_GPIO=${RESET_GPIO:-10}
+PIDFILE="/var/run/resetd.pid"
+
+start() {
+    echo "Starting resetd on GPIO ${RESET_GPIO}..."
+
+    # Export and configure the GPIO as input
+    if [ ! -d "/sys/class/gpio/gpio${RESET_GPIO}" ]; then
+        echo "${RESET_GPIO}" > /sys/class/gpio/export 2>/dev/null
+    fi
+    echo "in" > /sys/class/gpio/gpio${RESET_GPIO}/direction
+
+    # Background monitor loop
+    (
+        count=0
+        while true; do
+            val=$(cat /sys/class/gpio/gpio${RESET_GPIO}/value)
+            if [ "$val" -eq 0 ]; then
+                count=$((count + 1))
+                # 2 counts @ 0.25s = 0.5s hold triggers reboot
+                if [ "$count" -ge 2 ]; then
+                    echo "resetd: GPIO ${RESET_GPIO} held LOW, rebooting" | logger -t resetd
+                    reboot
+                fi
+            else
+                count=0
+            fi
+            sleep 0.25
+        done
+    ) &
+
+    echo $! > "$PIDFILE"
+}
+
+stop() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat $PIDFILE)" 2>/dev/null
+        rm -f "$PIDFILE"
+        echo "Stopped resetd"
+    fi
+}
+
+case "$1" in
+    start)  start ;;
+    stop)   stop ;;
+    restart) stop; start ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac

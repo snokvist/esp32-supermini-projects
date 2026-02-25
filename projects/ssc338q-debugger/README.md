@@ -133,7 +133,7 @@ This confirms the firmware is running and the USB CDC link works.
 |---------|-------|
 | No boot message | Verify USB cable is data-capable (not charge-only). Try a different port. |
 | Boot message OK but no camera data | Check TX/RX wiring — they must be crossed (ESP TX→Camera RX, ESP RX→Camera TX). Verify camera is powered. |
-| Ctrl-R has no effect | Verify GPIO4 is wired to the camera RESET pin. Check that the camera has a pull-up on RESET. |
+| Ctrl-R has no effect | Verify GPIO4 is wired to camera RST pad. Ensure `S99resetd` is running on the camera (see below). |
 | Garbled camera output | Confirm camera UART is 115200 baud, 8N1. |
 | `/dev/ttyACM0` not found | Board may enumerate as a different device — check `ls /dev/ttyACM*` or `dmesg | tail`. |
 
@@ -151,6 +151,33 @@ All other bytes are forwarded to the camera as-is.
 - **Blink**: Data activity (either direction)
 - **Solid ON**: Reset pulse in progress
 - **Off**: Idle
+
+## Camera-Side Reset Setup
+
+The SSC338Q RST JST pad is connected to the SoC's GPIO 10, which is a general-purpose pin — not a hardware reset input. A daemon on the camera must monitor this GPIO and trigger a software reboot when the ESP32 pulls it LOW.
+
+### Install the reset daemon
+
+```bash
+scp -O camera-scripts/S99resetd root@192.168.2.10:/etc/init.d/
+ssh root@192.168.2.10 "chmod +x /etc/init.d/S99resetd"
+```
+
+The daemon starts automatically on boot. To start it immediately without rebooting:
+
+```bash
+ssh root@192.168.2.10 "/etc/init.d/S99resetd start"
+```
+
+### How it works
+
+1. ESP32 receives Ctrl-R from host
+2. ESP32 drives GPIO4 LOW for 200ms
+3. Camera's GPIO 10 goes LOW (wired to ESP32 GPIO4)
+4. `S99resetd` daemon detects the LOW signal (~0.5s threshold)
+5. Camera executes `reboot`
+
+The daemon uses 1% CPU (polls every 250ms via sysfs).
 
 ## AI Agent Usage (Claude Code / Codex)
 

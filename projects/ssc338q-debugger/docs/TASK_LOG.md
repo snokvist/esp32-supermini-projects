@@ -30,3 +30,14 @@ Use this file as a running implementation log.
 - Added AI agent usage reference to README for Claude Code / Codex integration.
 - Verified on hardware: clean camera boot log, login prompt, reset, and
   status commands all working.
+
+### 2026-02-25 - Reset Pin Fix and Camera-Side Daemon
+
+- Moved reset from GPIO3 to GPIO4 (GPIO3 unresponsive on this SuperMini)
+- Changed from open-drain to push-pull (camera RST pad has no pull-up)
+- Switched to ESP-IDF gpio API for reliable pin control
+- Discovered: SSC338Q RST JST pad is SoC GPIO 10, a general-purpose I/O
+  not a hardware reset. Requires software daemon to trigger reboot.
+- Created `camera-scripts/S99resetd`: init.d daemon that monitors GPIO 10
+  and calls `reboot` when held LOW for ~0.5s
+- Verified end-to-end: Ctrl-R → ESP32 GPIO4 LOW → camera GPIO 10 → reboot
