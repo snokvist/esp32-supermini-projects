@@ -17,6 +17,10 @@ RESET_GPIO=${RESET_GPIO:-10}
 PIDFILE="/var/run/resetd.pid"
 
 start() {
+    # Enable UART2 pad mux and set baud rate for console
+    devmem 0x1F207890 16 0x8
+    stty -F /dev/ttyS2 115200 cs8 -cstopb -parenb
+
     echo "Starting resetd on GPIO ${RESET_GPIO}..."
 
     # Export and configure the GPIO as input
