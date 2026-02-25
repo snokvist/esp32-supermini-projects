@@ -1,0 +1,67 @@
+# Hardware Notes - ssc338q-debugger
+
+## Target Board
+
+- Board config: `esp32-c3-devkitm-1`
+- Environment: `esp32c3_supermini`
+- MCU: ESP32-C3 (RISC-V, single core, 160 MHz)
+
+## USB / Serial
+
+- Default upload/monitor port: `/dev/ttyACM0`
+- Baud: `115200`
+- USB CDC on boot enabled (`ARDUINO_USB_CDC_ON_BOOT=1`)
+
+## Pin Map
+
+| Function | GPIO | Direction | Notes |
+|----------|------|-----------|-------|
+| Status LED | GPIO8 | Output | Onboard LED, active-low |
+| Camera UART TX | GPIO21 | Output | UART1 TX -> Camera RX |
+| Camera UART RX | GPIO20 | Input  | UART1 RX <- Camera TX |
+| Camera RESET | GPIO3 | Open-drain | INPUT (high-Z) normally; OUTPUT LOW for reset pulse |
+
+## ESP32-C3 SuperMini Pinout Reference
+
+Available GPIOs: 0-10, 20, 21
+
+- GPIO0-GPIO10: General purpose
+- GPIO20: Default UART0 RX (remapped to UART1 RX in firmware)
+- GPIO21: Default UART0 TX (remapped to UART1 TX in firmware)
+- GPIO8: Onboard LED (active-low on most SuperMini boards)
+
+## Camera Connection
+
+### UART0 Debug Port
+
+The SSC338Q exposes a 3.3V UART debug console (typically 115200 8N1). Connect:
+
+- Camera TX -> ESP32 GPIO20 (UART1 RX)
+- Camera RX -> ESP32 GPIO21 (UART1 TX)
+
+### Reset Line (2-pin JST Header)
+
+The camera has an active-low reset line accessible via a 2-pin JST connector:
+
+- Pin 1: RESET (active-low, camera has internal pull-up)
+- Pin 2: GND
+
+The ESP32 drives RESET using a safe open-drain approach:
+
+1. **Normal**: GPIO3 configured as `INPUT` (high-impedance) - camera's pull-up keeps RESET high
+2. **Reset**: GPIO3 configured as `OUTPUT`, driven `LOW` - pulls RESET to GND
+3. **Release**: GPIO3 returned to `INPUT` - camera's pull-up restores RESET high, camera boots
+
+No external transistor or level shifter is needed (both are 3.3V logic).
+
+## Wiring Diagram
+
+```
+ESP32-C3 SuperMini          SSC338Q Camera
+==================          ==============
+
+GPIO21 (TX) ───────────────> UART0 RX
+GPIO20 (RX) <─────────────── UART0 TX
+GPIO3       ───────────────> RESET (JST pin 1)
+GND         ───────────────> GND   (JST pin 2 / UART GND)
+```
