@@ -185,3 +185,205 @@ Use this file as a running implementation log.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
   - `pio run -t upload --upload-port /dev/ttyACM0` successful.
+
+### 2026-02-27 - OLED Status Screen + Servo Pin Reassignment
+
+- Added SSD1306 OLED support using the same display stack as `supermini-oled-hello`:
+  - `Adafruit SSD1306`
+  - `Adafruit GFX`
+  - I2C on `GPIO4`/`GPIO5` at address `0x3C`
+- Added a HDZero-specific six-line status layout instead of the OLED demo mode cycle:
+  - inverse header with output mode + signal state
+  - `PAN`, `ROL`, `TIL` latest PPM pulse widths
+  - `S1`, `S2`, `S3` live servo outputs
+  - smoothed PPM rate, CRSF RX freshness, and AP IP
+- Kept BOOT button behavior unchanged:
+  - BOOT still toggles `CRSF` vs `PPM monitor`
+  - OLED mirrors runtime state instead of introducing separate display modes
+- Reassigned default servo outputs to avoid the new OLED I2C reservation:
+  - Servo1 -> `GPIO6`
+  - Servo2 -> `GPIO7`
+  - Servo3 -> `GPIO10`
+- Reserved `GPIO4/5` in runtime validation so the web UI cannot reassign OLED pins to other functions.
+- Kept firmware resilient if no OLED is connected:
+  - serial warning on init failure
+  - CRSF/servo/web features continue running
+- Updated README and hardware docs with the new default pin map and OLED verification steps.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=2 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=6,7,10`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+- direct visual confirmation of the OLED contents is still pending
+
+### 2026-02-27 - Adjacent Servo Pin Defaults
+
+- Changed the default pin map to place all three servo outputs on adjacent GPIOs:
+  - Servo1 -> `GPIO0`
+  - Servo2 -> `GPIO1`
+  - Servo3 -> `GPIO2`
+- Moved default BoxPro PPM input from `GPIO2` to `GPIO10` to free the contiguous servo block.
+- Bumped the NVS settings schema version from `1` to `2` so previously stored defaults are replaced with the new adjacent servo / PPM pin map after flash.
+- Kept the OLED reservation unchanged:
+  - `GPIO4` = SDA
+  - `GPIO5` = SCL
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+
+### 2026-02-27 - Three OLED Screens + Debug-Only AP
+
+- Reworked BOOT-button mode handling into three runtime screens:
+  - `HDZ>CRSF`
+  - `UART>PWM`
+  - `DEBUG CFG`
+- Replaced the previous single text status page with screen-specific OLED layouts:
+  - `HDZ>CRSF`: three centered bar graphs for `PAN`, `ROL`, `TIL`
+  - `UART>PWM`: three centered bar graphs for `S1`, `S2`, `S3`
+  - `DEBUG CFG`: compact text summary for PPM health, CRSF RX health, AP state, and active pin map
+- Kept the underlying signal pipeline active:
+  - PPM still maps to CRSF output
+  - UART1 CRSF RX still drives servo PWM outputs
+- Restricted AP/web activity to the debug screen only:
+  - entering `DEBUG CFG` starts SoftAP + WebServer
+  - leaving `DEBUG CFG` stops both
+- Kept the existing web field names for compatibility, but `output_mode_live` and `output_mode_default` now select the three OLED/runtime screens instead of the old 2-state mode.
+- Extended status JSON with:
+  - `web_ui_active`
+  - `output_mode_label`
+- Updated README and hardware docs to describe the new three-screen workflow.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+  - direct visual confirmation of BOOT-cycled screen changes and debug-only AP behavior is still pending
+
+### 2026-02-27 - Short-Press Main Screens + Long-Press Debug
+
+- Reworked BOOT handling again for cleaner day-to-day operation:
+  - short press toggles only between `HDZ>CRSF` and `UART>PWM`
+  - long press (`>3s`) enters `DEBUG CFG`
+  - short press in `DEBUG CFG` returns to the last graph screen
+- Kept debounce handling and added explicit press-duration tracking with one-shot long-press detection.
+- Simplified PPM frame-rate reporting:
+  - removed the expected-min/expected-max comparison from runtime behavior
+  - debug serial output now reports measured `hz` directly instead of `win=...Hz(ok/warn)`
+- Polished the graph screens:
+  - added edge and quarter-position guide marks
+  - kept the center line
+  - added a live marker that cuts through the filled bar for faster visual reading
+- Updated README and hardware docs to describe the final button interaction model and simplified PPM reporting.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+  - direct manual confirmation of short-press/long-press behavior is still pending
+
+### 2026-02-27 - Debug Screen PPM Smoothing
+
+- Simplified the OLED `DEBUG CFG` PPM row further:
+  - removed the rapidly changing frame-age millisecond value from the display
+  - changed the OLED debug PPM line to show the same windowed measured Hz used by serial output
+- Kept serial debug output detailed; this change aligns the OLED debug line with the already-stable serial measurement.
+- Updated README and hardware notes to describe the windowed debug PPM display.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial output after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+    - observed short-press transitions:
+      - `Screen -> UART>PWM (button-short)`
+      - `Screen -> HDZ>CRSF (button-short)`
+
+### 2026-02-27 - OLED Refresh Reduced To 10Hz
+
+- Reduced the OLED redraw cap from `20Hz` (`50ms`) to `10Hz` (`100ms`) to make the debug display less visually jumpy.
+- Kept the existing mode-switch redraw behavior instant by preserving the forced refresh on screen changes.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+
+### 2026-02-27 - PPM Window Cleanup + Servo Write Reduction
+
+- Removed the now-dead expected frame-Hz threshold settings from runtime state and NVS persistence.
+- Switched the status/API PPM rate fields to the same stable windowed measurement used by the OLED and debug serial output:
+  - `frame_hz`
+  - `frame_hz_ema`
+  - `ppm_window_hz`
+- Added a small PWM-write optimization:
+  - servo outputs now skip redundant `ledcWrite()` calls when the target pulse width has not changed
+  - stale CRSF no longer rewrites centered `1500us` outputs every loop
+- Moved the shared debug monitor sampling into a single helper so OLED, serial, and status reporting stay aligned.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+  - observed expected binary CRSF on USB CDC outside `DEBUG CFG`
+
+### 2026-02-27 - Debug Serial Age Fix + Documentation Pass
+
+- Fixed a debug-monitor regression where serial `age=...ms` could appear pinned to a repeatable loop-phase value instead of reflecting frame-timed sampling.
+- Updated the shared monitor window so debug serial sampling advances only on fresh PPM frame boundaries.
+- Clarified project documentation to match current firmware behavior:
+  - `/dev/ttyACM0` is binary CRSF outside `DEBUG CFG`
+  - `DEBUG CFG` is the readable serial console mode
+  - status JSON PPM-rate fields use the stable windowed measurement
+  - debug `age` describes latest frame age at each monitor sample
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+
+### 2026-02-27 - Remove PPM Age From Debug Serial
+
+- Removed the PPM-side `age=...ms` field from the human-readable debug serial line.
+- Reason:
+  - after the earlier timing fixes it no longer carried a useful signal-health meaning
+  - it either locked to a loop-phase artifact or collapsed to near-zero on frame-timed sampling
+- Kept the useful fields:
+  - measured windowed `hz`
+  - `invalid(+delta)`
+  - CRSF RX age/status
+  - live servo and channel values
+- Updated README and hardware notes to stop describing the removed PPM age field.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`

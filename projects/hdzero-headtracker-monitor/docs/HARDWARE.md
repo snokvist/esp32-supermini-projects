@@ -11,6 +11,20 @@
 - USB serial monitor baud: `115200`
 - CRSF UART link: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud
 - Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
+- Runtime USB CDC behavior:
+  - `HDZ>CRSF` and `UART>PWM`: `/dev/ttyACM0` carries binary CRSF frames
+  - `DEBUG CFG`: `/dev/ttyACM0` carries human-readable debug text
+
+## OLED Module
+
+- Type: 0.96" I2C OLED (`SSD1306`, `128x64`)
+- Default address: `0x3C`
+- Logic level: `3.3V`
+- Fixed OLED I2C pins:
+  - `GPIO4` = `SDA`
+  - `GPIO5` = `SCL`
+- Design choice:
+  - `GPIO4/5` are reserved for the OLED and are blocked from runtime reassignment in the web settings validator
 
 ## WiFi / Web UI
 
@@ -18,8 +32,8 @@
 - AP password: `waybeam-backpack`
 - AP IP: `10.100.0.1`
 - AP subnet: `255.255.255.0` (`10.100.0.x`)
-- DHCP: enabled (ESP32 SoftAP built-in DHCP server)
-- Web UI: `http://10.100.0.1/`
+- DHCP: enabled only while `DEBUG CFG` screen is active
+- Web UI: `http://10.100.0.1/` while `DEBUG CFG` is active
 - Status JSON includes `nvs_ready` (1 when preferences persistence is available).
 
 ## Configurable GPIO Guardrails
@@ -28,18 +42,23 @@
   - `GPIO0..GPIO10`
   - `GPIO20`, `GPIO21`
 - This intentionally excludes USB D-/D+ pins and unsupported/unrouted GPIOs to reduce brick-risk while using native USB CDC.
+- Additional OLED reservation:
+  - `GPIO4`, `GPIO5` are treated as reserved and cannot be assigned to LED, PPM, button, UART, or servo roles
 
 ## Pin Map (Initial)
 
 - LED pin: `GPIO8` (adjust per board variant)
-- PPM input pin: `GPIO2` (configurable via `PPM_INPUT_PIN`)
+- PPM input pin: `GPIO10` (configurable via `PPM_INPUT_PIN`)
 - Mode toggle button pin: `GPIO9` (onboard BOOT button, active low, internal pull-up enabled)
+- OLED I2C:
+  - `GPIO4` -> `SDA`
+  - `GPIO5` -> `SCL`
 - CRSF UART1 TX pin: `GPIO21` (to FC/receiver CRSF RX)
 - CRSF UART1 RX pin: `GPIO20` (from FC/receiver CRSF TX, RC packets parsed)
 - Servo PWM outputs (`100Hz`):
-  - Servo1 (CRSF CH1): `GPIO3`
-  - Servo2 (CRSF CH2): `GPIO4`
-  - Servo3 (CRSF CH3): `GPIO5`
+  - Servo1 (CRSF CH1): `GPIO0`
+  - Servo2 (CRSF CH2): `GPIO1`
+  - Servo3 (CRSF CH3): `GPIO2`
 
 BOOT/strapping caution:
 
@@ -56,14 +75,18 @@ HDZero BoxPro+ headtracker jack is a 2-contact 3.5mm TS connection:
 
 Connect:
 
-- BoxPro tip -> ESP32 `GPIO2`
+- BoxPro tip -> ESP32 `GPIO10`
 - BoxPro sleeve -> ESP32 `GND`
+- OLED `VCC` -> ESP32 `3V3`
+- OLED `GND` -> ESP32 `GND`
+- OLED `SDA` -> ESP32 `GPIO4`
+- OLED `SCL` -> ESP32 `GPIO5`
 - ESP32 `GPIO21` -> target CRSF RX
 - target CRSF TX -> ESP32 `GPIO20` (incoming CRSF RC input)
 - ESP32 `GND` -> target device GND
-- servo1 signal -> ESP32 `GPIO3`
-- servo2 signal -> ESP32 `GPIO4`
-- servo3 signal -> ESP32 `GPIO5`
+- servo1 signal -> ESP32 `GPIO0`
+- servo2 signal -> ESP32 `GPIO1`
+- servo3 signal -> ESP32 `GPIO2`
 - servo GND -> ESP32 GND (use external servo power rail as needed)
 
 Recommended protection while validating unknown signal levels:
@@ -76,21 +99,37 @@ Bring-up checklist:
 1. Enable head tracking on BoxPro+ menu.
 2. Plug jack and power both devices.
 3. Flash this project.
-4. Default runtime mode emits CRSF RC channel frames on:
-   - USB CDC (`/dev/ttyACM0`, monitor at `115200`)
-   - UART1 `GPIO21` TX + `GPIO20` RX at `420000`
-   - PWM outputs at `100Hz` on `GPIO3/4/5` from incoming CRSF CH1/CH2/CH3
-5. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
+4. Confirm default runtime behavior:
+   - default screen is `HDZ>CRSF`
+   - BOOT short press toggles `HDZ>CRSF` <-> `UART>PWM`
+   - BOOT long press (`>3s`) enters `DEBUG CFG`
+   - short press in `DEBUG CFG` returns to the last graph screen
+   - CRSF is emitted on UART1 `GPIO21` TX and on USB CDC while not in `DEBUG CFG`
+   - PWM outputs run at `100Hz` on `GPIO0/1/2` from incoming CRSF CH1/CH2/CH3
+   - OLED output is active on `GPIO4/5`
+5. In `HDZ>CRSF`, verify:
+   - header shows `OK`, `WAIT`, or `STAL`
+   - three centered graphs track `PAN`, `ROL`, `TIL`
+   - graph rows show edge/quarter/center guide marks and a live value marker
+6. In `UART>PWM`, verify:
+   - header shows `RXOK`, `NONE`, or `STAL`
+   - three centered graphs track `S1`, `S2`, `S3`
+   - graph rows show edge/quarter/center guide marks and a live value marker
+7. In `DEBUG CFG`, verify:
+   - AP starts only in this screen
+   - OLED shows AP state, health summary, and pin map
+   - PPM line shows the same stable windowed measured Hz used by the serial debug output and status API
+   - serial diagnostics are active on `/dev/ttyACM0`
+8. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
    - settings page loads
    - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
-   - status JSON updates (CRSF RX counters / servo values)
+   - status JSON updates (`web_ui_active`, `output_mode_label`, CRSF RX counters, servo values, `oled_ready`)
    - status JSON includes `nvs_ready: 1` during normal operation
    - apply/save actions are accepted
    - `Reset to defaults` restores firmware defaults live and persists them
-   - invalid pin selections are rejected by API validation
-6. Press BOOT to switch to PPM monitor text mode when needed.
-7. In monitor mode, open serial monitor at `115200` and confirm:
-   - `win=...Hz(ok)` stays near `~50Hz` (warns outside `45..55Hz`)
+   - invalid pin selections are rejected by API validation, including any attempt to use `GPIO4/5`
+9. In `DEBUG CFG`, open serial monitor at `115200` and confirm:
+   - `hz=...Hz` reports the measured PPM frame rate directly
    - `ch1/ch2/ch3` move around center (~1500us)
    - `invalid(+delta)` remains stable unless signal noise/wiring issues are present
 
