@@ -387,3 +387,99 @@ Use this file as a running implementation log.
     - observed `Screen -> HDZ>CRSF (boot)`
     - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
     - observed `OLED status screen ready`
+
+### 2026-02-27 - Cross-Route Fallback Between PPM and CRSF RX
+
+- Added symmetric cross-routing with source-health hysteresis:
+  - sources go stale after `500ms` without valid events
+  - sources re-acquire health after `3` valid events inside `150ms`
+  - switching between live sources is held for at least `250ms`
+  - healthy PPM owns CRSF output
+  - healthy CRSF RX owns PWM
+  - if only one source is healthy, it drives both output sides
+- Implemented USB CRSF fallback from incoming CRSF RX:
+  - when PPM is no longer healthy and CRSF RX is healthy, CRSF RX is packed and mirrored to USB CDC
+  - fallback applies only to USB CDC, not UART1 TX
+- Kept UART1 TX PPM-only by design:
+  - incoming CRSF RX is not echoed back to UART1 TX
+  - this avoids feedback/loop risks on attached CRSF hardware
+- Implemented PWM fallback from PPM:
+  - when CRSF RX is no longer healthy and PPM is healthy, PWM outputs follow fixed headtracker channels `PAN/ROL/TIL -> S1/S2/S3`
+  - if neither source is healthy, PWM outputs return to center
+- Added PPM hot-plug hardening:
+  - PPM input now uses `INPUT_PULLDOWN`
+  - boot serial now prints ESP reset reason for easier brownout vs software-fault diagnosis
+- Added route visibility to diagnostics:
+  - debug serial now reports `route usb=... pwm=...`
+  - status JSON includes `usb_route_label` and `pwm_route_label`
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - serial boot confirmation after flash:
+    - observed `Boot: hdzero-headtracker-monitor`
+    - observed `Reset reason: UNKNOWN (0)`
+    - observed `Pins: PPM=10 LED=8 BTN=9 UART_RX=20 UART_TX=21 SERVO=0,1,2`
+    - observed `Screen -> HDZ>CRSF (boot)`
+    - observed `OLED I2C: SDA=4, SCL=5, addr=0x3C`
+    - observed `OLED status screen ready`
+  - direct runtime cross-route validation with live source drop/recovery is still pending manual confirmation
+
+### 2026-02-27 - Route Hysteresis Follow-Up Fixes
+
+- Fixed the first hysteresis pass so route ownership now behaves as intended:
+  - an active source may keep its current route while it is still only `tentative`
+  - a source must become fully `healthy` before it can take over a route again after a dropout
+  - route failover no longer triggers early on the `150ms` acquire window alone
+- Fixed route-switch handling so the `250ms` hold applies to switching between still-live sources instead of being bypassed on common fallback transitions.
+- Aligned route staleness with the configured source freshness timeouts:
+  - PPM ownership now ages out on `signal_timeout_ms`
+  - CRSF RX ownership now ages out on `crsf_rx_timeout_ms`
+- Fixed a CRSF output gap where UART1 TX could stop when PPM became `tentative` even though PPM still retained route ownership.
+- Reset CRSF parser/source state and monitor state during `applySettings()` so live UART changes do not inherit stale routing state.
+- Clarified debug reporting:
+  - `route usb=TEXT` now means USB CDC is intentionally reserved for readable debug text in `DEBUG CFG`
+  - status JSON uses the same `usb_route_label`
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-27 - Web UI Bench Usability Pass
+
+- Refined the embedded debug/config web page without changing the backend API:
+  - added a top summary strip for screen mode, USB route, PWM route, PPM Hz, CRSF RX, and servo outputs
+  - kept raw status JSON under an expandable advanced section
+  - replaced manual numeric entry with dropdowns for screen mode and servo source channels
+  - added inline section notes for GPIO guardrails and routing behavior
+  - replaced blocking browser alerts with inline success/error messages
+- Kept the page lightweight and self-contained in the existing PROGMEM HTML blob.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-27 - Smoothed CRSF Rate On Debug Screen
+
+- Replaced the raw `CRSF ... XXms` OLED debug field with a smoothed CRSF RC packet-rate estimate.
+- Reason:
+  - the previous display showed raw packet age sampled at the OLED refresh cadence
+  - that made normal packet-timing jitter look like sudden spikes even when CRSF RX was healthy
+- Added a lightweight EMA from valid decoded CRSF RC packet intervals and display it as `CRSF ... XXXHz`.
+- Kept raw CRSF packet age in status/serial surfaces where it is still useful for deeper debugging.
+- Extended status JSON and Web UI summary with `crsf_rx_rate_hz`.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-27 - Web UI Health Labels
+
+- Updated the Web UI summary cards so PPM and CRSF RX now show `health / rate` instead of rate alone.
+- Added `ppm_health_label` and `crsf_rx_health_label` to the status JSON so the page reuses the same backend health logic as the OLED and debug serial output.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-27 - Clear Stale CRSF Rate Display
+
+- Tightened the new CRSF rate display so stale/missing CRSF no longer shows a carried-over last-known rate.
+- OLED debug page now shows:
+  - `CRSF RXOK XXXHz` while CRSF is fresh
+  - `CRSF STAL` when packets are stale
+  - `CRSF NONE` before any valid CRSF RC packet has been seen
+- Status JSON and Web UI summary now expose `crsf_rx_rate_hz` as a live-only value, reported as `0` when CRSF is stale or missing.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful

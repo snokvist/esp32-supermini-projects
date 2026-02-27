@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
+#include <esp_system.h>
 
 #include <cstdlib>
 
@@ -96,6 +97,12 @@ constexpr uint8_t kScreenHeight = 64;
 constexpr uint32_t kI2cClockHz = 400000;
 constexpr uint32_t kOledRefreshIntervalMs = 100;
 constexpr uint32_t kButtonLongPressMs = 3000;
+constexpr uint32_t kRouteAcquireWindowMs = 150;
+constexpr uint32_t kRouteSwitchHoldMs = 250;
+constexpr float kCrsfRateEmaAlpha = 0.25f;
+constexpr uint8_t kPpmHealthyFrameCount = 3;
+constexpr uint8_t kCrsfHealthyPacketCount = 3;
+constexpr uint8_t kRouteEventHistorySize = 8;
 
 constexpr uint16_t kSettingsVersion = 2;
 constexpr uint8_t kFirstSupportedGpio = 0;
@@ -111,30 +118,210 @@ const char kWebUiHtml[] PROGMEM = R"HTML(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Waybeam Backpack</title>
 <style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f7fb;color:#1f2937;margin:0;padding:16px}
-.card{max-width:980px;margin:0 auto;background:#fff;border:1px solid #d9e2ec;border-radius:10px;padding:16px}
-h1{font-size:22px;margin:0 0 8px}
+:root{
+  --bg:#eef4f7;
+  --panel:#ffffff;
+  --panel-alt:#f6fafc;
+  --border:#d8e3ea;
+  --text:#173042;
+  --muted:#587284;
+  --accent:#006ea8;
+  --accent-2:#0d8f6f;
+  --danger:#b64032;
+  --shadow:0 14px 36px rgba(26,52,68,.10);
+}
+*{box-sizing:border-box}
+body{
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  background:linear-gradient(180deg,#edf4f7 0%,#e4eef3 100%);
+  color:var(--text);
+  margin:0;
+  padding:18px;
+}
+.card{
+  max-width:1120px;
+  margin:0 auto;
+  background:var(--panel);
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:18px;
+  box-shadow:var(--shadow);
+}
+.hero{
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  align-items:flex-start;
+  flex-wrap:wrap;
+}
+h1{font-size:24px;margin:0 0 6px}
+h2{font-size:16px;margin:0}
 h3{margin:0;font-size:15px}
-small{color:#4b5563}
-.sections{display:grid;gap:12px;margin-top:12px}
-.section{border:1px solid #dbe5ef;border-radius:10px;padding:10px;background:#f8fafc}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:8px}
+p,small{color:var(--muted)}
+.hero-copy{max-width:720px}
+.hero-copy p{margin:0}
+.hero-chip{
+  border:1px solid var(--border);
+  background:var(--panel-alt);
+  border-radius:999px;
+  padding:8px 12px;
+  color:var(--muted);
+  font-size:12px;
+  white-space:nowrap;
+}
+.flash{
+  margin-top:14px;
+  padding:10px 12px;
+  border-radius:12px;
+  border:1px solid var(--border);
+  background:#edf7fb;
+  color:var(--text);
+}
+.flash.error{
+  background:#fff0ed;
+  border-color:#f0bcb5;
+  color:#852d21;
+}
+.summary{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:10px;
+  margin-top:16px;
+}
+.stat{
+  padding:12px;
+  border:1px solid var(--border);
+  border-radius:14px;
+  background:linear-gradient(180deg,#fbfdfe 0%,#f2f8fb 100%);
+}
+.stat-label{
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--muted);
+}
+.stat-value{
+  margin-top:6px;
+  font-size:18px;
+  font-weight:700;
+  line-height:1.15;
+}
+.stat-sub{
+  margin-top:4px;
+  font-size:12px;
+  color:var(--muted);
+}
+.sections{
+  display:grid;
+  gap:12px;
+  margin-top:18px;
+}
+.section{
+  border:1px solid var(--border);
+  border-radius:16px;
+  padding:14px;
+  background:var(--panel-alt);
+}
+.section-head{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
+  flex-wrap:wrap;
+}
+.section-note{
+  margin-top:6px;
+  font-size:12px;
+  color:var(--muted);
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:10px;
+  margin-top:10px;
+}
 .row{display:flex;flex-direction:column}
-label{font-size:12px;color:#374151;margin-bottom:4px}
-input,select{padding:8px;border:1px solid #cbd5e1;border-radius:8px}
-.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
-button{padding:10px 14px;border:0;border-radius:8px;cursor:pointer}
-.apply{background:#0284c7;color:#fff}
-.save{background:#166534;color:#fff}
-.refresh{background:#334155;color:#fff}
-.reset{background:#b91c1c;color:#fff}
-pre{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;overflow:auto}
+label{
+  font-size:12px;
+  color:#314c5f;
+  margin-bottom:4px;
+  font-weight:600;
+}
+input,select{
+  width:100%;
+  padding:10px 12px;
+  border:1px solid #c2d3dd;
+  border-radius:10px;
+  background:#fff;
+  color:var(--text);
+}
+.actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:16px;
+}
+button{
+  padding:10px 14px;
+  border:0;
+  border-radius:10px;
+  cursor:pointer;
+  font-weight:700;
+}
+.apply{background:var(--accent);color:#fff}
+.save{background:var(--accent-2);color:#fff}
+.refresh{background:#385261;color:#fff}
+.reset{background:var(--danger);color:#fff}
+.status-block{
+  margin-top:18px;
+  border:1px solid var(--border);
+  border-radius:16px;
+  background:#f7fbfd;
+  padding:14px;
+}
+.status-top{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:center;
+  flex-wrap:wrap;
+}
+.status-meta{
+  font-size:12px;
+  color:var(--muted);
+}
+details{margin-top:12px}
+summary{
+  cursor:pointer;
+  color:var(--accent);
+  font-weight:700;
+}
+pre{
+  background:#0f172a;
+  color:#e2e8f0;
+  padding:12px;
+  border-radius:12px;
+  overflow:auto;
+  margin:10px 0 0;
+}
+@media (max-width:700px){
+  body{padding:12px}
+  .card{padding:14px;border-radius:14px}
+  .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>Waybeam Backpack</h1>
-  <small>AP: <b>waybeam-backpack</b> / <b>waybeam-backpack</b>, network <b>10.100.0.x</b> (ESP32 is 10.100.0.1)</small>
+  <div class="hero">
+    <div class="hero-copy">
+      <h1>Waybeam Backpack</h1>
+      <p>Debug-only bench UI for pins, routing timeouts, PWM mapping, and live runtime status.</p>
+    </div>
+    <div class="hero-chip">AP: <b>waybeam-backpack</b> / <b>waybeam-backpack</b> at <b>10.100.0.1</b></div>
+  </div>
+  <div id="flash" class="flash" hidden></div>
+  <div class="summary" id="summary"></div>
   <form id="cfg">
     <div class="sections" id="sections"></div>
     <div class="actions">
@@ -144,48 +331,169 @@ pre{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;overflow:aut
       <button class="refresh" type="button" onclick="loadAll()">Refresh</button>
     </div>
   </form>
-  <h3>Status</h3>
-  <pre id="status">loading...</pre>
+  <div class="status-block">
+    <div class="status-top">
+      <h2>Status</h2>
+      <div class="status-meta" id="status-meta">Waiting for status...</div>
+    </div>
+    <details>
+      <summary>Advanced Status JSON</summary>
+      <pre id="status">loading...</pre>
+    </details>
+  </div>
 </div>
 <script>
 const sections=[
-{title:'Pins', fields:[
-['led_pin','LED pin'],['ppm_input_pin','PPM input pin'],['mode_button_pin','Mode button pin'],
-['crsf_uart_tx_pin','CRSF UART TX pin'],['crsf_uart_rx_pin','CRSF UART RX pin'],
-['servo_pwm_1_pin','Servo PWM 1 pin'],['servo_pwm_2_pin','Servo PWM 2 pin'],['servo_pwm_3_pin','Servo PWM 3 pin']
+{title:'Pins', note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
+{name:'led_pin',label:'LED pin',type:'number'},
+{name:'ppm_input_pin',label:'PPM input pin',type:'number'},
+{name:'mode_button_pin',label:'Mode button pin',type:'number'},
+{name:'crsf_uart_tx_pin',label:'CRSF UART TX pin',type:'number'},
+{name:'crsf_uart_rx_pin',label:'CRSF UART RX pin',type:'number'},
+{name:'servo_pwm_1_pin',label:'Servo PWM 1 pin',type:'number'},
+{name:'servo_pwm_2_pin',label:'Servo PWM 2 pin',type:'number'},
+{name:'servo_pwm_3_pin',label:'Servo PWM 3 pin',type:'number'}
 ]},
-{title:'Modes', fields:[
-['output_mode_live','Screen live (0=HDZero->CRSF,1=UART->PWM,2=Debug)'],['output_mode_default','Screen boot default (0=HDZero->CRSF,1=UART->PWM,2=Debug)']
+{title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
+{name:'output_mode_live',label:'Live screen',type:'select',options:[
+['0','HDZero -> CRSF'],
+['1','UART -> PWM'],
+['2','Debug / Config']
 ]},
-{title:'CRSF / UART', fields:[
-['crsf_uart_baud','CRSF UART baud'],['crsf_map_min_us','PPM->CRSF map min us'],['crsf_map_max_us','PPM->CRSF map max us'],['crsf_rx_timeout_ms','CRSF RX timeout ms']
+{name:'output_mode_default',label:'Boot default screen',type:'select',options:[
+['0','HDZero -> CRSF'],
+['1','UART -> PWM'],
+['2','Debug / Config']
+]}
 ]},
-{title:'Servo Outputs', fields:[
-['servo_pwm_frequency_hz','Servo PWM frequency Hz'],
-['servo_map_1','Servo 1 source CH (1..16)'],['servo_map_2','Servo 2 source CH (1..16)'],['servo_map_3','Servo 3 source CH (1..16)'],
-['servo_pulse_min_us','Servo min pulse us'],['servo_pulse_center_us','Servo center pulse us'],['servo_pulse_max_us','Servo max pulse us']
+{title:'CRSF / UART', note:'Incoming CRSF drives PWM first. If PPM drops out, healthy CRSF can also take over USB output.', fields:[
+{name:'crsf_uart_baud',label:'CRSF UART baud',type:'number'},
+{name:'crsf_map_min_us',label:'PPM -> CRSF map min us',type:'number'},
+{name:'crsf_map_max_us',label:'PPM -> CRSF map max us',type:'number'},
+{name:'crsf_rx_timeout_ms',label:'CRSF RX stale timeout ms',type:'number'}
 ]},
-{title:'PPM Decode', fields:[
-['ppm_min_channel_us','PPM min pulse us'],['ppm_max_channel_us','PPM max pulse us'],['ppm_sync_gap_us','PPM sync gap us']
+{title:'Servo Outputs', note:'Servo sources apply to CRSF RX -> PWM routing. PPM fallback remains fixed PAN/ROL/TIL -> S1/S2/S3.', fields:[
+{name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'number'},
+{name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:[
+['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
+['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
 ]},
-{title:'Timing / Health', fields:[
-['signal_timeout_ms','Signal timeout ms'],['button_debounce_ms','Button debounce ms'],['monitor_print_interval_ms','Monitor print interval ms']
+{name:'servo_map_2',label:'Servo 2 source channel',type:'select',options:[
+['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
+['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
+]},
+{name:'servo_map_3',label:'Servo 3 source channel',type:'select',options:[
+['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
+['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
+]},
+{name:'servo_pulse_min_us',label:'Servo min pulse us',type:'number'},
+{name:'servo_pulse_center_us',label:'Servo center pulse us',type:'number'},
+{name:'servo_pulse_max_us',label:'Servo max pulse us',type:'number'}
+]},
+{title:'PPM Decode', note:'Headtracker PPM is also used for USB CRSF output and as PWM fallback when CRSF RX is stale.', fields:[
+{name:'ppm_min_channel_us',label:'PPM min pulse us',type:'number'},
+{name:'ppm_max_channel_us',label:'PPM max pulse us',type:'number'},
+{name:'ppm_sync_gap_us',label:'PPM sync gap us',type:'number'}
+]},
+{title:'Timing / Health', note:'A source stays on its current route until it becomes stale. Route reacquire still requires a short burst of clean packets/frames.', fields:[
+{name:'signal_timeout_ms',label:'PPM stale timeout ms',type:'number'},
+{name:'button_debounce_ms',label:'Button debounce ms',type:'number'},
+{name:'monitor_print_interval_ms',label:'Debug print interval ms',type:'number'}
 ]}
 ];
+
+const summaryFields=[
+  {label:'Screen', value:(s)=>s.output_mode_label||'--', sub:(s)=>`OLED ${s.oled_ready ? 'ready' : 'missing'}`},
+  {label:'USB Route', value:(s)=>s.usb_route_label||'--', sub:(s)=>`AP ${s.web_ui_active ? 'active' : 'off'}`},
+  {label:'PWM Route', value:(s)=>s.pwm_route_label||'--', sub:()=>`Outputs S1/S2/S3`},
+  {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
+  {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
+  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:()=>`0/1/2 default pins`}
+];
+
+function readField(name,fallback=''){
+  const el=document.querySelector(`[name="${name}"]`);
+  return el ? el.value : fallback;
+}
+
+function showFlash(message,isError=false){
+  const el=document.getElementById('flash');
+  el.hidden=!message;
+  el.textContent=message || '';
+  el.className=isError ? 'flash error' : 'flash';
+}
+
+function formatHz(value){
+  if(value===undefined || value===null || value==='') return '--';
+  const num=Number(value);
+  return Number.isFinite(num) ? `${num.toFixed(1)} Hz` : '--';
+}
+
+function formatServoSummary(values){
+  if(!Array.isArray(values) || values.length<3) return '--';
+  return values.slice(0,3).join(' / ');
+}
+
+function renderSummary(status){
+  const root=document.getElementById('summary');
+  root.innerHTML='';
+  summaryFields.forEach((field)=>{
+    const card=document.createElement('div');
+    card.className='stat';
+    const label=document.createElement('div');
+    label.className='stat-label';
+    label.textContent=field.label;
+    const value=document.createElement('div');
+    value.className='stat-value';
+    value.textContent=field.value(status);
+    const sub=document.createElement('div');
+    sub.className='stat-sub';
+    sub.textContent=field.sub(status);
+    card.appendChild(label);
+    card.appendChild(value);
+    card.appendChild(sub);
+    root.appendChild(card);
+  });
+}
 
 function buildForm(){
   const root=document.getElementById('sections');
   sections.forEach((section)=>{
     const block=document.createElement('div'); block.className='section';
+    const head=document.createElement('div'); head.className='section-head';
+    const titleWrap=document.createElement('div');
     const title=document.createElement('h3'); title.textContent=section.title;
+    titleWrap.appendChild(title);
+    if(section.note){
+      const note=document.createElement('div');
+      note.className='section-note';
+      note.textContent=section.note;
+      titleWrap.appendChild(note);
+    }
+    head.appendChild(titleWrap);
     const grid=document.createElement('div'); grid.className='grid';
-    section.fields.forEach(([name,label])=>{
+    section.fields.forEach((field)=>{
       const row=document.createElement('div'); row.className='row';
-      const l=document.createElement('label'); l.textContent=label;
-      const i=document.createElement('input'); i.name=name; i.type='text';
+      const l=document.createElement('label'); l.textContent=field.label;
+      const i=(field.type==='select') ? document.createElement('select') : document.createElement('input');
+      i.name=field.name;
+      if(field.type==='select'){
+        field.options.forEach(([value,label])=>{
+          const opt=document.createElement('option');
+          opt.value=value;
+          opt.textContent=label;
+          i.appendChild(opt);
+        });
+      }else{
+        i.type=field.type || 'text';
+        if(field.type==='number'){
+          i.inputMode='numeric';
+          i.step='1';
+        }
+      }
       row.appendChild(l); row.appendChild(i); grid.appendChild(row);
     });
-    block.appendChild(title);
+    block.appendChild(head);
     block.appendChild(grid);
     root.appendChild(block);
   });
@@ -207,6 +515,8 @@ async function loadStatus(){
   const r=await fetch('/api/status',{cache:'no-store'});
   if(!r.ok) throw new Error(await r.text());
   const s=await r.json();
+  renderSummary(s);
+  document.getElementById('status-meta').textContent=`Updated ${new Date().toLocaleTimeString()}`;
   document.getElementById('status').textContent=JSON.stringify(s,null,2);
 }
 
@@ -214,8 +524,12 @@ async function loadAll(){
   try{
     await loadSettings();
     await loadStatus();
+    showFlash('');
   }catch(err){
+    renderSummary({});
+    document.getElementById('status-meta').textContent='Status unavailable';
     document.getElementById('status').textContent=`Error: ${err.message}`;
+    showFlash(`Error: ${err.message}`, true);
   }
 }
 
@@ -225,7 +539,7 @@ async function submitCfg(persist){
   const body=new URLSearchParams(fd);
   const r=await fetch('/api/settings', {method:'POST', body});
   const text=await r.text();
-  alert(r.ok ? text : `Error: ${text}`);
+  showFlash(r.ok ? text : `Error: ${text}`, !r.ok);
   if(!r.ok) return;
   await loadAll();
 }
@@ -234,7 +548,7 @@ async function resetDefaults(){
   if(!confirm('Reset all settings to firmware defaults and save?')) return;
   const r=await fetch('/api/reset_defaults', {method:'POST'});
   const text=await r.text();
-  alert(r.ok ? text : `Error: ${text}`);
+  showFlash(r.ok ? text : `Error: ${text}`, !r.ok);
   if(!r.ok) return;
   await loadAll();
 }
@@ -243,7 +557,10 @@ buildForm();
 loadAll();
 setInterval(()=>{
   loadStatus().catch((err)=>{
+    renderSummary({});
+    document.getElementById('status-meta').textContent='Status unavailable';
     document.getElementById('status').textContent=`Error: ${err.message}`;
+    showFlash(`Status refresh failed: ${err.message}`, true);
   });
 }, 1000);
 </script>
@@ -323,6 +640,8 @@ uint16_t gServoPulseUs[kServoCount] = {1500, 1500, 1500};
 uint32_t gCrsfRxPacketCounter = 0;
 uint32_t gCrsfRxInvalidCounter = 0;
 uint32_t gLastCrsfRxMs = 0;
+uint32_t gLastCrsfRxPacketSampleMs = 0;
+float gCrsfRxRateHzEma = 0.0f;
 bool gHasCrsfRxFrame = false;
 Adafruit_SSD1306 gDisplay(kScreenWidth, kScreenHeight, &Wire, -1);
 bool gOledReady = false;
@@ -344,6 +663,17 @@ bool gWebRoutesConfigured = false;
 enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2 };
 OutputMode gOutputMode = OutputMode::kHdzeroCrsf;
 OutputMode gLastMainOutputMode = OutputMode::kHdzeroCrsf;
+enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
+enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
+enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
+uint32_t gRecentPpmFrameMs[kRouteEventHistorySize] = {0};
+uint8_t gRecentPpmFrameCount = 0;
+uint32_t gRecentCrsfPacketMs[kRouteEventHistorySize] = {0};
+uint8_t gRecentCrsfPacketCount = 0;
+UsbCrsfRoute gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
+PwmRoute gActivePwmRoute = PwmRoute::kCenter;
+uint32_t gLastUsbRouteChangeMs = 0;
+uint32_t gLastPwmRouteChangeMs = 0;
 
 RuntimeSettings defaultSettings() {
   RuntimeSettings s{};
@@ -392,6 +722,192 @@ bool isReservedOledPin(uint8_t pin) { return pin == OLED_SDA_PIN || pin == OLED_
 
 bool isDebugOutputMode(OutputMode mode) { return mode == OutputMode::kDebugConfig; }
 
+bool isPpmFresh(uint32_t nowMs, uint32_t timeoutMs) {
+  return gLastFrameMs != 0 && ((nowMs - gLastFrameMs) <= timeoutMs);
+}
+
+bool isCrsfFresh(uint32_t nowMs, uint32_t timeoutMs) {
+  return gHasCrsfRxFrame && ((nowMs - gLastCrsfRxMs) <= timeoutMs);
+}
+
+bool isSourceStale(SourceHealth health) { return health == SourceHealth::kStale; }
+
+uint32_t ppmRouteTimeoutMs() { return gSettings.signalTimeoutMs; }
+
+uint32_t crsfRouteTimeoutMs() { return gSettings.crsfRxTimeoutMs; }
+
+void recordRecentEvent(uint32_t history[kRouteEventHistorySize], uint8_t &count, uint32_t eventMs) {
+  for (uint8_t i = kRouteEventHistorySize - 1; i > 0; --i) {
+    history[i] = history[i - 1];
+  }
+  history[0] = eventMs;
+  if (count < kRouteEventHistorySize) {
+    count++;
+  }
+}
+
+uint8_t countRecentEvents(const uint32_t history[kRouteEventHistorySize], uint8_t count, uint32_t nowMs, uint32_t windowMs) {
+  uint8_t recent = 0;
+  for (uint8_t i = 0; i < count; ++i) {
+    if ((nowMs - history[i]) > windowMs) {
+      break;
+    }
+    recent++;
+  }
+  return recent;
+}
+
+SourceHealth classifySourceHealth(bool hasSignal, uint32_t lastEventMs, const uint32_t history[kRouteEventHistorySize],
+                                  uint8_t historyCount, uint32_t nowMs, uint32_t staleTimeoutMs,
+                                  uint8_t healthyEventCount) {
+  if (!hasSignal || ((nowMs - lastEventMs) > staleTimeoutMs)) {
+    return SourceHealth::kStale;
+  }
+  return (countRecentEvents(history, historyCount, nowMs, kRouteAcquireWindowMs) >= healthyEventCount)
+             ? SourceHealth::kHealthy
+             : SourceHealth::kTentative;
+}
+
+SourceHealth ppmSourceHealth(uint32_t nowMs) {
+  return classifySourceHealth(gLastFrameMs != 0, gLastFrameMs, gRecentPpmFrameMs, gRecentPpmFrameCount, nowMs,
+                              ppmRouteTimeoutMs(), kPpmHealthyFrameCount);
+}
+
+SourceHealth crsfSourceHealth(uint32_t nowMs) {
+  return classifySourceHealth(gHasCrsfRxFrame, gLastCrsfRxMs, gRecentCrsfPacketMs, gRecentCrsfPacketCount, nowMs,
+                              crsfRouteTimeoutMs(), kCrsfHealthyPacketCount);
+}
+
+bool canKeepUsbRoute(UsbCrsfRoute route, SourceHealth ppmHealth, SourceHealth crsfHealth) {
+  switch (route) {
+    case UsbCrsfRoute::kPpm:
+      return !isSourceStale(ppmHealth);
+    case UsbCrsfRoute::kCrsfRx:
+      return !isSourceStale(crsfHealth);
+    case UsbCrsfRoute::kNone:
+      return true;
+  }
+  return false;
+}
+
+bool canAcquireUsbRoute(UsbCrsfRoute route, SourceHealth ppmHealth, SourceHealth crsfHealth) {
+  switch (route) {
+    case UsbCrsfRoute::kPpm:
+      return ppmHealth == SourceHealth::kHealthy;
+    case UsbCrsfRoute::kCrsfRx:
+      return crsfHealth == SourceHealth::kHealthy;
+    case UsbCrsfRoute::kNone:
+      return true;
+  }
+  return false;
+}
+
+bool canKeepPwmRoute(PwmRoute route, SourceHealth ppmHealth, SourceHealth crsfHealth) {
+  switch (route) {
+    case PwmRoute::kCrsfRx:
+      return !isSourceStale(crsfHealth);
+    case PwmRoute::kPpm:
+      return !isSourceStale(ppmHealth);
+    case PwmRoute::kCenter:
+      return true;
+  }
+  return false;
+}
+
+bool canAcquirePwmRoute(PwmRoute route, SourceHealth ppmHealth, SourceHealth crsfHealth) {
+  switch (route) {
+    case PwmRoute::kCrsfRx:
+      return crsfHealth == SourceHealth::kHealthy;
+    case PwmRoute::kPpm:
+      return ppmHealth == SourceHealth::kHealthy;
+    case PwmRoute::kCenter:
+      return true;
+  }
+  return false;
+}
+
+UsbCrsfRoute selectDesiredUsbCrsfRoute(uint32_t nowMs, bool usbTextMode, UsbCrsfRoute activeRoute) {
+  if (usbTextMode) {
+    return UsbCrsfRoute::kNone;
+  }
+
+  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+  const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
+
+  if (activeRoute == UsbCrsfRoute::kPpm && canKeepUsbRoute(activeRoute, ppmHealth, crsfHealth)) {
+    return UsbCrsfRoute::kPpm;
+  }
+  if (activeRoute == UsbCrsfRoute::kCrsfRx && canKeepUsbRoute(activeRoute, ppmHealth, crsfHealth) &&
+      !canAcquireUsbRoute(UsbCrsfRoute::kPpm, ppmHealth, crsfHealth)) {
+    return UsbCrsfRoute::kCrsfRx;
+  }
+  if (canAcquireUsbRoute(UsbCrsfRoute::kPpm, ppmHealth, crsfHealth)) {
+    return UsbCrsfRoute::kPpm;
+  }
+  if (canAcquireUsbRoute(UsbCrsfRoute::kCrsfRx, ppmHealth, crsfHealth)) {
+    return UsbCrsfRoute::kCrsfRx;
+  }
+  if (canKeepUsbRoute(activeRoute, ppmHealth, crsfHealth)) {
+    return activeRoute;
+  }
+  return UsbCrsfRoute::kNone;
+}
+
+PwmRoute selectDesiredPwmRoute(uint32_t nowMs, PwmRoute activeRoute) {
+  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+  const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
+
+  if (activeRoute == PwmRoute::kCrsfRx && canKeepPwmRoute(activeRoute, ppmHealth, crsfHealth)) {
+    return PwmRoute::kCrsfRx;
+  }
+  if (activeRoute == PwmRoute::kPpm && canKeepPwmRoute(activeRoute, ppmHealth, crsfHealth) &&
+      !canAcquirePwmRoute(PwmRoute::kCrsfRx, ppmHealth, crsfHealth)) {
+    return PwmRoute::kPpm;
+  }
+  if (canAcquirePwmRoute(PwmRoute::kCrsfRx, ppmHealth, crsfHealth)) {
+    return PwmRoute::kCrsfRx;
+  }
+  if (canAcquirePwmRoute(PwmRoute::kPpm, ppmHealth, crsfHealth)) {
+    return PwmRoute::kPpm;
+  }
+  if (canKeepPwmRoute(activeRoute, ppmHealth, crsfHealth)) {
+    return activeRoute;
+  }
+  return PwmRoute::kCenter;
+}
+
+UsbCrsfRoute updateUsbCrsfRoute(uint32_t nowMs, bool usbTextMode) {
+  const UsbCrsfRoute desiredRoute = selectDesiredUsbCrsfRoute(nowMs, usbTextMode, gActiveUsbCrsfRoute);
+  if (desiredRoute == gActiveUsbCrsfRoute) {
+    return gActiveUsbCrsfRoute;
+  }
+  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+  const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
+  const bool activeRouteLostSignal = !canKeepUsbRoute(gActiveUsbCrsfRoute, ppmHealth, crsfHealth);
+  if (activeRouteLostSignal || gActiveUsbCrsfRoute == UsbCrsfRoute::kNone ||
+      (nowMs - gLastUsbRouteChangeMs) >= kRouteSwitchHoldMs) {
+    gActiveUsbCrsfRoute = desiredRoute;
+    gLastUsbRouteChangeMs = nowMs;
+  }
+  return gActiveUsbCrsfRoute;
+}
+
+PwmRoute updatePwmRoute(uint32_t nowMs) {
+  const PwmRoute desiredRoute = selectDesiredPwmRoute(nowMs, gActivePwmRoute);
+  if (desiredRoute == gActivePwmRoute) {
+    return gActivePwmRoute;
+  }
+  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+  const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
+  const bool activeRouteLostSignal = !canKeepPwmRoute(gActivePwmRoute, ppmHealth, crsfHealth);
+  if (activeRouteLostSignal || gActivePwmRoute == PwmRoute::kCenter ||
+      (nowMs - gLastPwmRouteChangeMs) >= kRouteSwitchHoldMs) {
+    gActivePwmRoute = desiredRoute;
+    gLastPwmRouteChangeMs = nowMs;
+  }
+  return gActivePwmRoute;
+}
+
 const char *outputModeLabel(OutputMode mode) {
   switch (mode) {
     case OutputMode::kHdzeroCrsf:
@@ -404,18 +920,79 @@ const char *outputModeLabel(OutputMode mode) {
   return "UNK";
 }
 
+const char *usbCrsfRouteLabel(UsbCrsfRoute route) {
+  switch (route) {
+    case UsbCrsfRoute::kNone:
+      return "NONE";
+    case UsbCrsfRoute::kPpm:
+      return "PPM";
+    case UsbCrsfRoute::kCrsfRx:
+      return "CRSF";
+  }
+  return "UNK";
+}
+
+const char *usbRouteReportLabel(UsbCrsfRoute route, bool usbTextMode) {
+  return usbTextMode ? "TEXT" : usbCrsfRouteLabel(route);
+}
+
+const char *pwmRouteLabel(PwmRoute route) {
+  switch (route) {
+    case PwmRoute::kCenter:
+      return "CENTER";
+    case PwmRoute::kCrsfRx:
+      return "CRSF";
+    case PwmRoute::kPpm:
+      return "PPM";
+  }
+  return "UNK";
+}
+
+const char *resetReasonLabel(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_UNKNOWN:
+      return "UNKNOWN";
+    case ESP_RST_POWERON:
+      return "POWERON";
+    case ESP_RST_EXT:
+      return "EXT";
+    case ESP_RST_SW:
+      return "SW";
+    case ESP_RST_PANIC:
+      return "PANIC";
+    case ESP_RST_INT_WDT:
+      return "INT_WDT";
+    case ESP_RST_TASK_WDT:
+      return "TASK_WDT";
+    case ESP_RST_WDT:
+      return "WDT";
+    case ESP_RST_DEEPSLEEP:
+      return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:
+      return "BROWNOUT";
+    case ESP_RST_SDIO:
+      return "SDIO";
+    default:
+      return "OTHER";
+  }
+}
+
 const char *ppmHealthLabel(uint32_t nowMs) {
   if (gLastFrameMs == 0) {
     return "WAIT";
   }
-  return ((nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs) ? "OK" : "STAL";
+  return isPpmFresh(nowMs, gSettings.signalTimeoutMs) ? "OK" : "STAL";
 }
 
 const char *crsfRxHealthLabel(uint32_t nowMs) {
   if (!gHasCrsfRxFrame) {
     return "NONE";
   }
-  return ((nowMs - gLastCrsfRxMs) <= gSettings.crsfRxTimeoutMs) ? "RXOK" : "STAL";
+  return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? "RXOK" : "STAL";
+}
+
+float liveCrsfRxRateHz(uint32_t nowMs) {
+  return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxRateHzEma : 0.0f;
 }
 
 int16_t centeredFillPixels(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
@@ -534,15 +1111,16 @@ void drawUartToPwmScreen(uint32_t nowMs) {
 }
 
 void drawDebugConfigScreen(uint32_t nowMs) {
-  const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
-
+  const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
   drawHeaderBar("DEBUG CFG", gWebUiActive ? "AP ON" : "AP OFF");
   gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.setCursor(0, 14);
   gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
   gDisplay.setCursor(0, 24);
-  if (gHasCrsfRxFrame) {
-    gDisplay.printf("CRSF %s %3lums", crsfRxHealthLabel(nowMs), static_cast<unsigned long>(crsfAgeMs));
+  if (crsfFresh) {
+    gDisplay.printf("CRSF %s %3.0fHz", crsfRxHealthLabel(nowMs), static_cast<double>(liveCrsfRxRateHz(nowMs)));
+  } else if (gHasCrsfRxFrame) {
+    gDisplay.printf("CRSF %s", crsfRxHealthLabel(nowMs));
   } else {
     gDisplay.print("CRSF NONE");
   }
@@ -845,6 +1423,20 @@ uint16_t mapCrsfToServoUs(uint16_t crsfValue) {
   return static_cast<uint16_t>(gSettings.servoPulseMinUs + ((numerator + (denominator / 2U)) / denominator));
 }
 
+uint16_t mapPpmToServoUs(uint16_t pulseUs) {
+  uint16_t clampedUs = pulseUs;
+  if (clampedUs < gSettings.ppmMinChannelUs) {
+    clampedUs = gSettings.ppmMinChannelUs;
+  } else if (clampedUs > gSettings.ppmMaxChannelUs) {
+    clampedUs = gSettings.ppmMaxChannelUs;
+  }
+
+  const uint32_t numerator =
+      static_cast<uint32_t>(clampedUs - gSettings.ppmMinChannelUs) * static_cast<uint32_t>(gSettings.servoPulseMaxUs - gSettings.servoPulseMinUs);
+  const uint32_t denominator = static_cast<uint32_t>(gSettings.ppmMaxChannelUs - gSettings.ppmMinChannelUs);
+  return static_cast<uint16_t>(gSettings.servoPulseMinUs + ((numerator + (denominator / 2U)) / denominator));
+}
+
 uint32_t pulseUsToPwmDuty(uint16_t pulseUs) {
   const uint32_t periodUs = 1000000UL / static_cast<uint32_t>(gSettings.servoPwmFrequencyHz);
   const uint32_t maxDuty = (1UL << kServoPwmResolutionBits) - 1UL;
@@ -875,11 +1467,8 @@ void setupServoOutputs(const uint8_t oldPins[kServoCount]) {
   }
 }
 
-void updateServoOutputsFromCrsf() {
-  const uint32_t nowMs = millis();
-  const bool crsfFresh = gHasCrsfRxFrame && ((nowMs - gLastCrsfRxMs) <= gSettings.crsfRxTimeoutMs);
-
-  if (!crsfFresh) {
+void applyPwmRoute(PwmRoute route) {
+  if (route == PwmRoute::kCenter) {
     for (uint8_t i = 0; i < kServoCount; ++i) {
       writeServoPulseUs(i, gSettings.servoPulseCenterUs);
     }
@@ -887,8 +1476,17 @@ void updateServoOutputsFromCrsf() {
   }
 
   for (uint8_t i = 0; i < kServoCount; ++i) {
-    const uint8_t sourceCh = gSettings.servoMap[i];
-    writeServoPulseUs(i, mapCrsfToServoUs(gCrsfRxChannels[sourceCh]));
+    if (route == PwmRoute::kCrsfRx) {
+      const uint8_t sourceCh = gSettings.servoMap[i];
+      writeServoPulseUs(i, mapCrsfToServoUs(gCrsfRxChannels[sourceCh]));
+      continue;
+    }
+
+    if (i < gLatestChannelCount) {
+      writeServoPulseUs(i, mapPpmToServoUs(gLatestChannels[i]));
+    } else {
+      writeServoPulseUs(i, gSettings.servoPulseCenterUs);
+    }
   }
 }
 
@@ -914,7 +1512,18 @@ bool decodeCrsfRcChannels(const uint8_t *payload) {
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
     gCrsfRxChannels[i] = decoded[i];
   }
-  gLastCrsfRxMs = millis();
+  const uint32_t packetMs = millis();
+  if (gLastCrsfRxPacketSampleMs != 0 && packetMs > gLastCrsfRxPacketSampleMs) {
+    const float instantHz = 1000.0f / static_cast<float>(packetMs - gLastCrsfRxPacketSampleMs);
+    if (gCrsfRxRateHzEma <= 0.0f) {
+      gCrsfRxRateHzEma = instantHz;
+    } else {
+      gCrsfRxRateHzEma = (kCrsfRateEmaAlpha * instantHz) + ((1.0f - kCrsfRateEmaAlpha) * gCrsfRxRateHzEma);
+    }
+  }
+  gLastCrsfRxPacketSampleMs = packetMs;
+  gLastCrsfRxMs = packetMs;
+  recordRecentEvent(gRecentCrsfPacketMs, gRecentCrsfPacketCount, gLastCrsfRxMs);
   gCrsfRxPacketCounter++;
   gHasCrsfRxFrame = true;
   return true;
@@ -993,17 +1602,7 @@ void processCrsfRxInput() {
 #endif
 }
 
-void sendCrsfRcFrame(bool writeUsbSerial) {
-  uint16_t channels[kCrsfChannelCount];
-  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
-    channels[i] = kCrsfCenterValue;
-  }
-
-  const uint8_t count = (gLatestChannelCount < kCrsfChannelCount) ? gLatestChannelCount : kCrsfChannelCount;
-  for (uint8_t i = 0; i < count; ++i) {
-    channels[i] = mapPulseUsToCrsf(gLatestChannels[i]);
-  }
-
+void packCrsfRcPacket(const uint16_t channels[kCrsfChannelCount], uint8_t packet[kCrsfPacketSize]) {
   uint8_t payload[kCrsfPayloadSize] = {0};
   uint32_t bitBuffer = 0;
   uint8_t bitsInBuffer = 0;
@@ -1023,7 +1622,6 @@ void sendCrsfRcFrame(bool writeUsbSerial) {
     payload[payloadIndex++] = static_cast<uint8_t>(bitBuffer & 0xFFU);
   }
 
-  uint8_t packet[kCrsfPacketSize] = {0};
   packet[0] = kCrsfAddress;
   packet[1] = 24; // type + payload + crc
   packet[2] = kCrsfFrameTypeRcChannelsPacked;
@@ -1031,12 +1629,41 @@ void sendCrsfRcFrame(bool writeUsbSerial) {
     packet[3 + i] = payload[i];
   }
   packet[25] = crc8DvbS2(&packet[2], 1 + kCrsfPayloadSize);
+}
+
+void writeCrsfPacket(const uint8_t packet[kCrsfPacketSize], bool writeUsbSerial, bool writeHardwareUart) {
   if (writeUsbSerial) {
-    Serial.write(packet, sizeof(packet));
+    Serial.write(packet, kCrsfPacketSize);
   }
-  if (gCrsfUartReady) {
-    gCrsfUart.write(packet, sizeof(packet));
+  if (writeHardwareUart && gCrsfUartReady) {
+    gCrsfUart.write(packet, kCrsfPacketSize);
   }
+}
+
+void sendPpmAsCrsfFrame(bool writeUsbSerial, bool writeHardwareUart) {
+  uint16_t channels[kCrsfChannelCount];
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = kCrsfCenterValue;
+  }
+
+  const uint8_t count = (gLatestChannelCount < kCrsfChannelCount) ? gLatestChannelCount : kCrsfChannelCount;
+  for (uint8_t i = 0; i < count; ++i) {
+    channels[i] = mapPulseUsToCrsf(gLatestChannels[i]);
+  }
+
+  uint8_t packet[kCrsfPacketSize] = {0};
+  packCrsfRcPacket(channels, packet);
+  writeCrsfPacket(packet, writeUsbSerial, writeHardwareUart);
+}
+
+void sendCrsfRxToUsbFrame() {
+  uint16_t channels[kCrsfChannelCount] = {0};
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = gCrsfRxChannels[i];
+  }
+  uint8_t packet[kCrsfPacketSize] = {0};
+  packCrsfRcPacket(channels, packet);
+  writeCrsfPacket(packet, true, false);
 }
 
 bool copyFrameFromIsr(uint32_t &invalidPulses) {
@@ -1083,7 +1710,10 @@ bool updatePpmMonitorWindow(uint32_t nowMs, uint32_t invalidPulses) {
 void printPpmMonitorFrame(uint32_t invalidPulses) {
   const uint32_t nowMs = millis();
   const uint32_t crsfRxAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
-  const bool crsfRxFresh = gHasCrsfRxFrame && (crsfRxAgeMs <= gSettings.crsfRxTimeoutMs);
+  const bool crsfRxFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
+  const bool usbTextMode = isDebugOutputMode(gOutputMode);
+  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
+  const PwmRoute pwmRoute = gActivePwmRoute;
 
   uint16_t minChannelUs = 0;
   uint16_t maxChannelUs = 0;
@@ -1109,6 +1739,7 @@ void printPpmMonitorFrame(uint32_t invalidPulses) {
                 crsfRxFresh ? "ok" : (gHasCrsfRxFrame ? "stale" : "none"),
                 static_cast<unsigned long>(crsfRxAgeMs), static_cast<unsigned long>(gCrsfRxPacketCounter),
                 static_cast<unsigned long>(gCrsfRxInvalidCounter));
+  Serial.printf(" | route usb=%s pwm=%s", usbRouteReportLabel(usbRoute, usbTextMode), pwmRouteLabel(pwmRoute));
   Serial.printf(" | servo=%u,%u,%u", static_cast<unsigned>(gServoPulseUs[0]), static_cast<unsigned>(gServoPulseUs[1]),
                 static_cast<unsigned>(gServoPulseUs[2]));
   for (uint8_t i = 0; i < gLatestChannelCount; ++i) {
@@ -1218,7 +1849,7 @@ void applySettings(const RuntimeSettings &newSettings) {
   gButtonPressStartMs = (gButtonStableState == LOW) ? millis() : 0;
   gButtonLongPressHandled = false;
 
-  pinMode(gSettings.ppmInputPin, INPUT);
+  pinMode(gSettings.ppmInputPin, INPUT_PULLDOWN);
   attachInterrupt(digitalPinToInterrupt(gSettings.ppmInputPin), onPpmRise, RISING);
   gPpmInterruptAttached = true;
   gAttachedPpmPin = gSettings.ppmInputPin;
@@ -1232,6 +1863,34 @@ void applySettings(const RuntimeSettings &newSettings) {
 #endif
 
   setupServoOutputs(oldServoPins);
+
+  gLatestChannelCount = 0;
+  gLastFrameMs = 0;
+  gLatestFrameCounter = 0;
+  gLatestInvalidPulseCounter = 0;
+  gLastMonitorFrameCounter = 0;
+  gLastMonitorInvalidPulseCounter = 0;
+  gLastMonitorSampleMs = 0;
+  gLastMeasuredWindowHz = 0.0f;
+  gLastMeasuredInvalidDelta = 0;
+
+  gCrsfRxFramePos = 0;
+  gCrsfRxFrameExpected = 0;
+  gLastCrsfRxMs = 0;
+  gLastCrsfRxPacketSampleMs = 0;
+  gCrsfRxRateHzEma = 0.0f;
+  gHasCrsfRxFrame = false;
+
+  for (uint8_t i = 0; i < kRouteEventHistorySize; ++i) {
+    gRecentPpmFrameMs[i] = 0;
+    gRecentCrsfPacketMs[i] = 0;
+  }
+  gRecentPpmFrameCount = 0;
+  gRecentCrsfPacketCount = 0;
+  gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
+  gActivePwmRoute = PwmRoute::kCenter;
+  gLastUsbRouteChangeMs = 0;
+  gLastPwmRouteChangeMs = 0;
 
   if (oldSettings.monitorPrintIntervalMs != gSettings.monitorPrintIntervalMs) {
     gLastMonitorSampleMs = 0;
@@ -1302,10 +1961,16 @@ String settingsToJson() {
 
 String statusToJson() {
   const uint32_t nowMs = millis();
+  const bool usbTextMode = isDebugOutputMode(gOutputMode);
+  const char *ppmHealth = ppmHealthLabel(nowMs);
+  const char *crsfHealth = crsfRxHealthLabel(nowMs);
+  const float crsfRateHz = liveCrsfRxRateHz(nowMs);
   const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
+  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
+  const PwmRoute pwmRoute = gActivePwmRoute;
 
   String json;
-  json.reserve(480);
+  json.reserve(560);
   json = "{";
   json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
   json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
@@ -1318,12 +1983,17 @@ String statusToJson() {
   json += ",\"oled_i2c_addr\":\"0x" + String(OLED_I2C_ADDRESS, HEX) + "\"";
   json += ",\"output_mode\":" + String(outputModeToUint(gOutputMode));
   json += ",\"output_mode_label\":\"" + String(outputModeLabel(gOutputMode)) + "\"";
+  json += ",\"ppm_health_label\":\"" + String(ppmHealth) + "\"";
   json += ",\"frame_hz\":" + String(gLastMeasuredWindowHz, 2);
   json += ",\"frame_hz_ema\":" + String(gLastMeasuredWindowHz, 2);
   json += ",\"ppm_window_hz\":" + String(gLastMeasuredWindowHz, 2);
+  json += ",\"crsf_rx_health_label\":\"" + String(crsfHealth) + "\"";
   json += ",\"crsf_rx_packets\":" + String(gCrsfRxPacketCounter);
   json += ",\"crsf_rx_invalid\":" + String(gCrsfRxInvalidCounter);
   json += ",\"crsf_rx_age_ms\":" + String(crsfAgeMs);
+  json += ",\"crsf_rx_rate_hz\":" + String(crsfRateHz, 2);
+  json += ",\"usb_route_label\":\"" + String(usbRouteReportLabel(usbRoute, usbTextMode)) + "\"";
+  json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(pwmRoute)) + "\"";
   json += ",\"servo_us\":[" + String(gServoPulseUs[0]) + "," + String(gServoPulseUs[1]) + "," + String(gServoPulseUs[2]) + "]";
   json += "}";
   return json;
@@ -1657,6 +2327,8 @@ void setup() {
   Serial.begin(115200);
   delay(250);
   Serial.println("Boot: hdzero-headtracker-monitor");
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("Reset reason: %s (%d)\n", resetReasonLabel(resetReason), static_cast<int>(resetReason));
   Serial.printf("Pins: PPM=%u LED=%u BTN=%u UART_RX=%u UART_TX=%u SERVO=%u,%u,%u\n", PPM_INPUT_PIN, LED_PIN,
                 MODE_BUTTON_PIN, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN, SERVO_PWM_1_PIN, SERVO_PWM_2_PIN,
                 SERVO_PWM_3_PIN);
@@ -1679,17 +2351,29 @@ void loop() {
 
   uint32_t invalidPulses = 0;
   const bool frameReady = copyFrameFromIsr(invalidPulses);
+  if (frameReady) {
+    recordRecentEvent(gRecentPpmFrameMs, gRecentPpmFrameCount, gLastFrameMs);
+  }
+  const uint32_t crsfRxPacketCounterBefore = gCrsfRxPacketCounter;
   processCrsfRxInput();
-  updateServoOutputsFromCrsf();
   handleModeButton();
   pollButtonLongPress();
   const uint32_t nowMs = millis();
+  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+  const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
+  const bool usbTextMode = isDebugOutputMode(gOutputMode);
+  const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs, usbTextMode);
+  const PwmRoute pwmRoute = updatePwmRoute(nowMs);
+  applyPwmRoute(pwmRoute);
   const bool monitorWindowUpdated =
-      isDebugOutputMode(gOutputMode) && frameReady && updatePpmMonitorWindow(nowMs, invalidPulses);
+      usbTextMode && frameReady && updatePpmMonitorWindow(nowMs, invalidPulses);
   refreshOledStatus(nowMs);
 
   if (frameReady) {
-    sendCrsfRcFrame(!isDebugOutputMode(gOutputMode));
+    sendPpmAsCrsfFrame(usbRoute == UsbCrsfRoute::kPpm, !isSourceStale(ppmHealth));
+  }
+  if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
+    sendCrsfRxToUsbFrame();
   }
   if (monitorWindowUpdated) {
     printPpmMonitorFrame(invalidPulses);

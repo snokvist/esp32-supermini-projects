@@ -13,10 +13,13 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
   - fixed wiring: `GPIO4`=`SDA`, `GPIO5`=`SCL`, address `0x3C`
 - CRSF outputs:
   - USB CDC (`/dev/ttyACM0`) carries binary CRSF while on `HDZ>CRSF` or `UART>PWM`
-  - USB CDC returns to human-readable debug text in `DEBUG CFG`
+  - USB CDC normally follows PPM, but falls back to incoming CRSF RX when PPM is no longer healthy
+  - USB CDC returns to human-readable debug text in `DEBUG CFG` and route reporting shows this as `usb=TEXT`
   - UART1 on `GPIO21` TX + `GPIO20` RX at `420000` baud for direct FC/receiver wiring
+  - UART1 TX remains PPM-driven only; incoming CRSF RX is not echoed back to UART1
 - Servo PWM outputs:
-  - `GPIO0`, `GPIO1`, `GPIO2` at `100Hz` (driven from incoming CRSF CH1..CH3)
+  - `GPIO0`, `GPIO1`, `GPIO2` at `100Hz`
+  - normally driven from incoming CRSF CH1..CH3, with fallback to headtracker PPM when CRSF RX becomes stale
 - Web configuration:
   - AP SSID/password: `waybeam-backpack` / `waybeam-backpack`
   - AP network: `10.100.0.x` (`ESP32 = 10.100.0.1`, built-in DHCP server enabled)
@@ -85,13 +88,16 @@ pio device monitor -p /dev/ttyACM0 -b 115200
    - AP comes up only in this screen
    - OLED shows AP state, simplified health summary, and active pin map
    - PPM line shows the same stable windowed measured Hz used by the serial debug output and web status API
+   - CRSF line shows a smoothed CRSF packet rate instead of raw packet-age spikes
    - serial text diagnostics are printed here instead of on the graph screens
+   - status/debug route reporting shows which source currently owns USB CRSF output and PWM
 12. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
-   - inspect runtime status (frame rates, CRSF RX health, servo outputs)
+   - inspect the top status summary (screen, routes, PPM health/rate, CRSF RX health/rate, servo outputs)
    - change all runtime settings live
    - save settings to persistent storage (NVS) for next boot
    - reset all settings to firmware defaults with the `Reset to defaults` button (live + saved)
-   - navigate settings in grouped sections (Pins, Modes, CRSF/UART, Servo Outputs, PPM Decode, Timing/Health)
+   - navigate settings in grouped sections with inline guidance (Pins, Modes, CRSF/UART, Servo Outputs, PPM Decode, Timing/Health)
+   - use dropdowns for screen modes and servo source channels instead of manual numeric entry
    - see save-state diagnostics (`nvs_ready`), OLED status (`oled_ready`), current screen, and AP activity in status output
 
 ## Expected Behavior
@@ -108,12 +114,23 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 - `/dev/ttyACM0` should be treated as:
   - binary CRSF output on `HDZ>CRSF` and `UART>PWM`
   - human-readable debug console only in `DEBUG CFG`
+- Routing ownership uses source health plus route hysteresis:
+  - a source keeps its current route until it becomes stale on its configured timeout (`signal_timeout_ms` for PPM, `crsf_rx_timeout_ms` for CRSF RX)
+  - a source must re-acquire health with at least `3` valid events inside `150ms` before it can take ownership again
+  - route switches between live sources are held for at least `250ms` to reduce flapping
+  - healthy PPM owns CRSF output
+  - healthy CRSF RX owns PWM
+  - if only one source is healthy, it drives both output sides
 - Incoming UART1 CRSF RC packets (`0x16`) are parsed and mapped to servo outputs:
   - CH1 -> `GPIO0`
   - CH2 -> `GPIO1`
   - CH3 -> `GPIO2`
   - output rate: `100Hz`
-- If CRSF RX packets go stale for >`500ms`, servo outputs return to center (`1500us`).
+- If CRSF RX is no longer healthy, PWM falls back to fresh PPM headtracker channels (`PAN/ROL/TIL -> S1/S2/S3`). If neither source is healthy, servo outputs return to center (`1500us`).
+- If PPM is no longer healthy, USB CRSF output falls back to healthy incoming CRSF RX packets.
+- Incoming CRSF RX is mirrored only to USB during fallback. It is intentionally not re-sent on UART1 TX, which avoids output loops on attached CRSF hardware.
+- The PPM input uses `INPUT_PULLDOWN` to reduce floating/noisy interrupt bursts when the headtracker cable is unplugged or bouncing.
+- Boot serial now prints the ESP reset reason, which helps distinguish software faults from brownouts or hot-plug power glitches.
 - OLED status output runs independently of serial/web behavior:
   - if the OLED initializes, it renders one of the three runtime pages on `GPIO4/5`
   - if the OLED is missing or init fails, firmware continues running and reports a warning on serial
@@ -126,10 +143,21 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 - `DEBUG CFG` serial output includes:
   - measured `hz` over the current monitor window
   - `invalid(+delta)` for stale-signal/noise debugging
+  - `route usb=TEXT` means USB CDC is intentionally reserved for readable debug output in `DEBUG CFG`
 - Web status JSON reports the same stable windowed PPM rate used by `DEBUG CFG`:
   - `frame_hz`
   - `frame_hz_ema`
   - `ppm_window_hz`
+- Web status JSON also reports active output ownership:
+  - `usb_route_label`
+  - `pwm_route_label`
+- Web status JSON also includes CRSF packet age and smoothed CRSF packet rate:
+  - `ppm_health_label`
+  - `crsf_rx_health_label`
+  - `crsf_rx_age_ms`
+  - `crsf_rx_rate_hz`
+- `crsf_rx_rate_hz` is reported as a live value only while CRSF RX is fresh; stale/missing CRSF reports no carried-over rate.
+- The Web UI keeps the raw JSON status view under an expandable advanced section for deeper debugging.
 - `ch1/ch2/ch3` widths are typically around `1000..2000us`.
 - For BoxPro+, source-code mapping indicates:
   - `ch1 = pan`

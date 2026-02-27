@@ -13,7 +13,11 @@
 - Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
 - Runtime USB CDC behavior:
   - `HDZ>CRSF` and `UART>PWM`: `/dev/ttyACM0` carries binary CRSF frames
-  - `DEBUG CFG`: `/dev/ttyACM0` carries human-readable debug text
+  - healthy PPM owns USB CRSF output, with fallback to healthy CRSF RX when PPM drops stale
+  - `DEBUG CFG`: `/dev/ttyACM0` carries human-readable debug text, reported as `usb=TEXT`
+- UART1 TX note:
+  - CRSF RX fallback is mirrored to USB only
+  - incoming CRSF RX is not echoed back to UART1 TX, which avoids routing loops on attached CRSF hardware
 
 ## OLED Module
 
@@ -92,6 +96,9 @@ Connect:
 Recommended protection while validating unknown signal levels:
 
 - Add `1k` series resistor between tip and GPIO input
+- Internal `INPUT_PULLDOWN` is enabled on the PPM pin in firmware:
+  - this weakly biases the input low when the cable is unplugged
+  - it reduces floating/noise-triggered interrupts during hot-plug or poor ground conditions
 - If you later measure >3.3V pulses, add a divider/level shifter
 
 Bring-up checklist:
@@ -104,9 +111,15 @@ Bring-up checklist:
    - BOOT short press toggles `HDZ>CRSF` <-> `UART>PWM`
    - BOOT long press (`>3s`) enters `DEBUG CFG`
    - short press in `DEBUG CFG` returns to the last graph screen
-   - CRSF is emitted on UART1 `GPIO21` TX and on USB CDC while not in `DEBUG CFG`
-   - PWM outputs run at `100Hz` on `GPIO0/1/2` from incoming CRSF CH1/CH2/CH3
+   - fresh/healthy PPM is emitted on UART1 `GPIO21` TX and on USB CDC while not in `DEBUG CFG`
+   - if PPM loses health, USB CDC falls back to healthy CRSF RX
+   - PWM outputs run at `100Hz` on `GPIO0/1/2`, normally from incoming CRSF CH1/CH2/CH3
+   - if CRSF RX loses health, PWM falls back to the PPM headtracker channels
    - OLED output is active on `GPIO4/5`
+   - route hysteresis uses:
+     - source-specific stale timeouts (`signal_timeout_ms` for PPM, `crsf_rx_timeout_ms` for CRSF RX)
+     - `3` valid events within `150ms` to re-acquire source health before a source can take ownership again
+     - `250ms` minimum hold when switching between still-live sources
 5. In `HDZ>CRSF`, verify:
    - header shows `OK`, `WAIT`, or `STAL`
    - three centered graphs track `PAN`, `ROL`, `TIL`
@@ -119,11 +132,15 @@ Bring-up checklist:
    - AP starts only in this screen
    - OLED shows AP state, health summary, and pin map
    - PPM line shows the same stable windowed measured Hz used by the serial debug output and status API
+   - CRSF line shows a smoothed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
    - serial diagnostics are active on `/dev/ttyACM0`
 8. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
    - settings page loads
+   - top summary cards show current screen, route ownership, PPM health/rate, CRSF RX health/rate, and servo outputs
    - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
-   - status JSON updates (`web_ui_active`, `output_mode_label`, CRSF RX counters, servo values, `oled_ready`)
+   - mode and servo source fields use dropdowns instead of raw numeric entry
+   - status JSON updates (`web_ui_active`, `output_mode_label`, CRSF RX counters/rate, servo values, `oled_ready`)
+   - route labels update correctly (`usb_route_label`, `pwm_route_label`)
    - status JSON includes `nvs_ready: 1` during normal operation
    - apply/save actions are accepted
    - `Reset to defaults` restores firmware defaults live and persists them
@@ -132,6 +149,9 @@ Bring-up checklist:
    - `hz=...Hz` reports the measured PPM frame rate directly
    - `ch1/ch2/ch3` move around center (~1500us)
    - `invalid(+delta)` remains stable unless signal noise/wiring issues are present
+   - `route usb=TEXT pwm=...` indicates USB CDC is reserved for readable debug text in this screen
+   - outside `DEBUG CFG`, `route usb=... pwm=...` reflects current output ownership
+   - boot output includes `Reset reason: ...`, useful when diagnosing hot-plug resets
 
 Channel interpretation for BoxPro+ (from HDZero source code, inferred):
 
