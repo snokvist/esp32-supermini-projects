@@ -1,7 +1,10 @@
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <Wire.h>
 
 #include <cstdlib>
 
@@ -12,7 +15,7 @@
 // Connect HDZero BoxPro+ 3.5mm TS jack tip (HT PPM output) to this pin.
 // Sleeve goes to ESP32 GND.
 #ifndef PPM_INPUT_PIN
-#define PPM_INPUT_PIN 2
+#define PPM_INPUT_PIN 10
 #endif
 
 // On ESP32-C3 SuperMini, BOOT button is on GPIO9 (active low).
@@ -37,19 +40,31 @@
 #endif
 
 #ifndef SERVO_PWM_1_PIN
-#define SERVO_PWM_1_PIN 3
+#define SERVO_PWM_1_PIN 0
 #endif
 
 #ifndef SERVO_PWM_2_PIN
-#define SERVO_PWM_2_PIN 4
+#define SERVO_PWM_2_PIN 1
 #endif
 
 #ifndef SERVO_PWM_3_PIN
-#define SERVO_PWM_3_PIN 5
+#define SERVO_PWM_3_PIN 2
 #endif
 
 #ifndef SERVO_PWM_FREQUENCY_HZ
 #define SERVO_PWM_FREQUENCY_HZ 100
+#endif
+
+#ifndef OLED_SDA_PIN
+#define OLED_SDA_PIN 4
+#endif
+
+#ifndef OLED_SCL_PIN
+#define OLED_SCL_PIN 5
+#endif
+
+#ifndef OLED_I2C_ADDRESS
+#define OLED_I2C_ADDRESS 0x3C
 #endif
 
 namespace {
@@ -61,7 +76,6 @@ const IPAddress kApSubnet(255, 255, 255, 0);
 
 constexpr uint8_t kMaxChannels = 12;
 constexpr uint8_t kMinChannelsInFrame = 3;
-constexpr float kFrameHzEmaAlpha = 0.1f;
 
 constexpr uint8_t kCrsfAddress = 0xC8;
 constexpr uint8_t kCrsfFrameTypeRcChannelsPacked = 0x16;
@@ -77,8 +91,13 @@ constexpr uint8_t kServoCount = 3;
 constexpr uint8_t kServoPwmResolutionBits = 14;
 constexpr uint8_t kServoPwmChannels[kServoCount] = {0, 1, 2};
 constexpr uint16_t kCrsfRxBytesPerLoopLimit = 256;
+constexpr uint8_t kScreenWidth = 128;
+constexpr uint8_t kScreenHeight = 64;
+constexpr uint32_t kI2cClockHz = 400000;
+constexpr uint32_t kOledRefreshIntervalMs = 100;
+constexpr uint32_t kButtonLongPressMs = 3000;
 
-constexpr uint16_t kSettingsVersion = 1;
+constexpr uint16_t kSettingsVersion = 2;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -136,7 +155,7 @@ const sections=[
 ['servo_pwm_1_pin','Servo PWM 1 pin'],['servo_pwm_2_pin','Servo PWM 2 pin'],['servo_pwm_3_pin','Servo PWM 3 pin']
 ]},
 {title:'Modes', fields:[
-['output_mode_live','Output mode live (0=CRSF,1=monitor)'],['output_mode_default','Output mode boot default (0=CRSF,1=monitor)']
+['output_mode_live','Screen live (0=HDZero->CRSF,1=UART->PWM,2=Debug)'],['output_mode_default','Screen boot default (0=HDZero->CRSF,1=UART->PWM,2=Debug)']
 ]},
 {title:'CRSF / UART', fields:[
 ['crsf_uart_baud','CRSF UART baud'],['crsf_map_min_us','PPM->CRSF map min us'],['crsf_map_max_us','PPM->CRSF map max us'],['crsf_rx_timeout_ms','CRSF RX timeout ms']
@@ -150,8 +169,7 @@ const sections=[
 ['ppm_min_channel_us','PPM min pulse us'],['ppm_max_channel_us','PPM max pulse us'],['ppm_sync_gap_us','PPM sync gap us']
 ]},
 {title:'Timing / Health', fields:[
-['signal_timeout_ms','Signal timeout ms'],['button_debounce_ms','Button debounce ms'],['monitor_print_interval_ms','Monitor print interval ms'],
-['expected_min_frame_hz','Expected min frame Hz'],['expected_max_frame_hz','Expected max frame Hz']
+['signal_timeout_ms','Signal timeout ms'],['button_debounce_ms','Button debounce ms'],['monitor_print_interval_ms','Monitor print interval ms']
 ]}
 ];
 
@@ -253,9 +271,6 @@ struct RuntimeSettings {
   uint32_t buttonDebounceMs;
   uint32_t monitorPrintIntervalMs;
 
-  float expectedMinFrameHz;
-  float expectedMaxFrameHz;
-
   uint16_t crsfMapMinUs;
   uint16_t crsfMapMaxUs;
   uint32_t crsfRxTimeoutMs;
@@ -282,20 +297,21 @@ volatile uint32_t gInvalidPulseCounter = 0;
 uint16_t gLatestChannels[kMaxChannels] = {0};
 uint8_t gLatestChannelCount = 0;
 uint32_t gLastFrameMs = 0;
-uint32_t gLastFrameUs = 0;
-float gFrameHz = 0.0f;
-float gFrameHzEma = 0.0f;
-bool gHasFrameHzEma = false;
 bool gLedState = false;
 uint32_t gLastLedToggleMs = 0;
-uint32_t gLastPrintMs = 0;
+uint32_t gLastDebugMessageMs = 0;
 bool gButtonRawState = HIGH;
 bool gButtonStableState = HIGH;
 uint32_t gLastButtonChangeMs = 0;
+uint32_t gButtonPressStartMs = 0;
+bool gButtonLongPressHandled = false;
 uint32_t gLatestFrameCounter = 0;
 uint32_t gLatestInvalidPulseCounter = 0;
 uint32_t gLastMonitorFrameCounter = 0;
 uint32_t gLastMonitorInvalidPulseCounter = 0;
+uint32_t gLastMonitorSampleMs = 0;
+float gLastMeasuredWindowHz = 0.0f;
+uint32_t gLastMeasuredInvalidDelta = 0;
 
 HardwareSerial gCrsfUart(1);
 bool gCrsfUartReady = false;
@@ -308,6 +324,9 @@ uint32_t gCrsfRxPacketCounter = 0;
 uint32_t gCrsfRxInvalidCounter = 0;
 uint32_t gLastCrsfRxMs = 0;
 bool gHasCrsfRxFrame = false;
+Adafruit_SSD1306 gDisplay(kScreenWidth, kScreenHeight, &Wire, -1);
+bool gOledReady = false;
+uint32_t gLastOledRefreshMs = 0;
 
 bool gPpmInterruptAttached = false;
 uint8_t gAttachedPpmPin = PPM_INPUT_PIN;
@@ -319,9 +338,12 @@ Preferences gPrefs;
 bool gPrefsReady = false;
 WebServer gWeb(80);
 RuntimeSettings gSettings;
+bool gWebUiActive = false;
+bool gWebRoutesConfigured = false;
 
-enum class OutputMode : uint8_t { kCrsfSerial = 0, kPpmMonitor = 1 };
-OutputMode gOutputMode = OutputMode::kCrsfSerial;
+enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2 };
+OutputMode gOutputMode = OutputMode::kHdzeroCrsf;
+OutputMode gLastMainOutputMode = OutputMode::kHdzeroCrsf;
 
 RuntimeSettings defaultSettings() {
   RuntimeSettings s{};
@@ -348,9 +370,6 @@ RuntimeSettings defaultSettings() {
   s.buttonDebounceMs = 30;
   s.monitorPrintIntervalMs = 200;
 
-  s.expectedMinFrameHz = 45.0f;
-  s.expectedMaxFrameHz = 55.0f;
-
   s.crsfMapMinUs = 1000;
   s.crsfMapMaxUs = 2000;
   s.crsfRxTimeoutMs = 500;
@@ -359,7 +378,7 @@ RuntimeSettings defaultSettings() {
   s.servoPulseCenterUs = 1500;
   s.servoPulseMaxUs = 2000;
 
-  s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfSerial);
+  s.outputModeDefault = static_cast<uint8_t>(OutputMode::kHdzeroCrsf);
   return s;
 }
 
@@ -369,7 +388,219 @@ uint8_t clampU8(uint32_t value) {
   return (value > 255U) ? 255U : static_cast<uint8_t>(value);
 }
 
+bool isReservedOledPin(uint8_t pin) { return pin == OLED_SDA_PIN || pin == OLED_SCL_PIN; }
+
+bool isDebugOutputMode(OutputMode mode) { return mode == OutputMode::kDebugConfig; }
+
+const char *outputModeLabel(OutputMode mode) {
+  switch (mode) {
+    case OutputMode::kHdzeroCrsf:
+      return "HDZ>CRSF";
+    case OutputMode::kUartToPwm:
+      return "UART>PWM";
+    case OutputMode::kDebugConfig:
+      return "DEBUG";
+  }
+  return "UNK";
+}
+
+const char *ppmHealthLabel(uint32_t nowMs) {
+  if (gLastFrameMs == 0) {
+    return "WAIT";
+  }
+  return ((nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs) ? "OK" : "STAL";
+}
+
+const char *crsfRxHealthLabel(uint32_t nowMs) {
+  if (!gHasCrsfRxFrame) {
+    return "NONE";
+  }
+  return ((nowMs - gLastCrsfRxMs) <= gSettings.crsfRxTimeoutMs) ? "RXOK" : "STAL";
+}
+
+int16_t centeredFillPixels(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
+                           int16_t halfWidth) {
+  if (halfWidth <= 0) {
+    return 0;
+  }
+  uint16_t clampedValue = value;
+  if (clampedValue < minValue) {
+    clampedValue = minValue;
+  } else if (clampedValue > maxValue) {
+    clampedValue = maxValue;
+  }
+
+  if (clampedValue >= centerValue) {
+    const uint32_t range = static_cast<uint32_t>(maxValue - centerValue);
+    if (range == 0) {
+      return 0;
+    }
+    return static_cast<int16_t>((static_cast<uint32_t>(clampedValue - centerValue) * halfWidth) / range);
+  }
+
+  const uint32_t range = static_cast<uint32_t>(centerValue - minValue);
+  if (range == 0) {
+    return 0;
+  }
+  return -static_cast<int16_t>((static_cast<uint32_t>(centerValue - clampedValue) * halfWidth) / range);
+}
+
+int16_t centeredMarkerOffset(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
+                             int16_t halfWidth) {
+  int16_t offset = centeredFillPixels(value, minValue, centerValue, maxValue, halfWidth);
+  if (offset > halfWidth) {
+    offset = halfWidth;
+  } else if (offset < -halfWidth) {
+    offset = -halfWidth;
+  }
+  return offset;
+}
+
+void drawHeaderBar(const char *title, const char *status) {
+  gDisplay.fillRect(0, 0, kScreenWidth, 10, SSD1306_WHITE);
+  gDisplay.setTextSize(1);
+  gDisplay.setTextColor(SSD1306_BLACK);
+  gDisplay.setCursor(2, 1);
+  gDisplay.print(title);
+  if (status != nullptr) {
+    int16_t x1 = 0;
+    int16_t y1 = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    gDisplay.getTextBounds(status, 0, 0, &x1, &y1, &width, &height);
+    gDisplay.setCursor(kScreenWidth - static_cast<int16_t>(width) - 2, 1);
+    gDisplay.print(status);
+  }
+}
+
+void drawCenteredGraphRow(int16_t y, const char *label, bool hasValue, uint16_t value, uint16_t minValue,
+                          uint16_t centerValue, uint16_t maxValue) {
+  constexpr int16_t kGraphX = 22;
+  constexpr int16_t kGraphWidth = 76;
+  constexpr int16_t kGraphHeight = 12;
+  constexpr int16_t kValueX = 102;
+  const int16_t centerX = kGraphX + (kGraphWidth / 2);
+  const int16_t halfWidth = (kGraphWidth / 2) - 2;
+
+  gDisplay.setTextColor(SSD1306_WHITE);
+  gDisplay.setCursor(0, y + 2);
+  gDisplay.print(label);
+  gDisplay.drawRect(kGraphX, y, kGraphWidth, kGraphHeight, SSD1306_WHITE);
+  gDisplay.drawFastVLine(kGraphX + 1, y + 3, kGraphHeight - 6, SSD1306_WHITE);
+  gDisplay.drawFastVLine(kGraphX + (kGraphWidth / 4), y + 4, kGraphHeight - 8, SSD1306_WHITE);
+  gDisplay.drawFastVLine(centerX, y + 1, kGraphHeight - 2, SSD1306_WHITE);
+  gDisplay.drawFastVLine(kGraphX + ((kGraphWidth * 3) / 4), y + 4, kGraphHeight - 8, SSD1306_WHITE);
+  gDisplay.drawFastVLine(kGraphX + kGraphWidth - 2, y + 3, kGraphHeight - 6, SSD1306_WHITE);
+
+  if (hasValue) {
+    const int16_t fill = centeredFillPixels(value, minValue, centerValue, maxValue, halfWidth);
+    const int16_t markerX = centerX + centeredMarkerOffset(value, minValue, centerValue, maxValue, halfWidth);
+    if (fill > 0) {
+      gDisplay.fillRect(centerX + 1, y + 2, fill, kGraphHeight - 4, SSD1306_WHITE);
+    } else if (fill < 0) {
+      gDisplay.fillRect(centerX + fill, y + 2, -fill, kGraphHeight - 4, SSD1306_WHITE);
+    }
+    gDisplay.drawFastVLine(markerX, y + 1, kGraphHeight - 2, SSD1306_BLACK);
+    gDisplay.drawPixel(markerX - 1, y + (kGraphHeight / 2), SSD1306_WHITE);
+    gDisplay.drawPixel(markerX + 1, y + (kGraphHeight / 2), SSD1306_WHITE);
+    gDisplay.setCursor(kValueX, y + 2);
+    gDisplay.printf("%4u", static_cast<unsigned>(value));
+    return;
+  }
+
+  gDisplay.setCursor(kValueX, y + 2);
+  gDisplay.print("----");
+}
+
+void drawHdzeroToCrsfScreen(uint32_t nowMs) {
+  const uint16_t centerUs = static_cast<uint16_t>((gSettings.crsfMapMinUs + gSettings.crsfMapMaxUs) / 2U);
+  drawHeaderBar("HDZ>CRSF", ppmHealthLabel(nowMs));
+  drawCenteredGraphRow(14, "PAN", gLatestChannelCount >= 1, gLatestChannelCount >= 1 ? gLatestChannels[0] : 0,
+                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
+  drawCenteredGraphRow(30, "ROL", gLatestChannelCount >= 2, gLatestChannelCount >= 2 ? gLatestChannels[1] : 0,
+                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
+  drawCenteredGraphRow(46, "TIL", gLatestChannelCount >= 3, gLatestChannelCount >= 3 ? gLatestChannels[2] : 0,
+                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
+}
+
+void drawUartToPwmScreen(uint32_t nowMs) {
+  drawHeaderBar("UART>PWM", crsfRxHealthLabel(nowMs));
+  drawCenteredGraphRow(14, "S1", true, gServoPulseUs[0], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+                       gSettings.servoPulseMaxUs);
+  drawCenteredGraphRow(30, "S2", true, gServoPulseUs[1], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+                       gSettings.servoPulseMaxUs);
+  drawCenteredGraphRow(46, "S3", true, gServoPulseUs[2], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+                       gSettings.servoPulseMaxUs);
+}
+
+void drawDebugConfigScreen(uint32_t nowMs) {
+  const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
+
+  drawHeaderBar("DEBUG CFG", gWebUiActive ? "AP ON" : "AP OFF");
+  gDisplay.setTextColor(SSD1306_WHITE);
+  gDisplay.setCursor(0, 14);
+  gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
+  gDisplay.setCursor(0, 24);
+  if (gHasCrsfRxFrame) {
+    gDisplay.printf("CRSF %s %3lums", crsfRxHealthLabel(nowMs), static_cast<unsigned long>(crsfAgeMs));
+  } else {
+    gDisplay.print("CRSF NONE");
+  }
+  gDisplay.setCursor(0, 34);
+  gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
+  gDisplay.setCursor(0, 44);
+  gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
+                  gSettings.servoPwmPins[2]);
+  gDisplay.setCursor(0, 54);
+  gDisplay.print("short 1/2 long dbg");
+}
+
+void refreshOledStatus(uint32_t nowMs) {
+  if (!gOledReady) {
+    return;
+  }
+  if ((nowMs - gLastOledRefreshMs) < kOledRefreshIntervalMs) {
+    return;
+  }
+  gLastOledRefreshMs = nowMs;
+  gDisplay.clearDisplay();
+
+  if (gOutputMode == OutputMode::kHdzeroCrsf) {
+    drawHdzeroToCrsfScreen(nowMs);
+  } else if (gOutputMode == OutputMode::kUartToPwm) {
+    drawUartToPwmScreen(nowMs);
+  } else {
+    drawDebugConfigScreen(nowMs);
+  }
+
+  gDisplay.display();
+}
+
+void initOled() {
+  Serial.printf("OLED I2C: SDA=%u, SCL=%u, addr=0x%02X\n", OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDRESS);
+  Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
+  Wire.setClock(kI2cClockHz);
+
+  if (!gDisplay.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
+    Serial.println("WARN: SSD1306 init failed. Continuing without OLED.");
+    gOledReady = false;
+    return;
+  }
+
+  gOledReady = true;
+  gDisplay.clearDisplay();
+  gDisplay.setTextSize(1);
+  gDisplay.setTextColor(SSD1306_WHITE);
+  gDisplay.setCursor(0, 0);
+  gDisplay.println("HDZero OLED ready");
+  gDisplay.display();
+  Serial.println("OLED status screen ready");
+}
+
 bool validateSettings(const RuntimeSettings &s, String &error);
+void startDebugServices();
+void stopDebugServices();
+void setOutputMode(OutputMode mode, const char *source, bool force = false);
 
 bool saveSettingsToNvs(const RuntimeSettings &s) {
   if (!gPrefsReady) {
@@ -400,9 +631,6 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   ok &= (gPrefs.putUInt("stmo", s.signalTimeoutMs) == sizeof(uint32_t));
   ok &= (gPrefs.putUInt("bdb", s.buttonDebounceMs) == sizeof(uint32_t));
   ok &= (gPrefs.putUInt("mpri", s.monitorPrintIntervalMs) == sizeof(uint32_t));
-
-  ok &= (gPrefs.putFloat("ehmn", s.expectedMinFrameHz) == sizeof(float));
-  ok &= (gPrefs.putFloat("ehmx", s.expectedMaxFrameHz) == sizeof(float));
 
   ok &= (gPrefs.putUShort("cmn", s.crsfMapMinUs) == sizeof(uint16_t));
   ok &= (gPrefs.putUShort("cmx", s.crsfMapMaxUs) == sizeof(uint16_t));
@@ -452,9 +680,6 @@ RuntimeSettings loadSettingsFromNvs() {
   s.signalTimeoutMs = gPrefs.getUInt("stmo", s.signalTimeoutMs);
   s.buttonDebounceMs = gPrefs.getUInt("bdb", s.buttonDebounceMs);
   s.monitorPrintIntervalMs = gPrefs.getUInt("mpri", s.monitorPrintIntervalMs);
-
-  s.expectedMinFrameHz = gPrefs.getFloat("ehmn", s.expectedMinFrameHz);
-  s.expectedMaxFrameHz = gPrefs.getFloat("ehmx", s.expectedMaxFrameHz);
 
   s.crsfMapMinUs = gPrefs.getUShort("cmn", s.crsfMapMinUs);
   s.crsfMapMaxUs = gPrefs.getUShort("cmx", s.crsfMapMaxUs);
@@ -518,6 +743,10 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       error = String(field.name) + " must be one of GPIO 0..10, 20, or 21";
       return false;
     }
+    if (isReservedOledPin(field.pin)) {
+      error = String(field.name) + " cannot use reserved OLED pin GPIO" + String(field.pin);
+      return false;
+    }
   }
 
   if (s.ppmMinChannelUs >= s.ppmMaxChannelUs) {
@@ -526,10 +755,6 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
   }
   if (s.crsfMapMinUs >= s.crsfMapMaxUs) {
     error = "crsf_map_min_us must be < crsf_map_max_us";
-    return false;
-  }
-  if (!(s.expectedMinFrameHz < s.expectedMaxFrameHz)) {
-    error = "expected_min_frame_hz must be < expected_max_frame_hz";
     return false;
   }
   if (!(s.servoPulseMinUs < s.servoPulseCenterUs && s.servoPulseCenterUs < s.servoPulseMaxUs)) {
@@ -546,8 +771,8 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       return false;
     }
   }
-  if (s.outputModeDefault > 1) {
-    error = "output_mode_default must be 0 or 1";
+  if (s.outputModeDefault > 2) {
+    error = "output_mode_default must be 0, 1, or 2";
     return false;
   }
   if (pinListHasDuplicates(s)) {
@@ -626,8 +851,11 @@ uint32_t pulseUsToPwmDuty(uint16_t pulseUs) {
   return (static_cast<uint32_t>(pulseUs) * maxDuty + (periodUs / 2UL)) / periodUs;
 }
 
-void writeServoPulseUs(uint8_t servoIndex, uint16_t pulseUs) {
+void writeServoPulseUs(uint8_t servoIndex, uint16_t pulseUs, bool force = false) {
   if (servoIndex >= kServoCount) {
+    return;
+  }
+  if (!force && gServoPulseUs[servoIndex] == pulseUs) {
     return;
   }
   gServoPulseUs[servoIndex] = pulseUs;
@@ -642,7 +870,7 @@ void setupServoOutputs(const uint8_t oldPins[kServoCount]) {
   for (uint8_t i = 0; i < kServoCount; ++i) {
     ledcSetup(kServoPwmChannels[i], gSettings.servoPwmFrequencyHz, kServoPwmResolutionBits);
     ledcAttachPin(gSettings.servoPwmPins[i], kServoPwmChannels[i]);
-    writeServoPulseUs(i, gSettings.servoPulseCenterUs);
+    writeServoPulseUs(i, gSettings.servoPulseCenterUs, true);
     gAttachedServoPins[i] = gSettings.servoPwmPins[i];
   }
 }
@@ -765,7 +993,7 @@ void processCrsfRxInput() {
 #endif
 }
 
-void sendCrsfRcFrame() {
+void sendCrsfRcFrame(bool writeUsbSerial) {
   uint16_t channels[kCrsfChannelCount];
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
     channels[i] = kCrsfCenterValue;
@@ -803,7 +1031,9 @@ void sendCrsfRcFrame() {
     packet[3 + i] = payload[i];
   }
   packet[25] = crc8DvbS2(&packet[2], 1 + kCrsfPayloadSize);
-  Serial.write(packet, sizeof(packet));
+  if (writeUsbSerial) {
+    Serial.write(packet, sizeof(packet));
+  }
   if (gCrsfUartReady) {
     gCrsfUart.write(packet, sizeof(packet));
   }
@@ -830,39 +1060,28 @@ bool copyFrameFromIsr(uint32_t &invalidPulses) {
     return false;
   }
 
-  const uint32_t nowUs = micros();
-  const uint32_t nowMs = millis();
-  if (gLastFrameUs > 0) {
-    const uint32_t dtUs = nowUs - gLastFrameUs;
-    if (dtUs > 0) {
-      gFrameHz = 1000000.0f / static_cast<float>(dtUs);
-      if (!gHasFrameHzEma) {
-        gFrameHzEma = gFrameHz;
-        gHasFrameHzEma = true;
-      } else {
-        gFrameHzEma += kFrameHzEmaAlpha * (gFrameHz - gFrameHzEma);
-      }
-    }
+  gLastFrameMs = millis();
+  return true;
+}
+
+bool updatePpmMonitorWindow(uint32_t nowMs, uint32_t invalidPulses) {
+  const uint32_t elapsedMs = nowMs - gLastMonitorSampleMs;
+  if (elapsedMs < gSettings.monitorPrintIntervalMs) {
+    return false;
   }
-  gLastFrameUs = nowUs;
-  gLastFrameMs = nowMs;
+
+  const uint32_t frameCountDelta = gLatestFrameCounter - gLastMonitorFrameCounter;
+  gLastMeasuredWindowHz =
+      (elapsedMs > 0) ? (static_cast<float>(frameCountDelta) * 1000.0f / static_cast<float>(elapsedMs)) : 0.0f;
+  gLastMeasuredInvalidDelta = invalidPulses - gLastMonitorInvalidPulseCounter;
+  gLastMonitorFrameCounter = gLatestFrameCounter;
+  gLastMonitorInvalidPulseCounter = invalidPulses;
+  gLastMonitorSampleMs = nowMs;
   return true;
 }
 
 void printPpmMonitorFrame(uint32_t invalidPulses) {
   const uint32_t nowMs = millis();
-  const uint32_t elapsedMs = nowMs - gLastPrintMs;
-  if (elapsedMs < gSettings.monitorPrintIntervalMs) {
-    return;
-  }
-  gLastPrintMs = nowMs;
-
-  const uint32_t frameCountDelta = gLatestFrameCounter - gLastMonitorFrameCounter;
-  const float windowHz = (elapsedMs > 0) ? (static_cast<float>(frameCountDelta) * 1000.0f / static_cast<float>(elapsedMs))
-                                         : 0.0f;
-  const bool rateOk = (windowHz >= gSettings.expectedMinFrameHz) && (windowHz <= gSettings.expectedMaxFrameHz);
-  const uint32_t invalidDelta = invalidPulses - gLastMonitorInvalidPulseCounter;
-  const uint32_t frameAgeMs = nowMs - gLastFrameMs;
   const uint32_t crsfRxAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
   const bool crsfRxFresh = gHasCrsfRxFrame && (crsfRxAgeMs <= gSettings.crsfRxTimeoutMs);
 
@@ -881,10 +1100,10 @@ void printPpmMonitorFrame(uint32_t invalidPulses) {
     }
   }
 
-  Serial.printf("PPM: ch=%u inst=%.1fHz ema=%.1fHz win=%.1fHz(%s) age=%lums invalid=%lu(+%lu) span=%u..%u",
-                gLatestChannelCount, gFrameHz, gFrameHzEma, windowHz, rateOk ? "ok" : "warn",
-                static_cast<unsigned long>(frameAgeMs), static_cast<unsigned long>(invalidPulses),
-                static_cast<unsigned long>(invalidDelta), static_cast<unsigned>(minChannelUs),
+  Serial.printf("PPM: ch=%u hz=%.1fHz invalid=%lu(+%lu) span=%u..%u", gLatestChannelCount,
+                static_cast<double>(gLastMeasuredWindowHz),
+                static_cast<unsigned long>(invalidPulses),
+                static_cast<unsigned long>(gLastMeasuredInvalidDelta), static_cast<unsigned>(minChannelUs),
                 static_cast<unsigned>(maxChannelUs));
   Serial.printf(" | crsf_rx=%s age=%lums pkts=%lu bad=%lu",
                 crsfRxFresh ? "ok" : (gHasCrsfRxFrame ? "stale" : "none"),
@@ -901,8 +1120,6 @@ void printPpmMonitorFrame(uint32_t invalidPulses) {
   }
   Serial.println();
 
-  gLastMonitorFrameCounter = gLatestFrameCounter;
-  gLastMonitorInvalidPulseCounter = invalidPulses;
 }
 
 void updateLed() {
@@ -918,15 +1135,13 @@ void updateLed() {
 }
 
 void toggleOutputMode() {
-  if (gOutputMode == OutputMode::kCrsfSerial) {
-    gOutputMode = OutputMode::kPpmMonitor;
-    gLastMonitorFrameCounter = gLatestFrameCounter;
-    gLastMonitorInvalidPulseCounter = gLatestInvalidPulseCounter;
-    gLastPrintMs = millis();
-    Serial.println("Mode switched: PPM monitor text output");
+  if (gOutputMode == OutputMode::kDebugConfig) {
+    setOutputMode(gLastMainOutputMode, "button-short");
     return;
   }
-  gOutputMode = OutputMode::kCrsfSerial;
+  const OutputMode nextMode =
+      (gOutputMode == OutputMode::kHdzeroCrsf) ? OutputMode::kUartToPwm : OutputMode::kHdzeroCrsf;
+  setOutputMode(nextMode, "button-short");
 }
 
 void handleModeButton() {
@@ -947,7 +1162,26 @@ void handleModeButton() {
 
   gButtonStableState = gButtonRawState;
   if (gButtonStableState == LOW) {
+    gButtonPressStartMs = nowMs;
+    gButtonLongPressHandled = false;
+    return;
+  }
+
+  const uint32_t pressDurationMs = nowMs - gButtonPressStartMs;
+  if (!gButtonLongPressHandled && pressDurationMs < kButtonLongPressMs) {
     toggleOutputMode();
+  }
+}
+
+void pollButtonLongPress() {
+  if (gButtonStableState != LOW || gButtonLongPressHandled) {
+    return;
+  }
+
+  const uint32_t nowMs = millis();
+  if ((nowMs - gButtonPressStartMs) >= kButtonLongPressMs) {
+    gButtonLongPressHandled = true;
+    setOutputMode(OutputMode::kDebugConfig, "button-long");
   }
 }
 
@@ -981,6 +1215,8 @@ void applySettings(const RuntimeSettings &newSettings) {
   gButtonRawState = digitalRead(gSettings.modeButtonPin);
   gButtonStableState = gButtonRawState;
   gLastButtonChangeMs = millis();
+  gButtonPressStartMs = (gButtonStableState == LOW) ? millis() : 0;
+  gButtonLongPressHandled = false;
 
   pinMode(gSettings.ppmInputPin, INPUT);
   attachInterrupt(digitalPinToInterrupt(gSettings.ppmInputPin), onPpmRise, RISING);
@@ -998,7 +1234,9 @@ void applySettings(const RuntimeSettings &newSettings) {
   setupServoOutputs(oldServoPins);
 
   if (oldSettings.monitorPrintIntervalMs != gSettings.monitorPrintIntervalMs) {
-    gLastPrintMs = 0;
+    gLastMonitorSampleMs = 0;
+    gLastMeasuredWindowHz = 0.0f;
+    gLastMeasuredInvalidDelta = 0;
   }
 }
 
@@ -1018,25 +1256,6 @@ bool parseUIntArgOptional(const char *name, uint32_t minValue, uint32_t maxValue
     return false;
   }
   target = static_cast<uint32_t>(value);
-  return true;
-}
-
-bool parseFloatArgOptional(const char *name, float minValue, float maxValue, float &target, String &error) {
-  if (!gWeb.hasArg(name)) {
-    return true;
-  }
-  const String raw = gWeb.arg(name);
-  char *end = nullptr;
-  const float value = strtof(raw.c_str(), &end);
-  if (end == raw.c_str() || *end != '\0') {
-    error = String("invalid float for ") + name;
-    return false;
-  }
-  if (value < minValue || value > maxValue) {
-    error = String(name) + " out of range";
-    return false;
-  }
-  target = value;
   return true;
 }
 
@@ -1067,9 +1286,6 @@ String settingsToJson() {
   json += ",\"button_debounce_ms\":" + String(gSettings.buttonDebounceMs);
   json += ",\"monitor_print_interval_ms\":" + String(gSettings.monitorPrintIntervalMs);
 
-  json += ",\"expected_min_frame_hz\":" + String(gSettings.expectedMinFrameHz, 2);
-  json += ",\"expected_max_frame_hz\":" + String(gSettings.expectedMaxFrameHz, 2);
-
   json += ",\"crsf_map_min_us\":" + String(gSettings.crsfMapMinUs);
   json += ",\"crsf_map_max_us\":" + String(gSettings.crsfMapMaxUs);
   json += ",\"crsf_rx_timeout_ms\":" + String(gSettings.crsfRxTimeoutMs);
@@ -1089,15 +1305,22 @@ String statusToJson() {
   const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
 
   String json;
-  json.reserve(300);
+  json.reserve(480);
   json = "{";
   json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
   json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
   json += ",\"stations\":" + String(WiFi.softAPgetStationNum());
+  json += ",\"web_ui_active\":" + String(gWebUiActive ? 1 : 0);
   json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
+  json += ",\"oled_ready\":" + String(gOledReady ? 1 : 0);
+  json += ",\"oled_sda_pin\":" + String(OLED_SDA_PIN);
+  json += ",\"oled_scl_pin\":" + String(OLED_SCL_PIN);
+  json += ",\"oled_i2c_addr\":\"0x" + String(OLED_I2C_ADDRESS, HEX) + "\"";
   json += ",\"output_mode\":" + String(outputModeToUint(gOutputMode));
-  json += ",\"frame_hz\":" + String(gFrameHz, 2);
-  json += ",\"frame_hz_ema\":" + String(gFrameHzEma, 2);
+  json += ",\"output_mode_label\":\"" + String(outputModeLabel(gOutputMode)) + "\"";
+  json += ",\"frame_hz\":" + String(gLastMeasuredWindowHz, 2);
+  json += ",\"frame_hz_ema\":" + String(gLastMeasuredWindowHz, 2);
+  json += ",\"ppm_window_hz\":" + String(gLastMeasuredWindowHz, 2);
   json += ",\"crsf_rx_packets\":" + String(gCrsfRxPacketCounter);
   json += ",\"crsf_rx_invalid\":" + String(gCrsfRxInvalidCounter);
   json += ",\"crsf_rx_age_ms\":" + String(crsfAgeMs);
@@ -1264,20 +1487,6 @@ void handlePostSettings() {
   }
   candidate.monitorPrintIntervalMs = tmp;
 
-  float tmpF = candidate.expectedMinFrameHz;
-  if (!parseFloatArgOptional("expected_min_frame_hz", 1.0f, 500.0f, tmpF, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
-  }
-  candidate.expectedMinFrameHz = tmpF;
-
-  tmpF = candidate.expectedMaxFrameHz;
-  if (!parseFloatArgOptional("expected_max_frame_hz", 1.0f, 500.0f, tmpF, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
-  }
-  candidate.expectedMaxFrameHz = tmpF;
-
   tmp = candidate.crsfMapMinUs;
   if (!parseUIntArgOptional("crsf_map_min_us", 500, 2500, tmp, error)) {
     gWeb.send(400, "text/plain", error);
@@ -1321,7 +1530,7 @@ void handlePostSettings() {
   candidate.servoPulseMaxUs = static_cast<uint16_t>(tmp);
 
   tmp = candidate.outputModeDefault;
-  if (!parseUIntArgOptional("output_mode_default", 0, 1, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_default", 0, 2, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -1329,7 +1538,7 @@ void handlePostSettings() {
 
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   tmp = requestedLiveMode;
-  if (!parseUIntArgOptional("output_mode_live", 0, 1, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_live", 0, 2, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -1341,7 +1550,7 @@ void handlePostSettings() {
   }
 
   applySettings(candidate);
-  gOutputMode = (requestedLiveMode == 0) ? OutputMode::kCrsfSerial : OutputMode::kPpmMonitor;
+  const OutputMode requestedMode = static_cast<OutputMode>(requestedLiveMode);
 
   const bool persist = gWeb.hasArg("persist") && (gWeb.arg("persist") == "1");
   bool persisted = false;
@@ -1355,6 +1564,7 @@ void handlePostSettings() {
     return;
   }
   gWeb.send(200, "text/plain", persist ? "Applied live and saved" : "Applied live");
+  setOutputMode(requestedMode, "web", true);
 }
 
 void handleResetDefaults() {
@@ -1366,7 +1576,7 @@ void handleResetDefaults() {
   }
 
   applySettings(defaults);
-  gOutputMode = (defaults.outputModeDefault == 0) ? OutputMode::kCrsfSerial : OutputMode::kPpmMonitor;
+  const OutputMode defaultMode = static_cast<OutputMode>(defaults.outputModeDefault);
   const bool saved = saveSettingsToNvs(gSettings);
   setNoCacheHeaders();
   if (!saved) {
@@ -1374,9 +1584,27 @@ void handleResetDefaults() {
     return;
   }
   gWeb.send(200, "text/plain", "Reset to defaults, applied live, and saved");
+  setOutputMode(defaultMode, "reset", true);
 }
 
-void setupWebUi() {
+void configureWebUiRoutes() {
+  if (gWebRoutesConfigured) {
+    return;
+  }
+  gWeb.on("/", HTTP_GET, handleRoot);
+  gWeb.on("/api/settings", HTTP_GET, handleGetSettings);
+  gWeb.on("/api/settings", HTTP_POST, handlePostSettings);
+  gWeb.on("/api/reset_defaults", HTTP_POST, handleResetDefaults);
+  gWeb.on("/api/status", HTTP_GET, handleGetStatus);
+  gWeb.onNotFound([]() { gWeb.send(404, "text/plain", "Not Found"); });
+  gWebRoutesConfigured = true;
+}
+
+void startDebugServices() {
+  if (gWebUiActive) {
+    return;
+  }
+  configureWebUiRoutes();
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAPConfig(kApIp, kApGateway, kApSubnet)) {
     Serial.println("WARN: Failed to configure AP network settings");
@@ -1384,20 +1612,54 @@ void setupWebUi() {
   if (!WiFi.softAP(kApSsid, kApPassword)) {
     Serial.println("WARN: Failed to start SoftAP");
   }
-
-  gWeb.on("/", HTTP_GET, handleRoot);
-  gWeb.on("/api/settings", HTTP_GET, handleGetSettings);
-  gWeb.on("/api/settings", HTTP_POST, handlePostSettings);
-  gWeb.on("/api/reset_defaults", HTTP_POST, handleResetDefaults);
-  gWeb.on("/api/status", HTTP_GET, handleGetStatus);
-  gWeb.onNotFound([]() { gWeb.send(404, "text/plain", "Not Found"); });
   gWeb.begin();
+  gWebUiActive = true;
+  Serial.println("Debug/config AP enabled");
+}
+
+void stopDebugServices() {
+  if (!gWebUiActive) {
+    return;
+  }
+  gWeb.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  gWebUiActive = false;
+  Serial.println("Debug/config AP disabled");
+}
+
+void setOutputMode(OutputMode mode, const char *source, bool force) {
+  if (!force && gOutputMode == mode) {
+    return;
+  }
+  if (!isDebugOutputMode(mode)) {
+    gLastMainOutputMode = mode;
+  }
+  gOutputMode = mode;
+  if (isDebugOutputMode(gOutputMode)) {
+    gLastMonitorFrameCounter = gLatestFrameCounter;
+    gLastMonitorInvalidPulseCounter = gLatestInvalidPulseCounter;
+    gLastMonitorSampleMs = millis();
+    gLastMeasuredWindowHz = 0.0f;
+    gLastMeasuredInvalidDelta = 0;
+    gLastDebugMessageMs = millis();
+    startDebugServices();
+  } else {
+    stopDebugServices();
+  }
+  Serial.printf("Screen -> %s (%s)\n", outputModeLabel(gOutputMode), source);
+  gLastOledRefreshMs = 0;
 }
 
 } // namespace
 
 void setup() {
   Serial.begin(115200);
+  delay(250);
+  Serial.println("Boot: hdzero-headtracker-monitor");
+  Serial.printf("Pins: PPM=%u LED=%u BTN=%u UART_RX=%u UART_TX=%u SERVO=%u,%u,%u\n", PPM_INPUT_PIN, LED_PIN,
+                MODE_BUTTON_PIN, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN, SERVO_PWM_1_PIN, SERVO_PWM_2_PIN,
+                SERVO_PWM_3_PIN);
   gPrefsReady = gPrefs.begin("waybeam", false);
   if (!gPrefsReady) {
     Serial.println("WARN: Preferences init failed; persistence disabled");
@@ -1405,34 +1667,39 @@ void setup() {
 
   gSettings = loadSettingsFromNvs();
   applySettings(gSettings);
-  gOutputMode = (gSettings.outputModeDefault == 0) ? OutputMode::kCrsfSerial : OutputMode::kPpmMonitor;
-
-  setupWebUi();
+  setOutputMode(static_cast<OutputMode>(gSettings.outputModeDefault), "boot", true);
+  initOled();
+  refreshOledStatus(millis());
 }
 
 void loop() {
-  gWeb.handleClient();
+  if (gWebUiActive) {
+    gWeb.handleClient();
+  }
 
   uint32_t invalidPulses = 0;
   const bool frameReady = copyFrameFromIsr(invalidPulses);
   processCrsfRxInput();
   updateServoOutputsFromCrsf();
   handleModeButton();
+  pollButtonLongPress();
+  const uint32_t nowMs = millis();
+  const bool monitorWindowUpdated =
+      isDebugOutputMode(gOutputMode) && frameReady && updatePpmMonitorWindow(nowMs, invalidPulses);
+  refreshOledStatus(nowMs);
 
   if (frameReady) {
-    if (gOutputMode == OutputMode::kCrsfSerial) {
-      sendCrsfRcFrame();
-    } else {
-      printPpmMonitorFrame(invalidPulses);
-    }
+    sendCrsfRcFrame(!isDebugOutputMode(gOutputMode));
+  }
+  if (monitorWindowUpdated) {
+    printPpmMonitorFrame(invalidPulses);
   }
 
   updateLed();
 
-  const uint32_t nowMs = millis();
-  if (gOutputMode == OutputMode::kPpmMonitor && (nowMs - gLastFrameMs) > gSettings.signalTimeoutMs &&
-      (nowMs - gLastPrintMs) > 1000) {
-    gLastPrintMs = nowMs;
+  if (isDebugOutputMode(gOutputMode) && (nowMs - gLastFrameMs) > gSettings.signalTimeoutMs &&
+      (nowMs - gLastDebugMessageMs) > 1000) {
+    gLastDebugMessageMs = nowMs;
     Serial.println("No PPM frame detected yet. Check HT enabled + wiring.");
   }
 }
