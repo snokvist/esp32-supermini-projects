@@ -33,7 +33,7 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
 - `UART>PWM` screen: visualize live servo outputs from incoming CRSF UART with three centered bar graphs
 - `CRSF TX12` screen: visualize the first 12 outgoing CRSF channels in two compact columns, following the active CRSF output source
 - Boot default: power-on starts on `CRSF TX12`
-- `DEBUG CFG` screen: enable AP/web config while keeping the normal CRSF USB output active
+- `DEBUG CFG` screen: enable AP/web config while keeping the normal CRSF output active on the selected target
 
 ## How To Build and Flash
 
@@ -92,7 +92,7 @@ pio device monitor -p /dev/ttyACM0 -b 420000
   - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
   - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
    - USB CDC keeps streaming the active CRSF source instead of switching to text output
-   - status/debug route reporting shows which source currently owns USB CRSF output and PWM
+   - status/debug route reporting shows which source currently owns CRSF output and PWM
 12. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
    - inspect the top status summary (screen, routes, PPM health/rate, CRSF RX health/rate, servo outputs)
    - change all runtime settings live
@@ -132,7 +132,7 @@ pio device monitor -p /dev/ttyACM0 -b 420000
   - CH3 -> `GPIO2`
   - output rate: `100Hz`
 - If CRSF RX is no longer healthy, PWM falls back to fresh PPM headtracker channels (`PAN/ROL/TIL -> S1/S2/S3`). If neither source is healthy, servo outputs return to center (`1500us`).
-- If PPM is no longer healthy, USB CRSF output falls back to healthy incoming CRSF RX packets.
+- If PPM is no longer healthy, CRSF output falls back to healthy incoming CRSF RX packets on the selected output target.
 - During CRSF RX fallback, incoming CRSF is forwarded to whichever output target is selected in the web UI (USB Serial or HW UART TX).
 - The PPM input uses `INPUT_PULLDOWN` to reduce floating/noisy interrupt bursts when the headtracker cable is unplugged or bouncing.
 - Boot serial now prints the ESP reset reason, which helps distinguish software faults from brownouts or hot-plug power glitches.
@@ -146,7 +146,7 @@ pio device monitor -p /dev/ttyACM0 -b 420000
 - SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6` and requests `19.5dBm` TX power in `DEBUG CFG`.
 - Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
 - Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`), with `GPIO4/5` reserved for the OLED.
-- `DEBUG CFG` no longer switches USB CDC to a text console; OLED and Web UI are the intended debug surfaces while CRSF output continues uninterrupted.
+- `DEBUG CFG` keeps CRSF output active on the selected target; OLED and Web UI are the intended debug surfaces.
 - Web status JSON reports the same stable windowed PPM rate used by `DEBUG CFG`:
   - `frame_hz`
   - `frame_hz_ema`

@@ -8,16 +8,15 @@
 ## USB / Serial
 
 - Default upload/monitor port: `/dev/ttyACM0`
-- USB serial monitor baud: `115200`
-- CRSF UART link: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud
+- USB Serial and HW UART both run at `420000` baud (standard CRSF rate)
+- HW UART: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud (configurable via web UI)
 - Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
-- Runtime USB CDC behavior:
-  - `HDZ>CRSF`, `UART>PWM`, `CRSF TX12`, and `DEBUG CFG`: `/dev/ttyACM0` carries binary CRSF frames
-  - healthy PPM owns USB CRSF output, with fallback to healthy CRSF RX when PPM drops stale
-  - boot logs remain readable before runtime CRSF output begins
-- UART1 TX note:
-  - CRSF RX fallback is mirrored to USB only
-  - incoming CRSF RX is not echoed back to UART1 TX, which avoids routing loops on attached CRSF hardware
+- CRSF output target is selectable via web UI:
+  - USB Serial (default): CRSF frames sent over USB CDC, boot/debug prints active
+  - HW UART TX: CRSF frames sent over UART1 TX, USB Serial completely silenced
+  - Both (USB + HW UART): CRSF frames sent to both outputs simultaneously
+- Healthy PPM owns CRSF output on the selected target, with fallback to healthy CRSF RX when PPM drops stale
+- During CRSF RX fallback, incoming CRSF is forwarded to whichever output target is selected
 
 ## OLED Module
 
@@ -115,8 +114,8 @@ Bring-up checklist:
    - BOOT short press cycles `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
    - BOOT long press (`>3s`) enters `DEBUG CFG`
    - short press in `DEBUG CFG` returns to the last graph screen
-   - fresh/healthy PPM is emitted on UART1 `GPIO21` TX and on USB CDC on every runtime screen
-   - if PPM loses health, USB CDC falls back to healthy CRSF RX
+   - fresh/healthy PPM is emitted on the selected CRSF output target (USB Serial, HW UART TX, or Both)
+   - if PPM loses health, output falls back to healthy CRSF RX on the selected target
    - PWM outputs run at `100Hz` on `GPIO0/1/2`, normally from incoming CRSF CH1/CH2/CH3
    - if CRSF RX loses health, PWM falls back to the PPM headtracker channels
    - OLED output is active on `GPIO4/5`
@@ -160,10 +159,11 @@ Bring-up checklist:
    - apply/save actions are accepted
    - `Reset to defaults` restores firmware defaults live and persists them
    - invalid pin selections are rejected by API validation, including any attempt to use `GPIO4/5`
-10. If you open serial monitor at `115200`, expect:
+10. If CRSF output target is USB Serial (default), open serial monitor at `420000`:
    - readable boot output before runtime CRSF starts, including `Reset reason: ...`
    - binary CRSF frames during normal runtime on all four screens
    - route ownership visible through OLED/Web UI instead of text logs on USB CDC
+   - if target is HW UART TX, USB Serial is completely silent (no boot prints, no CRSF)
 
 Channel interpretation for BoxPro+ (from HDZero source code, inferred):
 

@@ -604,3 +604,27 @@ Use this file as a running implementation log.
 - Extended the Web UI mode dropdowns and mode validation to include the new screen.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-28 - Selectable CRSF Output Target
+
+- Added a web UI dropdown to select the CRSF output target:
+  - `USB Serial` (default, backward-compatible)
+  - `HW UART TX` (silences USB Serial entirely)
+  - `Both (USB + HW UART)` (simultaneous output to both)
+- Changed USB Serial and HW UART baud to `420000` (standard CRSF rate) for both directions.
+- Updated the Web UI `CRSF / UART` section:
+  - UART baud label now reads `HW UART baud (RX + TX)` to clarify it applies to both directions on the single UART
+  - section note describes the three output targets and that USB Serial always runs at `420000`
+- When `HW UART TX` is selected, USB Serial is completely silenced:
+  - boot prints, OLED init messages, and runtime CRSF are all suppressed
+  - settings load is moved before boot prints in `setup()` so the silence takes effect immediately
+- Added NVS persistence for the new setting (`cotr` key, schema version bumped from `3` to `4`).
+- Removed dead `sendCrsfRxToUsbFrame()` function after inlining CRSF RX fallback routing into the main loop.
+- Updated README, HARDWARE.md, and Web UI to document the new output target options.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run -t upload --upload-port /dev/ttyACM0` successful
+  - confirmed USB CRSF output at `420000` baud
+  - confirmed HW UART TX output at `420000` baud on remote device
+  - confirmed USB Serial silence when `HW UART TX` is selected
+  - confirmed `Both` mode sends to both outputs simultaneously
