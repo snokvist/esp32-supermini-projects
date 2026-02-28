@@ -13,7 +13,7 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
   - fixed wiring: `GPIO4`=`SDA`, `GPIO5`=`SCL`, address `0x3C`
 - CRSF outputs:
   - USB CDC (`/dev/ttyACM0`) and UART1 both run at `420000` baud (standard CRSF rate)
-  - a web UI dropdown selects the CRSF output target: USB Serial (default) or HW UART TX
+  - a web UI dropdown selects the CRSF output target: USB Serial (default), HW UART TX, or Both
   - the active output target normally follows PPM, but falls back to incoming CRSF RX when PPM is no longer healthy
   - UART1 on `GPIO21` TX + `GPIO20` RX for direct FC/receiver wiring
 - Servo PWM outputs:
@@ -112,8 +112,9 @@ pio device monitor -p /dev/ttyACM0 -b 420000
   - short press in `DEBUG CFG` returns to the last graph screen
 - CRSF output target is selectable via web UI:
   - USB Serial (default): CRSF frames sent over USB CDC on all runtime screens
-  - HW UART TX: CRSF frames sent over UART1 `GPIO21` TX instead, USB Serial debug prints suppressed
-  - both USB and UART1 run at `420000` baud (standard CRSF rate)
+  - HW UART TX: CRSF frames sent over UART1 `GPIO21` TX instead, USB Serial completely silenced
+  - Both (USB + HW UART): CRSF frames sent to both outputs simultaneously
+  - all outputs run at `420000` baud (standard CRSF rate)
 - On this firmware config (`ARDUINO_USB_MODE=1`), `/dev/ttyACM0` is native USB CDC, not an automatic mirror of UART pins.
 - `/dev/ttyACM0` should be treated as:
   - binary CRSF output on `HDZ>CRSF`, `UART>PWM`, `CRSF TX12`, and `DEBUG CFG`
