@@ -12,7 +12,7 @@
 - CRSF UART link: `UART1 TX GPIO21 + RX GPIO20 @ 420000` baud
 - Note: with `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `/dev/ttyACM0` is native USB CDC and is not an automatic UART pin mirror.
 - Runtime USB CDC behavior:
-  - `HDZ>CRSF` and `UART>PWM`: `/dev/ttyACM0` carries binary CRSF frames
+  - `HDZ>CRSF`, `UART>PWM`, and `CRSF TX12`: `/dev/ttyACM0` carries binary CRSF frames
   - healthy PPM owns USB CRSF output, with fallback to healthy CRSF RX when PPM drops stale
   - `DEBUG CFG`: `/dev/ttyACM0` carries human-readable debug text, reported as `usb=TEXT`
 - UART1 TX note:
@@ -33,11 +33,14 @@
 ## WiFi / Web UI
 
 - AP SSID: `waybeam-backpack`
-- AP password: `waybeam-backpack`
+- AP password: none (open network)
+- AP channel: `6`
 - AP IP: `10.100.0.1`
 - AP subnet: `255.255.255.0` (`10.100.0.x`)
 - DHCP: enabled only while `DEBUG CFG` screen is active
 - Web UI: `http://10.100.0.1/` while `DEBUG CFG` is active
+- AP bring-up is hardened in firmware by a simple clean restart path for `waybeam-backpack`, while leaving channel/visibility on the normal SDK defaults and keeping AP timing logs enabled for diagnosis
+- SoftAP beacon interval is already at the ESP32-C3 minimum/default (`100 TU`), so firmware now forces channel `6`, requests `19.5dBm` TX power in `DEBUG CFG`, and logs AP start/configuration in chronological order to make visibility issues easier to diagnose.
 - Status JSON includes `nvs_ready` (1 when preferences persistence is available).
 
 ## Configurable GPIO Guardrails
@@ -107,8 +110,8 @@ Bring-up checklist:
 2. Plug jack and power both devices.
 3. Flash this project.
 4. Confirm default runtime behavior:
-   - default screen is `HDZ>CRSF`
-   - BOOT short press toggles `HDZ>CRSF` <-> `UART>PWM`
+   - default screen is `CRSF TX12`
+   - BOOT short press cycles `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
    - BOOT long press (`>3s`) enters `DEBUG CFG`
    - short press in `DEBUG CFG` returns to the last graph screen
    - fresh/healthy PPM is emitted on UART1 `GPIO21` TX and on USB CDC while not in `DEBUG CFG`
@@ -128,13 +131,21 @@ Bring-up checklist:
    - header shows `RXOK`, `NONE`, or `STAL`
    - three centered graphs track `S1`, `S2`, `S3`
    - graph rows show edge/quarter/center guide marks and a live value marker
-7. In `DEBUG CFG`, verify:
+7. In `CRSF TX12`, verify:
+   - header shows the active CRSF output source (`PPM`, `CRSF`, or `NONE`)
+   - two compact columns show outgoing CRSF channels `1..12`
+   - the slim bars are visibly narrower than the main graph screens
+   - when PPM owns CRSF output, channels `1..3` follow live PPM headtracker movement and channels `4..12` remain centered by default
+   - when CRSF RX owns fallback CRSF output, the screen follows the decoded CRSF RX channels instead
+8. In `DEBUG CFG`, verify:
    - AP starts only in this screen
+   - association should complete promptly after the AP appears
    - OLED shows AP state, health summary, and pin map
    - PPM line shows the same stable windowed measured Hz used by the serial debug output and status API
-   - CRSF line shows a smoothed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
+   - CRSF line shows a windowed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
+   - CRSF RX rate uses at least a `200ms` window even if `monitor_print_interval_ms` is configured lower
    - serial diagnostics are active on `/dev/ttyACM0`
-8. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
+9. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
    - settings page loads
    - top summary cards show current screen, route ownership, PPM health/rate, CRSF RX health/rate, and servo outputs
    - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
@@ -145,13 +156,17 @@ Bring-up checklist:
    - apply/save actions are accepted
    - `Reset to defaults` restores firmware defaults live and persists them
    - invalid pin selections are rejected by API validation, including any attempt to use `GPIO4/5`
-9. In `DEBUG CFG`, open serial monitor at `115200` and confirm:
+10. In `DEBUG CFG`, open serial monitor at `115200` and confirm:
    - `hz=...Hz` reports the measured PPM frame rate directly
    - `ch1/ch2/ch3` move around center (~1500us)
    - `invalid(+delta)` remains stable unless signal noise/wiring issues are present
    - `route usb=TEXT pwm=...` indicates USB CDC is reserved for readable debug text in this screen
    - outside `DEBUG CFG`, `route usb=... pwm=...` reflects current output ownership
    - boot output includes `Reset reason: ...`, useful when diagnosing hot-plug resets
+   - AP event timing logs appear when entering debug and when a client joins:
+     - `AP event: START ...`
+     - `AP event: STA connected ...`
+     - `AP event: STA got IP ...`
 
 Channel interpretation for BoxPro+ (from HDZero source code, inferred):
 
