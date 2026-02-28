@@ -356,6 +356,7 @@ pre{
 .adv-toggle.active{border-color:var(--accent);background:#edf5fa;color:var(--accent)}
 .section.advanced{display:none}
 .show-advanced .section.advanced{display:block}
+.show-advanced .section:not(.advanced){display:none}
 </style>
 </head>
 <body>
