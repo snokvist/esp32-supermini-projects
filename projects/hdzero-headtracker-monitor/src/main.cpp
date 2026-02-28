@@ -372,12 +372,12 @@ const sections=[
 ['2','Debug / Config']
 ]}
 ]},
-{title:'CRSF / UART', note:'Incoming CRSF drives PWM first. If PPM drops out, healthy CRSF can also take over USB output.', fields:[
+{title:'CRSF / UART', note:'CRSF output target selects where outgoing CRSF frames are sent. UART baud applies to both RX and TX on the hardware UART (GPIO20/21). USB Serial always runs at 420000.', fields:[
 {name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
 ['0','USB Serial'],
 ['1','HW UART TX']
 ]},
-{name:'crsf_uart_baud',label:'CRSF UART baud',type:'number'},
+{name:'crsf_uart_baud',label:'HW UART baud (RX + TX)',type:'number'},
 {name:'crsf_map_min_us',label:'PPM -> CRSF map min us',type:'number'},
 {name:'crsf_map_max_us',label:'PPM -> CRSF map max us',type:'number'},
 {name:'crsf_rx_timeout_ms',label:'CRSF RX stale timeout ms',type:'number'}
@@ -1792,7 +1792,6 @@ void sendPpmAsCrsfFrame(bool writeUsbSerial, bool writeHardwareUart) {
   writeCrsfPacket(packet, writeUsbSerial, writeHardwareUart);
 }
 
-
 bool copyFrameFromIsr(uint32_t &invalidPulses) {
   noInterrupts();
   const bool frameReady = gIsrFrameReady;
@@ -2524,7 +2523,7 @@ void setOutputMode(OutputMode mode, const char *source, bool force) {
 } // namespace
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(420000);
   delay(250);
   Serial.println("Boot: hdzero-headtracker-monitor");
   const esp_reset_reason_t resetReason = esp_reset_reason();
