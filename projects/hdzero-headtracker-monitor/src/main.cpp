@@ -684,13 +684,16 @@ async function resetDefaults(){
 buildForm();
 loadAll();
 setInterval(()=>{
-  loadStatus().catch((err)=>{
+  loadStatus().then(()=>{
+    const fl=document.getElementById('flash');
+    if(fl.textContent.startsWith('Status refresh failed')) showFlash('');
+  }).catch((err)=>{
     renderSummary({});
     document.getElementById('status-meta').textContent='Status unavailable';
     document.getElementById('status').textContent=`Error: ${err.message}`;
     showFlash(`Status refresh failed: ${err.message}`, true);
   });
-}, 1000);
+}, 3000);
 </script>
 </body>
 </html>
@@ -1168,7 +1171,7 @@ bool btStartScan(bool coex) {
 bool btConnectInner() {
   NimBLEClient *pClient = NimBLEDevice::createClient();
   pClient->setClientCallbacks(&gBtClientCb);
-  pClient->setConnectionParams(48, 80, 4, 400);  // 60-100ms interval, latency 4
+  pClient->setConnectionParams(48, 80, 4, 600);  // 60-100ms interval, latency 4, 6s timeout
   pClient->setConnectTimeout(5);
 
   if (!pClient->connect(gBtTargetAddress)) {
@@ -3551,7 +3554,7 @@ void serviceDebugServices(uint32_t nowMs) {
       if ((nowMs - gDebugServiceStateMs) < kDebugServiceWifiOffDelayMs) {
         break;
       }
-      WiFi.setSleep(false);
+      WiFi.setSleep(gSettings.btEnabled);  // allow modem sleep when BLE active
       WiFi.mode(WIFI_AP);
       gDebugServiceState = DebugServiceState::kWaitApMode;
       gDebugServiceStateMs = nowMs;
