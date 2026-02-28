@@ -424,6 +424,36 @@ Use this file as a running implementation log.
     - observed `OLED status screen ready`
   - direct runtime cross-route validation with live source drop/recovery is still pending manual confirmation
 
+### 2026-02-28 - Harden DEBUG CFG SoftAP Startup
+
+- Investigated reports that `waybeam-backpack` could appear in scan results but be difficult to join reliably.
+- Hardened `DEBUG CFG` AP startup by:
+  - forcing a clean `WIFI_OFF -> WIFI_AP` restart before enabling the SoftAP
+  - disabling WiFi sleep in AP mode
+  - adding short stabilization delays around AP bring-up/teardown
+  - adding a small `delay(1)` yield while the debug services are active so WiFi/background tasks are not competing with the tight debug loop
+- Follow-up:
+  - reverted the explicit `softAP(..., channel, hidden, max_conn)` call and returned to the plain SDK-default `softAP(ssid, password)` start path after the explicit parameterized call still produced cases where the AP reported `START` but was not visible to clients
+- Added a more explicit serial line when the AP comes up, including SSID and assigned IP.
+- Added WiFi AP event timing logs and matching status JSON timestamps so AP start, client association, and DHCP/IP assignment can be timed separately during debug.
+- Follow-up:
+  - removed the experimental event-driven AP retry state machine after it triggered an lwIP panic (`tcpip_send_msg_wait_sem`, `Invalid mbox`) during mode changes
+  - kept the simpler clean restart path and the passive AP timing instrumentation
+- Follow-up:
+  - switched `waybeam-backpack` to an open network with no password for simpler client association during debugging
+- Follow-up:
+  - fixed a Web UI regression in `loadSettings()`: the embedded page was iterating field descriptors as `[name]` tuples instead of objects, which threw `(destructured parameter) is not iterable` and prevented any settings fields from being populated
+- Follow-up:
+  - checked the local ESP32-C3 SDK limits and confirmed SoftAP beacon interval is already at the minimum/default (`100 TU`)
+  - added maximum WiFi TX power request in `DEBUG CFG` as one safe lever to make the AP more visible
+- Follow-up:
+  - forced the SoftAP to channel `6` instead of the Arduino default channel `1`
+  - exposed the configured AP channel in status/logging so channel choice is visible during debug
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
+  - live AP association still needs manual confirmation on-device
+
 ### 2026-02-28 - Make CRSF TX12 the Boot Default
 
 - Changed the runtime boot default screen from `HDZ>CRSF` to `CRSF TX12`.
@@ -465,6 +495,33 @@ Use this file as a running implementation log.
 - Kept the page lightweight and self-contained in the existing PROGMEM HTML blob.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-28 - Window CRSF RX Rate Reporting
+
+- Replaced the CRSF RX rate calculation used by the OLED and Web UI.
+- Old behavior:
+  - computed instantaneous Hz from consecutive packet `millis()` deltas
+  - fed that into an EMA
+  - produced unrealistic spikes because `1-3ms` packet gaps quantize to very large Hz values
+- New behavior:
+  - computes CRSF RX rate over the same configurable monitor window used elsewhere in debug reporting
+  - reports that windowed rate through the OLED and `crsf_rx_rate_hz`
+- This keeps CRSF RX rate reporting consistent with the stable windowed PPM Hz path.
+- Follow-up:
+  - clamped the CRSF RX rate window to a minimum of `200ms` so lowering `monitor_print_interval_ms` cannot reintroduce unrealistic high-Hz spikes in the OLED/Web UI
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
+
+### 2026-02-28 - AP Diagnostics Cleanup
+
+- Tightened two debug-only WiFi diagnostics details without changing runtime routing behavior:
+  - moved `Debug/config AP start requested...` before the actual SoftAP bring-up work so AP logs now read in chronological order
+  - replaced the raw WiFi TX power enum print with a human-readable dBm label
+- Kept the existing open AP, fixed channel `6`, and `19.5dBm` TX power request unchanged.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
 
 ### 2026-02-27 - Smoothed CRSF Rate On Debug Screen
 

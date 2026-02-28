@@ -70,7 +70,7 @@
 
 namespace {
 constexpr char kApSsid[] = "waybeam-backpack";
-constexpr char kApPassword[] = "waybeam-backpack";
+constexpr uint8_t kApChannel = 6;
 const IPAddress kApIp(10, 100, 0, 1);
 const IPAddress kApGateway(10, 100, 0, 1);
 const IPAddress kApSubnet(255, 255, 255, 0);
@@ -99,7 +99,7 @@ constexpr uint32_t kOledRefreshIntervalMs = 100;
 constexpr uint32_t kButtonLongPressMs = 3000;
 constexpr uint32_t kRouteAcquireWindowMs = 150;
 constexpr uint32_t kRouteSwitchHoldMs = 250;
-constexpr float kCrsfRateEmaAlpha = 0.25f;
+constexpr uint32_t kMinCrsfRxRateWindowMs = 200;
 constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
@@ -318,7 +318,7 @@ pre{
       <h1>Waybeam Backpack</h1>
       <p>Debug-only bench UI for pins, routing timeouts, PWM mapping, and live runtime status.</p>
     </div>
-    <div class="hero-chip">AP: <b>waybeam-backpack</b> / <b>waybeam-backpack</b> at <b>10.100.0.1</b></div>
+    <div class="hero-chip">AP: <b>waybeam-backpack</b> (open, ch 6) at <b>10.100.0.1</b></div>
   </div>
   <div id="flash" class="flash" hidden></div>
   <div class="summary" id="summary"></div>
@@ -506,9 +506,9 @@ async function loadSettings(){
   if(!r.ok) throw new Error(await r.text());
   const s=await r.json();
   sections.forEach((section)=>{
-    section.fields.forEach(([name])=>{
-      const el=document.querySelector(`[name="${name}"]`);
-      if(el && s[name]!==undefined) el.value=s[name];
+    section.fields.forEach((field)=>{
+      const el=document.querySelector(`[name="${field.name}"]`);
+      if(el && s[field.name]!==undefined) el.value=s[field.name];
     });
   });
 }
@@ -619,6 +619,12 @@ uint32_t gLastFrameMs = 0;
 bool gLedState = false;
 uint32_t gLastLedToggleMs = 0;
 uint32_t gLastDebugMessageMs = 0;
+uint32_t gApStartRequestMs = 0;
+uint32_t gApStartedMs = 0;
+uint32_t gApLastStationJoinMs = 0;
+uint32_t gApLastStationIpMs = 0;
+uint32_t gApStationJoinCount = 0;
+uint32_t gApStationLeaveCount = 0;
 bool gButtonRawState = HIGH;
 bool gButtonStableState = HIGH;
 uint32_t gLastButtonChangeMs = 0;
@@ -642,8 +648,9 @@ uint16_t gServoPulseUs[kServoCount] = {1500, 1500, 1500};
 uint32_t gCrsfRxPacketCounter = 0;
 uint32_t gCrsfRxInvalidCounter = 0;
 uint32_t gLastCrsfRxMs = 0;
-uint32_t gLastCrsfRxPacketSampleMs = 0;
-float gCrsfRxRateHzEma = 0.0f;
+uint32_t gLastCrsfRxWindowSampleMs = 0;
+uint32_t gLastCrsfRxWindowPacketCounter = 0;
+float gCrsfRxWindowHz = 0.0f;
 bool gHasCrsfRxFrame = false;
 Adafruit_SSD1306 gDisplay(kScreenWidth, kScreenHeight, &Wire, -1);
 bool gOledReady = false;
@@ -995,8 +1002,44 @@ const char *crsfRxHealthLabel(uint32_t nowMs) {
   return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? "RXOK" : "STAL";
 }
 
+uint32_t crsfRxRateWindowMs() {
+  return (gSettings.monitorPrintIntervalMs < kMinCrsfRxRateWindowMs) ? kMinCrsfRxRateWindowMs
+                                                                     : gSettings.monitorPrintIntervalMs;
+}
+
+const char *wifiPowerLabel(wifi_power_t power) {
+  switch (power) {
+    case WIFI_POWER_19_5dBm:
+      return "19.5dBm";
+    case WIFI_POWER_19dBm:
+      return "19dBm";
+    case WIFI_POWER_18_5dBm:
+      return "18.5dBm";
+    case WIFI_POWER_17dBm:
+      return "17dBm";
+    case WIFI_POWER_15dBm:
+      return "15dBm";
+    case WIFI_POWER_13dBm:
+      return "13dBm";
+    case WIFI_POWER_11dBm:
+      return "11dBm";
+    case WIFI_POWER_8_5dBm:
+      return "8.5dBm";
+    case WIFI_POWER_7dBm:
+      return "7dBm";
+    case WIFI_POWER_5dBm:
+      return "5dBm";
+    case WIFI_POWER_2dBm:
+      return "2dBm";
+    case WIFI_POWER_MINUS_1dBm:
+      return "-1dBm";
+    default:
+      return "unknown";
+  }
+}
+
 float liveCrsfRxRateHz(uint32_t nowMs) {
-  return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxRateHzEma : 0.0f;
+  return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxWindowHz : 0.0f;
 }
 
 void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
@@ -1238,6 +1281,7 @@ bool validateSettings(const RuntimeSettings &s, String &error);
 void startDebugServices();
 void stopDebugServices();
 void setOutputMode(OutputMode mode, const char *source, bool force = false);
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
 bool saveSettingsToNvs(const RuntimeSettings &s) {
   if (!gPrefsReady) {
@@ -1572,6 +1616,25 @@ void applyPwmRoute(PwmRoute route) {
   }
 }
 
+void updateCrsfRxRateWindow(uint32_t nowMs) {
+  if (gLastCrsfRxWindowSampleMs == 0) {
+    gLastCrsfRxWindowSampleMs = nowMs;
+    gLastCrsfRxWindowPacketCounter = gCrsfRxPacketCounter;
+    return;
+  }
+
+  const uint32_t elapsedMs = nowMs - gLastCrsfRxWindowSampleMs;
+  if (elapsedMs < crsfRxRateWindowMs()) {
+    return;
+  }
+
+  const uint32_t packetDelta = gCrsfRxPacketCounter - gLastCrsfRxWindowPacketCounter;
+  gCrsfRxWindowHz =
+      (elapsedMs > 0) ? (static_cast<float>(packetDelta) * 1000.0f / static_cast<float>(elapsedMs)) : 0.0f;
+  gLastCrsfRxWindowPacketCounter = gCrsfRxPacketCounter;
+  gLastCrsfRxWindowSampleMs = nowMs;
+}
+
 bool decodeCrsfRcChannels(const uint8_t *payload) {
   uint32_t bitBuffer = 0;
   uint8_t bitsInBuffer = 0;
@@ -1595,15 +1658,6 @@ bool decodeCrsfRcChannels(const uint8_t *payload) {
     gCrsfRxChannels[i] = decoded[i];
   }
   const uint32_t packetMs = millis();
-  if (gLastCrsfRxPacketSampleMs != 0 && packetMs > gLastCrsfRxPacketSampleMs) {
-    const float instantHz = 1000.0f / static_cast<float>(packetMs - gLastCrsfRxPacketSampleMs);
-    if (gCrsfRxRateHzEma <= 0.0f) {
-      gCrsfRxRateHzEma = instantHz;
-    } else {
-      gCrsfRxRateHzEma = (kCrsfRateEmaAlpha * instantHz) + ((1.0f - kCrsfRateEmaAlpha) * gCrsfRxRateHzEma);
-    }
-  }
-  gLastCrsfRxPacketSampleMs = packetMs;
   gLastCrsfRxMs = packetMs;
   recordRecentEvent(gRecentCrsfPacketMs, gRecentCrsfPacketCount, gLastCrsfRxMs);
   gCrsfRxPacketCounter++;
@@ -1955,8 +2009,9 @@ void applySettings(const RuntimeSettings &newSettings) {
   gCrsfRxFramePos = 0;
   gCrsfRxFrameExpected = 0;
   gLastCrsfRxMs = 0;
-  gLastCrsfRxPacketSampleMs = 0;
-  gCrsfRxRateHzEma = 0.0f;
+  gLastCrsfRxWindowSampleMs = 0;
+  gLastCrsfRxWindowPacketCounter = 0;
+  gCrsfRxWindowHz = 0.0f;
   gHasCrsfRxFrame = false;
 
   for (uint8_t i = 0; i < kRouteEventHistorySize; ++i) {
@@ -1974,6 +2029,9 @@ void applySettings(const RuntimeSettings &newSettings) {
     gLastMonitorSampleMs = 0;
     gLastMeasuredWindowHz = 0.0f;
     gLastMeasuredInvalidDelta = 0;
+    gLastCrsfRxWindowSampleMs = 0;
+    gLastCrsfRxWindowPacketCounter = gCrsfRxPacketCounter;
+    gCrsfRxWindowHz = 0.0f;
   }
 }
 
@@ -2051,8 +2109,13 @@ String statusToJson() {
   json.reserve(560);
   json = "{";
   json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
+  json += ",\"ap_channel\":" + String(kApChannel);
   json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
   json += ",\"stations\":" + String(WiFi.softAPgetStationNum());
+  json += ",\"ap_start_request_ms\":" + String(gApStartRequestMs);
+  json += ",\"ap_started_ms\":" + String(gApStartedMs);
+  json += ",\"ap_last_station_join_ms\":" + String(gApLastStationJoinMs);
+  json += ",\"ap_last_station_ip_ms\":" + String(gApLastStationIpMs);
   json += ",\"web_ui_active\":" + String(gWebUiActive ? 1 : 0);
   json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
   json += ",\"oled_ready\":" + String(gOledReady ? 1 : 0);
@@ -2353,16 +2416,36 @@ void startDebugServices() {
     return;
   }
   configureWebUiRoutes();
+  gApStartRequestMs = millis();
+  gApStartedMs = 0;
+  gApLastStationJoinMs = 0;
+  gApLastStationIpMs = 0;
+  const String requestedApIp = kApIp.toString();
+  Serial.printf("Debug/config AP start requested: ssid=%s ch=%u ip=%s tx=%s\n", kApSsid,
+                static_cast<unsigned>(kApChannel), requestedApIp.c_str(),
+                wifiPowerLabel(WIFI_POWER_19_5dBm));
+  WiFi.persistent(false);
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+  WiFi.setSleep(false);
   WiFi.mode(WIFI_AP);
+  delay(50);
   if (!WiFi.softAPConfig(kApIp, kApGateway, kApSubnet)) {
     Serial.println("WARN: Failed to configure AP network settings");
   }
-  if (!WiFi.softAP(kApSsid, kApPassword)) {
+  if (!WiFi.softAP(kApSsid, nullptr, kApChannel)) {
     Serial.println("WARN: Failed to start SoftAP");
   }
+  if (!WiFi.setTxPower(WIFI_POWER_19_5dBm)) {
+    Serial.println("WARN: Failed to raise WiFi TX power");
+  }
+  delay(100);
   gWeb.begin();
   gWebUiActive = true;
-  Serial.println("Debug/config AP enabled");
+  const String liveApIp = WiFi.softAPIP().toString();
+  Serial.printf("Debug/config AP configured: ip=%s tx=%s\n", liveApIp.c_str(),
+                wifiPowerLabel(WiFi.getTxPower()));
 }
 
 void stopDebugServices() {
@@ -2371,9 +2454,41 @@ void stopDebugServices() {
   }
   gWeb.stop();
   WiFi.softAPdisconnect(true);
+  delay(20);
   WiFi.mode(WIFI_OFF);
   gWebUiActive = false;
   Serial.println("Debug/config AP disabled");
+}
+
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  const uint32_t nowMs = millis();
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_AP_START:
+      gApStartedMs = nowMs;
+      Serial.printf("AP event: START after %lums\n", static_cast<unsigned long>(nowMs - gApStartRequestMs));
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STOP:
+      Serial.println("AP event: STOP");
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
+      gApLastStationJoinMs = nowMs;
+      gApStationJoinCount++;
+      Serial.printf("AP event: STA connected after %lums (joins=%lu)\n",
+                    static_cast<unsigned long>(nowMs - gApStartRequestMs),
+                    static_cast<unsigned long>(gApStationJoinCount));
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
+      gApLastStationIpMs = nowMs;
+      Serial.printf("AP event: STA got IP after %lums\n",
+                    static_cast<unsigned long>(nowMs - gApStartRequestMs));
+      break;
+    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+      gApStationLeaveCount++;
+      Serial.printf("AP event: STA disconnected (leaves=%lu)\n", static_cast<unsigned long>(gApStationLeaveCount));
+      break;
+    default:
+      break;
+  }
 }
 
 void setOutputMode(OutputMode mode, const char *source, bool force) {
@@ -2410,6 +2525,7 @@ void setup() {
   Serial.printf("Pins: PPM=%u LED=%u BTN=%u UART_RX=%u UART_TX=%u SERVO=%u,%u,%u\n", PPM_INPUT_PIN, LED_PIN,
                 MODE_BUTTON_PIN, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN, SERVO_PWM_1_PIN, SERVO_PWM_2_PIN,
                 SERVO_PWM_3_PIN);
+  WiFi.onEvent(onWiFiEvent);
   gPrefsReady = gPrefs.begin("waybeam", false);
   if (!gPrefsReady) {
     Serial.println("WARN: Preferences init failed; persistence disabled");
@@ -2437,6 +2553,7 @@ void loop() {
   handleModeButton();
   pollButtonLongPress();
   const uint32_t nowMs = millis();
+  updateCrsfRxRateWindow(nowMs);
   const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
   const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
   const bool usbTextMode = isDebugOutputMode(gOutputMode);
@@ -2463,5 +2580,9 @@ void loop() {
       (nowMs - gLastDebugMessageMs) > 1000) {
     gLastDebugMessageMs = nowMs;
     Serial.println("No PPM frame detected yet. Check HT enabled + wiring.");
+  }
+
+  if (gWebUiActive) {
+    delay(1);
   }
 }

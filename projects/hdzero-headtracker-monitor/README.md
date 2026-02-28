@@ -21,7 +21,7 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
   - `GPIO0`, `GPIO1`, `GPIO2` at `100Hz`
   - normally driven from incoming CRSF CH1..CH3, with fallback to headtracker PPM when CRSF RX becomes stale
 - Web configuration:
-  - AP SSID/password: `waybeam-backpack` / `waybeam-backpack`
+  - AP SSID: `waybeam-backpack` (open network, no password, channel `6`)
   - AP network: `10.100.0.x` (`ESP32 = 10.100.0.1`, built-in DHCP server enabled)
   - Web UI: `http://10.100.0.1/`
   - AP/Web UI is active only while the `DEBUG CFG` screen is selected
@@ -95,7 +95,8 @@ pio device monitor -p /dev/ttyACM0 -b 115200
    - AP comes up only in this screen
    - OLED shows AP state, simplified health summary, and active pin map
    - PPM line shows the same stable windowed measured Hz used by the serial debug output and web status API
-   - CRSF line shows a smoothed CRSF packet rate instead of raw packet-age spikes
+  - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
+  - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
    - serial text diagnostics are printed here instead of on the graph screens
    - status/debug route reporting shows which source currently owns USB CRSF output and PWM
 13. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
@@ -144,6 +145,8 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - if the OLED is missing or init fails, firmware continues running and reports a warning on serial
 - ESP32 runs a local AP (`waybeam-backpack`) and serves a Web UI on `10.100.0.1` only in `DEBUG CFG`.
 - DHCP is active on the AP only while `DEBUG CFG` is selected.
+- Entering `DEBUG CFG` uses a simple clean SoftAP restart plus a brief debug-loop yield, and keeps WiFi AP timing logs enabled so startup/association delays can be measured without adding more AP control complexity.
+- SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6`, requests `19.5dBm` TX power in `DEBUG CFG`, and logs AP start/configuration in chronological order for easier diagnosis.
 - Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
 - Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`), with `GPIO4/5` reserved for the OLED.
 - `DEBUG CFG` serial output prints PPM status at roughly `~5Hz`.
@@ -152,6 +155,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - measured `hz` over the current monitor window
   - `invalid(+delta)` for stale-signal/noise debugging
   - `route usb=TEXT` means USB CDC is intentionally reserved for readable debug output in `DEBUG CFG`
+  - WiFi AP timing events (`AP event: START`, `STA connected`, `STA got IP`) to separate AP bring-up from client association problems
 - Web status JSON reports the same stable windowed PPM rate used by `DEBUG CFG`:
   - `frame_hz`
   - `frame_hz_ema`
@@ -159,11 +163,17 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 - Web status JSON also reports active output ownership:
   - `usb_route_label`
   - `pwm_route_label`
-- Web status JSON also includes CRSF packet age and smoothed CRSF packet rate:
+- Web status JSON also includes CRSF packet age and windowed CRSF packet rate:
   - `ppm_health_label`
   - `crsf_rx_health_label`
   - `crsf_rx_age_ms`
   - `crsf_rx_rate_hz`
+- `crsf_rx_rate_hz` uses a minimum `200ms` measurement window even if `monitor_print_interval_ms` is configured lower.
+- Web status JSON also includes AP timing stamps for debug mode:
+  - `ap_start_request_ms`
+  - `ap_started_ms`
+  - `ap_last_station_join_ms`
+  - `ap_last_station_ip_ms`
 - `crsf_rx_rate_hz` is reported as a live value only while CRSF RX is fresh; stale/missing CRSF reports no carried-over rate.
 - The Web UI keeps the raw JSON status view under an expandable advanced section for deeper debugging.
 - `ch1/ch2/ch3` widths are typically around `1000..2000us`.

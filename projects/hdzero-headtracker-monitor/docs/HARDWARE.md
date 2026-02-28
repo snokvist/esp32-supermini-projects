@@ -33,11 +33,14 @@
 ## WiFi / Web UI
 
 - AP SSID: `waybeam-backpack`
-- AP password: `waybeam-backpack`
+- AP password: none (open network)
+- AP channel: `6`
 - AP IP: `10.100.0.1`
 - AP subnet: `255.255.255.0` (`10.100.0.x`)
 - DHCP: enabled only while `DEBUG CFG` screen is active
 - Web UI: `http://10.100.0.1/` while `DEBUG CFG` is active
+- AP bring-up is hardened in firmware by a simple clean restart path for `waybeam-backpack`, while leaving channel/visibility on the normal SDK defaults and keeping AP timing logs enabled for diagnosis
+- SoftAP beacon interval is already at the ESP32-C3 minimum/default (`100 TU`), so firmware now forces channel `6`, requests `19.5dBm` TX power in `DEBUG CFG`, and logs AP start/configuration in chronological order to make visibility issues easier to diagnose.
 - Status JSON includes `nvs_ready` (1 when preferences persistence is available).
 
 ## Configurable GPIO Guardrails
@@ -136,9 +139,11 @@ Bring-up checklist:
    - when CRSF RX owns fallback CRSF output, the screen follows the decoded CRSF RX channels instead
 8. In `DEBUG CFG`, verify:
    - AP starts only in this screen
+   - association should complete promptly after the AP appears
    - OLED shows AP state, health summary, and pin map
    - PPM line shows the same stable windowed measured Hz used by the serial debug output and status API
-   - CRSF line shows a smoothed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
+   - CRSF line shows a windowed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
+   - CRSF RX rate uses at least a `200ms` window even if `monitor_print_interval_ms` is configured lower
    - serial diagnostics are active on `/dev/ttyACM0`
 9. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
    - settings page loads
@@ -158,6 +163,10 @@ Bring-up checklist:
    - `route usb=TEXT pwm=...` indicates USB CDC is reserved for readable debug text in this screen
    - outside `DEBUG CFG`, `route usb=... pwm=...` reflects current output ownership
    - boot output includes `Reset reason: ...`, useful when diagnosing hot-plug resets
+   - AP event timing logs appear when entering debug and when a client joins:
+     - `AP event: START ...`
+     - `AP event: STA connected ...`
+     - `AP event: STA got IP ...`
 
 Channel interpretation for BoxPro+ (from HDZero source code, inferred):
 
