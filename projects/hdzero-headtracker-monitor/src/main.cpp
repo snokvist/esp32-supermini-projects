@@ -70,7 +70,6 @@
 
 namespace {
 constexpr char kApSsid[] = "waybeam-backpack";
-constexpr uint8_t kApChannel = 6;
 const IPAddress kApIp(10, 100, 0, 1);
 const IPAddress kApGateway(10, 100, 0, 1);
 const IPAddress kApSubnet(255, 255, 255, 0);
@@ -107,12 +106,33 @@ constexpr uint32_t kDebugServiceRetryBackoffMs = 3000;
 constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
+constexpr uint8_t kDebugPageCount = 3;
 
-constexpr uint16_t kSettingsVersion = 4;
+constexpr uint16_t kSettingsVersion = 6;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
 constexpr uint8_t kLastSupportedGpio = 21;
+
+// CRC8 DVB-S2 lookup table (polynomial 0xD5, init 0x00).
+static const uint8_t kCrc8DvbS2Table[256] PROGMEM = {
+  0x00, 0xD5, 0x7F, 0xAA, 0xFE, 0x2B, 0x81, 0x54, 0x29, 0xFC, 0x56, 0x83, 0xD7, 0x02, 0xA8, 0x7D,
+  0x52, 0x87, 0x2D, 0xF8, 0xAC, 0x79, 0xD3, 0x06, 0x7B, 0xAE, 0x04, 0xD1, 0x85, 0x50, 0xFA, 0x2F,
+  0xA4, 0x71, 0xDB, 0x0E, 0x5A, 0x8F, 0x25, 0xF0, 0x8D, 0x58, 0xF2, 0x27, 0x73, 0xA6, 0x0C, 0xD9,
+  0xF6, 0x23, 0x89, 0x5C, 0x08, 0xDD, 0x77, 0xA2, 0xDF, 0x0A, 0xA0, 0x75, 0x21, 0xF4, 0x5E, 0x8B,
+  0x9D, 0x48, 0xE2, 0x37, 0x63, 0xB6, 0x1C, 0xC9, 0xB4, 0x61, 0xCB, 0x1E, 0x4A, 0x9F, 0x35, 0xE0,
+  0xCF, 0x1A, 0xB0, 0x65, 0x31, 0xE4, 0x4E, 0x9B, 0xE6, 0x33, 0x99, 0x4C, 0x18, 0xCD, 0x67, 0xB2,
+  0x39, 0xEC, 0x46, 0x93, 0xC7, 0x12, 0xB8, 0x6D, 0x10, 0xC5, 0x6F, 0xBA, 0xEE, 0x3B, 0x91, 0x44,
+  0x6B, 0xBE, 0x14, 0xC1, 0x95, 0x40, 0xEA, 0x3F, 0x42, 0x97, 0x3D, 0xE8, 0xBC, 0x69, 0xC3, 0x16,
+  0xEF, 0x3A, 0x90, 0x45, 0x11, 0xC4, 0x6E, 0xBB, 0xC6, 0x13, 0xB9, 0x6C, 0x38, 0xED, 0x47, 0x92,
+  0xBD, 0x68, 0xC2, 0x17, 0x43, 0x96, 0x3C, 0xE9, 0x94, 0x41, 0xEB, 0x3E, 0x6A, 0xBF, 0x15, 0xC0,
+  0x4B, 0x9E, 0x34, 0xE1, 0xB5, 0x60, 0xCA, 0x1F, 0x62, 0xB7, 0x1D, 0xC8, 0x9C, 0x49, 0xE3, 0x36,
+  0x19, 0xCC, 0x66, 0xB3, 0xE7, 0x32, 0x98, 0x4D, 0x30, 0xE5, 0x4F, 0x9A, 0xCE, 0x1B, 0xB1, 0x64,
+  0x72, 0xA7, 0x0D, 0xD8, 0x8C, 0x59, 0xF3, 0x26, 0x5B, 0x8E, 0x24, 0xF1, 0xA5, 0x70, 0xDA, 0x0F,
+  0x20, 0xF5, 0x5F, 0x8A, 0xDE, 0x0B, 0xA1, 0x74, 0x09, 0xDC, 0x76, 0xA3, 0xF7, 0x22, 0x88, 0x5D,
+  0xD6, 0x03, 0xA9, 0x7C, 0x28, 0xFD, 0x57, 0x82, 0xFF, 0x2A, 0x80, 0x55, 0x01, 0xD4, 0x7E, 0xAB,
+  0x84, 0x51, 0xFB, 0x2E, 0x7A, 0xAF, 0x05, 0xD0, 0xAD, 0x78, 0xD2, 0x07, 0x53, 0x86, 0x2C, 0xF9
+};
 
 const char kWebUiHtml[] PROGMEM = R"HTML(
 <!doctype html>
@@ -375,21 +395,27 @@ pre{
 <script>
 const chOpts=[['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
 ['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']];
-const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug / Config']];
+const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug Status'],['4','Debug Routes'],['5','Debug Ranges']];
 const sections=[
 {title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
 {name:'output_mode_live',label:'Live screen',type:'select',options:modeOpts},
-{name:'output_mode_default',label:'Boot default screen',type:'select',options:modeOpts}
+{name:'output_mode_default',label:'Boot default screen',type:'select',options:modeOpts},
+{name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
+['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
+]}
 ]},
-{title:'Channel Mapping', note:'Select which input channel drives each servo output. Applies to both CRSF RX and PPM headtracker routing.', fields:[
+{title:'Servo Mapping', note:'Select which input channel drives each servo output and the PWM frequency.', fields:[
 {name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:chOpts},
 {name:'servo_map_2',label:'Servo 2 source channel',type:'select',options:chOpts},
 {name:'servo_map_3',label:'Servo 3 source channel',type:'select',options:chOpts},
-{name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
-['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
-]},
 {name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'select',options:[
 ['50','50 Hz'],['100','100 Hz'],['150','150 Hz'],['200','200 Hz'],['250','250 Hz'],['333','333 Hz'],['400','400 Hz']]}
+]},
+{title:'CRSF Channel Merge', note:'Overlays PPM headtracker channels onto the CRSF RX stream at configurable output positions.', fields:[
+{name:'crsf_merge_enabled',label:'CRSF channel merge',type:'select',options:[['0','Off'],['1','On']]},
+{name:'crsf_merge_map_1',label:'PPM CH1 (Pan) \u2192 output',type:'select',options:chOpts},
+{name:'crsf_merge_map_2',label:'PPM CH2 (Roll) \u2192 output',type:'select',options:chOpts},
+{name:'crsf_merge_map_3',label:'PPM CH3 (Tilt) \u2192 output',type:'select',options:chOpts}
 ]},
 {title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
@@ -421,6 +447,16 @@ const sections=[
 {name:'signal_timeout_ms',label:'PPM stale timeout ms',type:'number'},
 {name:'button_debounce_ms',label:'Button debounce ms',type:'number'},
 {name:'monitor_print_interval_ms',label:'Debug print interval ms',type:'number'}
+]},
+{title:'WiFi AP', advanced:true, note:'WiFi channel and transmit power for the configuration AP. Changes take effect next time the AP starts.', fields:[
+{name:'wifi_channel',label:'WiFi channel',type:'select',options:[
+['1','1'],['2','2'],['3','3'],['4','4'],['5','5'],['6','6'],
+['7','7'],['8','8'],['9','9'],['10','10'],['11','11']
+]},
+{name:'wifi_tx_power',label:'TX power',type:'select',options:[
+['78','19.5 dBm (Max)'],['68','17 dBm'],['60','15 dBm'],['52','13 dBm'],
+['44','11 dBm'],['34','8.5 dBm'],['20','5 dBm'],['8','2 dBm (Min)']
+]}
 ]}
 ];
 
@@ -430,7 +466,7 @@ const summaryFields=[
   {label:'PWM Route', value:(s)=>s.pwm_route_label||'--', sub:()=>`Outputs S1/S2/S3`},
   {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
   {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
-  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:()=>{const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}}
+  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mm1=readField('crsf_merge_map_1','10'),mm2=readField('crsf_merge_map_2','11'),mm3=readField('crsf_merge_map_3','12');return `MERGE CH${mm1}/CH${mm2}/CH${mm3}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}}
 ];
 
 function readField(name,fallback=''){
@@ -629,6 +665,10 @@ struct RuntimeSettings {
 
   uint8_t outputModeDefault;
   uint8_t crsfOutputTarget;
+  uint8_t crsfMergeEnabled;
+  uint8_t crsfMergeMap[kServoCount];
+  uint8_t wifiChannel;
+  uint8_t wifiTxPower;  // raw wifi_power_t value (e.g. 78 = 19.5dBm)
 };
 
 volatile uint16_t gIsrPpmMinChannelUs = 800;
@@ -702,6 +742,7 @@ bool gWebRoutesConfigured = false;
 enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2, kCrsfTx12 = 3 };
 OutputMode gOutputMode = OutputMode::kCrsfTx12;
 OutputMode gLastMainOutputMode = OutputMode::kCrsfTx12;
+uint8_t gDebugPage = 0;
 enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
 enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
 enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
@@ -762,6 +803,12 @@ RuntimeSettings defaultSettings() {
 
   s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfTx12);
   s.crsfOutputTarget = 0;
+  s.crsfMergeEnabled = 0;
+  s.crsfMergeMap[0] = 9;
+  s.crsfMergeMap[1] = 10;
+  s.crsfMergeMap[2] = 11;
+  s.wifiChannel = 6;
+  s.wifiTxPower = 78;  // WIFI_POWER_19_5dBm
   return s;
 }
 
@@ -1059,6 +1106,7 @@ const char *debugApStateLabel() {
 
 void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
 void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]);
+void fillOutgoingCrsfChannelsMerged(uint16_t channels[kCrsfChannelCount]);
 
 int16_t centeredFillPixels(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
                            int16_t halfWidth) {
@@ -1227,7 +1275,7 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
 
 void drawDebugConfigScreen(uint32_t nowMs) {
   const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
-  drawHeaderBar("DEBUG CFG", debugApStateLabel());
+  drawHeaderBar("DBG STATUS", debugApStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.setCursor(0, 14);
   gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
@@ -1253,7 +1301,57 @@ void drawDebugConfigScreen(uint32_t nowMs) {
   gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
                   gSettings.servoPwmPins[2]);
   gDisplay.setCursor(0, 54);
-  gDisplay.print("short 1/2/3 long dbg");
+  gDisplay.print("short >pg  long exit");
+}
+
+void drawDebugRoutesScreen(uint32_t nowMs) {
+  const char *mergeLabel = gSettings.crsfMergeEnabled ? "MRG ON" : "MRG OFF";
+  drawHeaderBar("DBG ROUTES", mergeLabel);
+  gDisplay.setTextColor(SSD1306_WHITE);
+
+  const SourceHealth ppmH = ppmSourceHealth(nowMs);
+  const SourceHealth crsfH = crsfSourceHealth(nowMs);
+  const char *ppmHl = (ppmH == SourceHealth::kHealthy) ? "OK" : (ppmH == SourceHealth::kTentative) ? "??" : "--";
+  const char *crsfHl = (crsfH == SourceHealth::kHealthy) ? "OK" : (crsfH == SourceHealth::kTentative) ? "??" : "--";
+
+  gDisplay.setCursor(0, 14);
+  gDisplay.printf("USB:%s src PPM:%s", usbCrsfRouteLabel(gActiveUsbCrsfRoute), ppmHl);
+  gDisplay.setCursor(0, 24);
+  gDisplay.printf("PWM:%s src CRSF:%s", pwmRouteLabel(gActivePwmRoute), crsfHl);
+  gDisplay.setCursor(0, 34);
+  if (gSettings.crsfMergeEnabled) {
+    gDisplay.printf("Mrg CH%u/%u/%u", gSettings.crsfMergeMap[0] + 1, gSettings.crsfMergeMap[1] + 1,
+                    gSettings.crsfMergeMap[2] + 1);
+  } else {
+    gDisplay.print("Merge OFF");
+  }
+  gDisplay.setCursor(0, 44);
+  gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
+                  gSettings.servoMap[2] + 1);
+  gDisplay.setCursor(0, 54);
+  const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
+  gDisplay.printf("Out:%s short>pg", outTgt);
+}
+
+void drawDebugRangesScreen(uint32_t nowMs) {
+  (void)nowMs;
+  char freqBuf[8];
+  snprintf(freqBuf, sizeof(freqBuf), "%uHz", gSettings.servoPwmFrequencyHz);
+  drawHeaderBar("DBG RANGES", freqBuf);
+  gDisplay.setTextColor(SSD1306_WHITE);
+
+  gDisplay.setCursor(0, 14);
+  gDisplay.printf("PPM %u-%uus", gSettings.ppmMinChannelUs, gSettings.ppmMaxChannelUs);
+  gDisplay.setCursor(0, 24);
+  gDisplay.printf("CRSF map %u-%uus", gSettings.crsfMapMinUs, gSettings.crsfMapMaxUs);
+  gDisplay.setCursor(0, 34);
+  gDisplay.printf("Srv %u/%u/%uus", gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+                  gSettings.servoPulseMaxUs);
+  gDisplay.setCursor(0, 44);
+  gDisplay.printf("T/O PPM:%lums CRSF:%lums", static_cast<unsigned long>(gSettings.signalTimeoutMs),
+                  static_cast<unsigned long>(gSettings.crsfRxTimeoutMs));
+  gDisplay.setCursor(0, 54);
+  gDisplay.printf("UART %lu  WiFi ch%u", static_cast<unsigned long>(gSettings.crsfUartBaud), gSettings.wifiChannel);
 }
 
 void refreshOledStatus(uint32_t nowMs) {
@@ -1273,7 +1371,13 @@ void refreshOledStatus(uint32_t nowMs) {
   } else if (gOutputMode == OutputMode::kCrsfTx12) {
     drawCrsfTx12Screen(nowMs);
   } else {
-    drawDebugConfigScreen(nowMs);
+    if (gDebugPage == 1) {
+      drawDebugRoutesScreen(nowMs);
+    } else if (gDebugPage == 2) {
+      drawDebugRangesScreen(nowMs);
+    } else {
+      drawDebugConfigScreen(nowMs);
+    }
   }
 
   gDisplay.display();
@@ -1310,7 +1414,7 @@ void initOled() {
 bool validateSettings(const RuntimeSettings &s, String &error);
 void startDebugServices();
 void stopDebugServices();
-void setOutputMode(OutputMode mode, const char *source, bool force = false);
+void setOutputMode(OutputMode mode, const char *source, bool force = false, uint8_t debugPage = 0);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
 bool saveSettingsToNvs(const RuntimeSettings &s) {
@@ -1353,6 +1457,12 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
 
   ok &= (gPrefs.putUChar("omod", s.outputModeDefault) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("cotr", s.crsfOutputTarget) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("cme", s.crsfMergeEnabled) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("mm1", s.crsfMergeMap[0]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("mm2", s.crsfMergeMap[1]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("mm3", s.crsfMergeMap[2]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("wch", s.wifiChannel) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("wtx", s.wifiTxPower) == sizeof(uint8_t));
   return ok;
 }
 
@@ -1363,7 +1473,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -1403,6 +1513,12 @@ RuntimeSettings loadSettingsFromNvs() {
 
   s.outputModeDefault = gPrefs.getUChar("omod", s.outputModeDefault);
   s.crsfOutputTarget = gPrefs.getUChar("cotr", s.crsfOutputTarget);
+  s.crsfMergeEnabled = gPrefs.getUChar("cme", s.crsfMergeEnabled);
+  s.crsfMergeMap[0] = gPrefs.getUChar("mm1", s.crsfMergeMap[0]);
+  s.crsfMergeMap[1] = gPrefs.getUChar("mm2", s.crsfMergeMap[1]);
+  s.crsfMergeMap[2] = gPrefs.getUChar("mm3", s.crsfMergeMap[2]);
+  s.wifiChannel = gPrefs.getUChar("wch", s.wifiChannel);
+  s.wifiTxPower = gPrefs.getUChar("wtx", s.wifiTxPower);
   String validationError;
   if (!validateSettings(s, validationError)) {
     Serial.printf("WARN: Stored settings invalid (%s). Restoring defaults.\n", validationError.c_str());
@@ -1490,12 +1606,42 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       return false;
     }
   }
-  if (s.outputModeDefault > 3) {
-    error = "output_mode_default must be 0, 1, 2, or 3";
+  if (s.outputModeDefault > 5) {
+    error = "output_mode_default must be 0..5";
     return false;
   }
   if (s.crsfOutputTarget > 2) {
     error = "crsf_output_target must be 0, 1, or 2";
+    return false;
+  }
+  if (s.crsfMergeEnabled > 1) {
+    error = "crsf_merge_enabled must be 0 or 1";
+    return false;
+  }
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    if (s.crsfMergeMap[i] >= kCrsfChannelCount) {
+      error = "crsf_merge_map values must be within 1..16";
+      return false;
+    }
+  }
+  if (s.crsfMergeEnabled) {
+    if (s.crsfMergeMap[0] == s.crsfMergeMap[1] || s.crsfMergeMap[0] == s.crsfMergeMap[2] ||
+        s.crsfMergeMap[1] == s.crsfMergeMap[2]) {
+      error = "crsf_merge_map entries must be unique when merge is enabled";
+      return false;
+    }
+  }
+  if (s.wifiChannel < 1 || s.wifiChannel > 11) {
+    error = "wifi_channel must be 1..11";
+    return false;
+  }
+  static const uint8_t validTxPower[] = {78, 68, 60, 52, 44, 34, 20, 8};
+  bool txOk = false;
+  for (uint8_t v : validTxPower) {
+    if (s.wifiTxPower == v) { txOk = true; break; }
+  }
+  if (!txOk) {
+    error = "wifi_tx_power must be a valid power level";
     return false;
   }
   if (pinListHasDuplicates(s)) {
@@ -1508,10 +1654,7 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
 uint8_t crc8DvbS2(const uint8_t *data, size_t length) {
   uint8_t crc = 0;
   for (size_t i = 0; i < length; ++i) {
-    crc ^= data[i];
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc & 0x80U) ? static_cast<uint8_t>((crc << 1U) ^ 0xD5U) : static_cast<uint8_t>(crc << 1U);
-    }
+    crc = pgm_read_byte(&kCrc8DvbS2Table[crc ^ data[i]]);
   }
   return crc;
 }
@@ -1569,6 +1712,16 @@ void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]) {
 void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]) {
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
     channels[i] = gCrsfRxChannels[i];
+  }
+}
+
+void fillOutgoingCrsfChannelsMerged(uint16_t channels[kCrsfChannelCount]) {
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = gCrsfRxChannels[i];
+  }
+  const uint8_t count = (gLatestChannelCount < kServoCount) ? gLatestChannelCount : kServoCount;
+  for (uint8_t i = 0; i < count; ++i) {
+    channels[gSettings.crsfMergeMap[i]] = mapPulseUsToCrsf(gLatestChannels[i]);
   }
 }
 
@@ -1875,7 +2028,8 @@ void updateLed() {
 
 void toggleOutputMode() {
   if (gOutputMode == OutputMode::kDebugConfig) {
-    setOutputMode(gLastMainOutputMode, "button-short");
+    gDebugPage = (gDebugPage + 1) % kDebugPageCount;
+    gLastOledRefreshMs = 0;
     return;
   }
   OutputMode nextMode = OutputMode::kHdzeroCrsf;
@@ -1924,7 +2078,11 @@ void pollButtonLongPress() {
   const uint32_t nowMs = millis();
   if ((nowMs - gButtonPressStartMs) >= kButtonLongPressMs) {
     gButtonLongPressHandled = true;
-    setOutputMode(OutputMode::kDebugConfig, "button-long");
+    if (gOutputMode == OutputMode::kDebugConfig) {
+      setOutputMode(gLastMainOutputMode, "button-long");
+    } else {
+      setOutputMode(OutputMode::kDebugConfig, "button-long");
+    }
   }
 }
 
@@ -2069,9 +2227,20 @@ String settingsToJson() {
   json += ",\"servo_pulse_center_us\":" + String(gSettings.servoPulseCenterUs);
   json += ",\"servo_pulse_max_us\":" + String(gSettings.servoPulseMaxUs);
 
-  json += ",\"output_mode_live\":" + String(outputModeToUint(gOutputMode));
+  uint8_t expandedLiveMode = outputModeToUint(gOutputMode);
+  if (gOutputMode == OutputMode::kDebugConfig) {
+    if (gDebugPage == 1) expandedLiveMode = 4;
+    else if (gDebugPage == 2) expandedLiveMode = 5;
+  }
+  json += ",\"output_mode_live\":" + String(expandedLiveMode);
   json += ",\"output_mode_default\":" + String(gSettings.outputModeDefault);
   json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
+  json += ",\"crsf_merge_enabled\":" + String(gSettings.crsfMergeEnabled);
+  json += ",\"crsf_merge_map_1\":" + String(gSettings.crsfMergeMap[0] + 1);
+  json += ",\"crsf_merge_map_2\":" + String(gSettings.crsfMergeMap[1] + 1);
+  json += ",\"crsf_merge_map_3\":" + String(gSettings.crsfMergeMap[2] + 1);
+  json += ",\"wifi_channel\":" + String(gSettings.wifiChannel);
+  json += ",\"wifi_tx_power\":" + String(gSettings.wifiTxPower);
   json += "}";
   return json;
 }
@@ -2089,7 +2258,7 @@ String statusToJson() {
   json.reserve(560);
   json = "{";
   json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
-  json += ",\"ap_channel\":" + String(kApChannel);
+  json += ",\"ap_channel\":" + String(gSettings.wifiChannel);
   json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
   json += ",\"stations\":" + String(WiFi.softAPgetStationNum());
   json += ",\"ap_start_request_ms\":" + String(gApStartRequestMs);
@@ -2120,6 +2289,7 @@ String statusToJson() {
   json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(pwmRoute)) + "\"";
   json += ",\"servo_us\":[" + String(gServoPulseUs[0]) + "," + String(gServoPulseUs[1]) + "," + String(gServoPulseUs[2]) + "]";
   json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
+  json += ",\"crsf_merge_active\":" + String(gSettings.crsfMergeEnabled ? 1 : 0);
   json += "}";
   return json;
 }
@@ -2325,7 +2495,7 @@ void handlePostSettings() {
   candidate.servoPulseMaxUs = static_cast<uint16_t>(tmp);
 
   tmp = candidate.outputModeDefault;
-  if (!parseUIntArgOptional("output_mode_default", 0, 3, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_default", 0, 5, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -2338,9 +2508,55 @@ void handlePostSettings() {
   }
   candidate.crsfOutputTarget = static_cast<uint8_t>(tmp);
 
+  tmp = candidate.crsfMergeEnabled;
+  if (!parseUIntArgOptional("crsf_merge_enabled", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.crsfMergeEnabled = static_cast<uint8_t>(tmp);
+
+  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[0] + 1U);
+  if (!parseUIntArgOptional("crsf_merge_map_1", 1, 16, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.crsfMergeMap[0] = static_cast<uint8_t>(tmp - 1U);
+
+  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[1] + 1U);
+  if (!parseUIntArgOptional("crsf_merge_map_2", 1, 16, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.crsfMergeMap[1] = static_cast<uint8_t>(tmp - 1U);
+
+  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[2] + 1U);
+  if (!parseUIntArgOptional("crsf_merge_map_3", 1, 16, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.crsfMergeMap[2] = static_cast<uint8_t>(tmp - 1U);
+
+  tmp = candidate.wifiChannel;
+  if (!parseUIntArgOptional("wifi_channel", 1, 11, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.wifiChannel = clampU8(tmp);
+
+  tmp = candidate.wifiTxPower;
+  if (!parseUIntArgOptional("wifi_tx_power", 8, 78, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.wifiTxPower = clampU8(tmp);
+
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
+  if (gOutputMode == OutputMode::kDebugConfig) {
+    if (gDebugPage == 1) requestedLiveMode = 4;
+    else if (gDebugPage == 2) requestedLiveMode = 5;
+  }
   tmp = requestedLiveMode;
-  if (!parseUIntArgOptional("output_mode_live", 0, 3, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_live", 0, 5, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -2352,7 +2568,17 @@ void handlePostSettings() {
   }
 
   applySettings(candidate);
-  const OutputMode requestedMode = static_cast<OutputMode>(requestedLiveMode);
+  OutputMode requestedMode;
+  uint8_t requestedDebugPage = 0;
+  if (requestedLiveMode == 4) {
+    requestedMode = OutputMode::kDebugConfig;
+    requestedDebugPage = 1;
+  } else if (requestedLiveMode == 5) {
+    requestedMode = OutputMode::kDebugConfig;
+    requestedDebugPage = 2;
+  } else {
+    requestedMode = static_cast<OutputMode>(requestedLiveMode);
+  }
 
   const bool persist = gWeb.hasArg("persist") && (gWeb.arg("persist") == "1");
   bool persisted = false;
@@ -2366,7 +2592,7 @@ void handlePostSettings() {
     return;
   }
   gWeb.send(200, "text/plain", persist ? "Applied live and saved" : "Applied live");
-  setOutputMode(requestedMode, "web", true);
+  setOutputMode(requestedMode, "web", true, requestedDebugPage);
 }
 
 void handleResetDefaults() {
@@ -2378,7 +2604,17 @@ void handleResetDefaults() {
   }
 
   applySettings(defaults);
-  const OutputMode defaultMode = static_cast<OutputMode>(defaults.outputModeDefault);
+  OutputMode defaultMode;
+  uint8_t defaultDebugPage = 0;
+  if (defaults.outputModeDefault == 4) {
+    defaultMode = OutputMode::kDebugConfig;
+    defaultDebugPage = 1;
+  } else if (defaults.outputModeDefault == 5) {
+    defaultMode = OutputMode::kDebugConfig;
+    defaultDebugPage = 2;
+  } else {
+    defaultMode = static_cast<OutputMode>(defaults.outputModeDefault);
+  }
   const bool saved = saveSettingsToNvs(gSettings);
   setNoCacheHeaders();
   if (!saved) {
@@ -2386,7 +2622,7 @@ void handleResetDefaults() {
     return;
   }
   gWeb.send(200, "text/plain", "Reset to defaults, applied live, and saved");
-  setOutputMode(defaultMode, "reset", true);
+  setOutputMode(defaultMode, "reset", true, defaultDebugPage);
 }
 
 void configureWebUiRoutes() {
@@ -2467,8 +2703,8 @@ void serviceDebugServices(uint32_t nowMs) {
         break;
       }
       WiFi.softAPConfig(kApIp, kApGateway, kApSubnet);
-      WiFi.softAP(kApSsid, nullptr, kApChannel);
-      WiFi.setTxPower(WIFI_POWER_19_5dBm);
+      WiFi.softAP(kApSsid, nullptr, gSettings.wifiChannel);
+      WiFi.setTxPower(static_cast<wifi_power_t>(gSettings.wifiTxPower));
       gDebugServiceState = DebugServiceState::kWaitApStart;
       gDebugServiceStateMs = nowMs;
       break;
@@ -2524,7 +2760,7 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   }
 }
 
-void setOutputMode(OutputMode mode, const char *source, bool force) {
+void setOutputMode(OutputMode mode, const char *source, bool force, uint8_t debugPage) {
   if (!force && gOutputMode == mode) {
     return;
   }
@@ -2533,6 +2769,7 @@ void setOutputMode(OutputMode mode, const char *source, bool force) {
   }
   gOutputMode = mode;
   if (isDebugOutputMode(gOutputMode)) {
+    gDebugPage = debugPage;
     gLastMonitorFrameCounter = gLatestFrameCounter;
     gLastMonitorInvalidPulseCounter = gLatestInvalidPulseCounter;
     gLastMonitorSampleMs = millis();
@@ -2570,7 +2807,20 @@ void setup() {
       Serial.println("WARN: Preferences init failed; persistence disabled");
     }
   }
-  setOutputMode(static_cast<OutputMode>(gSettings.outputModeDefault), "boot", true);
+  {
+    OutputMode bootMode;
+    uint8_t bootDebugPage = 0;
+    if (gSettings.outputModeDefault == 4) {
+      bootMode = OutputMode::kDebugConfig;
+      bootDebugPage = 1;
+    } else if (gSettings.outputModeDefault == 5) {
+      bootMode = OutputMode::kDebugConfig;
+      bootDebugPage = 2;
+    } else {
+      bootMode = static_cast<OutputMode>(gSettings.outputModeDefault);
+    }
+    setOutputMode(bootMode, "boot", true, bootDebugPage);
+  }
   initOled();
   refreshOledStatus(millis());
 }
@@ -2607,19 +2857,45 @@ void loop() {
   const bool outputToUsb = (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
   const bool outputToUart = (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
 
-  if (frameReady) {
-    sendPpmAsCrsfFrame(
-      outputToUsb && (usbRoute == UsbCrsfRoute::kPpm),
-      outputToUart || !isSourceStale(ppmHealth));
-  }
-  if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
-    uint16_t channels[kCrsfChannelCount] = {0};
-    for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
-      channels[i] = gCrsfRxChannels[i];
+  if (gSettings.crsfMergeEnabled) {
+    const bool ppmFresh = !isSourceStale(ppmHealth);
+    const bool crsfFresh = !isSourceStale(crsfSourceHealth(nowMs));
+    if (ppmFresh && crsfFresh) {
+      if (frameReady || crsfRxUpdated) {
+        uint16_t channels[kCrsfChannelCount] = {0};
+        fillOutgoingCrsfChannelsMerged(channels);
+        uint8_t packet[kCrsfPacketSize] = {0};
+        packCrsfRcPacket(channels, packet);
+        writeCrsfPacket(packet, outputToUsb, outputToUart);
+      }
+    } else if (!ppmFresh && crsfFresh) {
+      if (crsfRxUpdated) {
+        uint16_t channels[kCrsfChannelCount] = {0};
+        fillOutgoingCrsfChannelsFromCrsfRx(channels);
+        uint8_t packet[kCrsfPacketSize] = {0};
+        packCrsfRcPacket(channels, packet);
+        writeCrsfPacket(packet, outputToUsb, outputToUart);
+      }
+    } else if (ppmFresh && !crsfFresh) {
+      if (frameReady) {
+        sendPpmAsCrsfFrame(outputToUsb, outputToUart);
+      }
     }
-    uint8_t packet[kCrsfPacketSize] = {0};
-    packCrsfRcPacket(channels, packet);
-    writeCrsfPacket(packet, outputToUsb, outputToUart);
+  } else {
+    if (frameReady) {
+      sendPpmAsCrsfFrame(
+        outputToUsb && (usbRoute == UsbCrsfRoute::kPpm),
+        outputToUart || !isSourceStale(ppmHealth));
+    }
+    if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
+      uint16_t channels[kCrsfChannelCount] = {0};
+      for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+        channels[i] = gCrsfRxChannels[i];
+      }
+      uint8_t packet[kCrsfPacketSize] = {0};
+      packCrsfRcPacket(channels, packet);
+      writeCrsfPacket(packet, outputToUsb, outputToUart);
+    }
   }
   updateLed();
 
