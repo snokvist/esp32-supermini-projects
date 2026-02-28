@@ -313,6 +313,29 @@ pre{
   .card{padding:14px;border-radius:14px}
   .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+.adv-bar{
+  display:flex;
+  justify-content:flex-end;
+  margin-top:14px;
+}
+.adv-toggle{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:8px 14px;
+  border:1px solid var(--border);
+  border-radius:10px;
+  background:var(--panel-alt);
+  cursor:pointer;
+  font-size:13px;
+  font-weight:600;
+  color:var(--muted);
+  transition:border-color .15s, color .15s;
+}
+.adv-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.adv-toggle.active{border-color:var(--accent);background:#edf5fa;color:var(--accent)}
+.section.advanced{display:none}
+.show-advanced .section.advanced{display:block}
 </style>
 </head>
 <body>
@@ -320,13 +343,16 @@ pre{
   <div class="hero">
     <div class="hero-copy">
       <h1>Waybeam Backpack</h1>
-      <p>Debug-only bench UI for pins, routing timeouts, PWM mapping, and live runtime status.</p>
+      <p>Configure channel mapping, output modes, and live runtime status.</p>
     </div>
     <div class="hero-chip">AP: <b>waybeam-backpack</b> (open, ch 6) at <b>10.100.0.1</b></div>
   </div>
   <div id="flash" class="flash" hidden></div>
   <div class="summary" id="summary"></div>
   <form id="cfg">
+    <div class="adv-bar">
+      <button class="adv-toggle" id="adv-btn" type="button" onclick="toggleAdvanced()">Show Advanced</button>
+    </div>
     <div class="sections" id="sections"></div>
     <div class="actions">
       <button class="apply" type="button" onclick="submitCfg(false)">Apply Live</button>
@@ -347,8 +373,24 @@ pre{
   </div>
 </div>
 <script>
+const chOpts=[['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
+['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']];
+const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug / Config']];
 const sections=[
-{title:'Pins', note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
+{title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
+{name:'output_mode_live',label:'Live screen',type:'select',options:modeOpts},
+{name:'output_mode_default',label:'Boot default screen',type:'select',options:modeOpts}
+]},
+{title:'Channel Mapping', note:'Select which input channel drives each servo output. Applies to both CRSF RX and PPM headtracker routing.', fields:[
+{name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:chOpts},
+{name:'servo_map_2',label:'Servo 2 source channel',type:'select',options:chOpts},
+{name:'servo_map_3',label:'Servo 3 source channel',type:'select',options:chOpts},
+{name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
+['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
+]},
+{name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'number'}
+]},
+{title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
 {name:'ppm_input_pin',label:'PPM input pin',type:'number'},
 {name:'mode_button_pin',label:'Mode button pin',type:'number'},
@@ -358,55 +400,23 @@ const sections=[
 {name:'servo_pwm_2_pin',label:'Servo PWM 2 pin',type:'number'},
 {name:'servo_pwm_3_pin',label:'Servo PWM 3 pin',type:'number'}
 ]},
-{title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
-{name:'output_mode_live',label:'Live screen',type:'select',options:[
-['0','HDZero -> CRSF'],
-['1','UART -> PWM'],
-['3','CRSF TX 1-12'],
-['2','Debug / Config']
-]},
-{name:'output_mode_default',label:'Boot default screen',type:'select',options:[
-['0','HDZero -> CRSF'],
-['1','UART -> PWM'],
-['3','CRSF TX 1-12'],
-['2','Debug / Config']
-]}
-]},
-{title:'CRSF / UART', note:'CRSF output target selects where outgoing CRSF frames are sent. UART baud applies to both RX and TX on the hardware UART (GPIO20/21). USB Serial always runs at 420000.', fields:[
-{name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
-['0','USB Serial'],
-['1','HW UART TX'],
-['2','Both (USB + HW UART)']
-]},
+{title:'CRSF / UART', advanced:true, note:'UART baud applies to both RX and TX on the hardware UART (GPIO20/21). USB Serial always runs at 420000.', fields:[
 {name:'crsf_uart_baud',label:'HW UART baud (RX + TX)',type:'number'},
 {name:'crsf_map_min_us',label:'PPM -> CRSF map min us',type:'number'},
 {name:'crsf_map_max_us',label:'PPM -> CRSF map max us',type:'number'},
 {name:'crsf_rx_timeout_ms',label:'CRSF RX stale timeout ms',type:'number'}
 ]},
-{title:'Servo Outputs', note:'Servo sources apply to CRSF RX -> PWM routing. PPM fallback remains fixed PAN/ROL/TIL -> S1/S2/S3.', fields:[
-{name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'number'},
-{name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:[
-['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
-['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
-]},
-{name:'servo_map_2',label:'Servo 2 source channel',type:'select',options:[
-['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
-['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
-]},
-{name:'servo_map_3',label:'Servo 3 source channel',type:'select',options:[
-['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
-['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']
-]},
+{title:'Servo Pulse Range', advanced:true, note:'Servo pulse limits define the PWM output range in microseconds.', fields:[
 {name:'servo_pulse_min_us',label:'Servo min pulse us',type:'number'},
 {name:'servo_pulse_center_us',label:'Servo center pulse us',type:'number'},
 {name:'servo_pulse_max_us',label:'Servo max pulse us',type:'number'}
 ]},
-{title:'PPM Decode', note:'Headtracker PPM is also used for USB CRSF output and as PWM fallback when CRSF RX is stale.', fields:[
+{title:'PPM Decode', advanced:true, note:'Headtracker PPM is also used for USB CRSF output and as PWM fallback when CRSF RX is stale.', fields:[
 {name:'ppm_min_channel_us',label:'PPM min pulse us',type:'number'},
 {name:'ppm_max_channel_us',label:'PPM max pulse us',type:'number'},
 {name:'ppm_sync_gap_us',label:'PPM sync gap us',type:'number'}
 ]},
-{title:'Timing / Health', note:'A source stays on its current route until it becomes stale. Route reacquire still requires a short burst of clean packets/frames.', fields:[
+{title:'Timing / Health', advanced:true, note:'A source stays on its current route until it becomes stale. Route reacquire still requires a short burst of clean packets/frames.', fields:[
 {name:'signal_timeout_ms',label:'PPM stale timeout ms',type:'number'},
 {name:'button_debounce_ms',label:'Button debounce ms',type:'number'},
 {name:'monitor_print_interval_ms',label:'Debug print interval ms',type:'number'}
@@ -419,7 +429,7 @@ const summaryFields=[
   {label:'PWM Route', value:(s)=>s.pwm_route_label||'--', sub:()=>`Outputs S1/S2/S3`},
   {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
   {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
-  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:()=>`0/1/2 default pins`}
+  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:()=>{const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}}
 ];
 
 function readField(name,fallback=''){
@@ -467,10 +477,19 @@ function renderSummary(status){
   });
 }
 
+function toggleAdvanced(){
+  const card=document.querySelector('.card');
+  card.classList.toggle('show-advanced');
+  const btn=document.getElementById('adv-btn');
+  const on=card.classList.contains('show-advanced');
+  btn.textContent=on ? 'Hide Advanced' : 'Show Advanced';
+  btn.classList.toggle('active',on);
+}
+
 function buildForm(){
   const root=document.getElementById('sections');
   sections.forEach((section)=>{
-    const block=document.createElement('div'); block.className='section';
+    const block=document.createElement('div'); block.className=section.advanced ? 'section advanced' : 'section';
     const head=document.createElement('div'); head.className='section-head';
     const titleWrap=document.createElement('div');
     const title=document.createElement('h3'); title.textContent=section.title;
@@ -1618,14 +1637,14 @@ void applyPwmRoute(PwmRoute route) {
   }
 
   for (uint8_t i = 0; i < kServoCount; ++i) {
+    const uint8_t sourceCh = gSettings.servoMap[i];
     if (route == PwmRoute::kCrsfRx) {
-      const uint8_t sourceCh = gSettings.servoMap[i];
       writeServoPulseUs(i, mapCrsfToServoUs(gCrsfRxChannels[sourceCh]));
       continue;
     }
 
-    if (i < gLatestChannelCount) {
-      writeServoPulseUs(i, mapPpmToServoUs(gLatestChannels[i]));
+    if (sourceCh < gLatestChannelCount) {
+      writeServoPulseUs(i, mapPpmToServoUs(gLatestChannels[sourceCh]));
     } else {
       writeServoPulseUs(i, gSettings.servoPulseCenterUs);
     }
