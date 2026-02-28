@@ -523,6 +523,33 @@ Use this file as a running implementation log.
   - `pio run` (from `projects/hdzero-headtracker-monitor`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
 
+### 2026-02-28 - Keep USB CRSF Active In DEBUG CFG
+
+- Removed the special readable-text takeover on USB CDC while `DEBUG CFG` is active.
+- New behavior:
+  - `DEBUG CFG` still enables the SoftAP, Web UI, and OLED debug/status screen
+  - USB CDC now keeps streaming the active CRSF source in `DEBUG CFG`, matching the other runtime screens
+  - `usb_route_label` now always reports the actual CRSF owner (`PPM`, `CRSF`, or `NONE`) instead of the old `TEXT` placeholder
+- Removed the remaining runtime human-readable serial output that would have corrupted USB CRSF in `DEBUG CFG`:
+  - PPM monitor text lines
+  - AP start/stop and client event logs
+  - the repeating `No PPM frame detected yet...` message
+- Kept boot-time serial text intact so reset reason and startup pin/OLED state are still visible before runtime CRSF begins.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
+
+### 2026-02-28 - Non-Blocking DEBUG CFG AP Bring-Up
+
+- Tightened the `DEBUG CFG` AP control path after review:
+  - removed the blocking `delay()`-based SoftAP startup from `setOutputMode()`
+  - moved AP startup into a small staged loop service so CRSF output keeps flowing during mode switches
+  - changed OLED/status reporting so `AP ON` and `web_ui_active` only reflect a real `WIFI_AP_START` event
+- Kept the existing open AP, channel `6`, and `19.5dBm` TX power request unchanged.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
+
 ### 2026-02-27 - Smoothed CRSF Rate On Debug Screen
 
 - Replaced the raw `CRSF ... XXms` OLED debug field with a smoothed CRSF RC packet-rate estimate.

@@ -12,9 +12,8 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
   - `SSD1306` `128x64` over I2C
   - fixed wiring: `GPIO4`=`SDA`, `GPIO5`=`SCL`, address `0x3C`
 - CRSF outputs:
-  - USB CDC (`/dev/ttyACM0`) carries binary CRSF while on `HDZ>CRSF`, `UART>PWM`, or `CRSF TX12`
+  - USB CDC (`/dev/ttyACM0`) carries binary CRSF on every runtime screen, including `DEBUG CFG`
   - USB CDC normally follows PPM, but falls back to incoming CRSF RX when PPM is no longer healthy
-  - USB CDC returns to human-readable debug text in `DEBUG CFG` and route reporting shows this as `usb=TEXT`
   - UART1 on `GPIO21` TX + `GPIO20` RX at `420000` baud for direct FC/receiver wiring
   - UART1 TX remains PPM-driven only; incoming CRSF RX is not echoed back to UART1
 - Servo PWM outputs:
@@ -34,7 +33,7 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
 - `UART>PWM` screen: visualize live servo outputs from incoming CRSF UART with three centered bar graphs
 - `CRSF TX12` screen: visualize the first 12 outgoing CRSF channels in two compact columns, following the active CRSF output source
 - Boot default: power-on starts on `CRSF TX12`
-- `DEBUG CFG` screen: enable AP/web config and keep serial debug text available when needed
+- `DEBUG CFG` screen: enable AP/web config while keeping the normal CRSF USB output active
 
 ## How To Build and Flash
 
@@ -44,7 +43,7 @@ pio run -t upload --upload-port /dev/ttyACM0
 pio device monitor -p /dev/ttyACM0 -b 115200
 ```
 
-Use the serial monitor in `DEBUG CFG` if you want readable text. On the three main runtime screens, `/dev/ttyACM0` intentionally carries binary CRSF data.
+`/dev/ttyACM0` carries binary CRSF during normal runtime on all four screens. Use the OLED and Web UI for debug/config visibility.
 
 ## How To Interact With This Project
 
@@ -71,35 +70,29 @@ Use the serial monitor in `DEBUG CFG` if you want readable text. On the three ma
    - short press: cycle `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
    - long press (`>3s`): enter `DEBUG CFG`
    - short press in `DEBUG CFG`: return to the last graph screen
-8. In `DEBUG CFG`, open USB serial monitor for human-readable diagnostics:
-
-```bash
-pio device monitor -p /dev/ttyACM0 -b 115200
-```
-
-9. Move the headset and observe `HDZ>CRSF`:
+8. Move the headset and observe `HDZ>CRSF`:
    - three centered graphs for `PAN`, `ROL`, `TIL`
    - graph fill moves around center with head motion
    - guide marks show quarter/center positions and the live marker cuts through the fill
    - header shows `OK`, `WAIT`, or `STAL`
-10. Feed CRSF RC data into UART1 and observe `UART>PWM`:
+9. Feed CRSF RC data into UART1 and observe `UART>PWM`:
    - three centered graphs for `S1`, `S2`, `S3`
    - guide marks and value marker make center offset easier to read
    - header shows `RXOK`, `NONE`, or `STAL`
-11. Short press once more and observe `CRSF TX12`:
+10. Short press once more and observe `CRSF TX12`:
    - two slim graph columns show channels `1..12` of the active outgoing CRSF payload
    - when PPM owns CRSF output, channels `1..3` move with the headtracker input and channels `4..12` stay centered by default
    - when CRSF RX owns fallback CRSF output, the screen follows the decoded incoming CRSF RX channels instead
    - header shows the active CRSF output source (`PPM`, `CRSF`, or `NONE`)
-12. Switch to `DEBUG CFG` and confirm:
-   - AP comes up only in this screen
-   - OLED shows AP state, simplified health summary, and active pin map
-   - PPM line shows the same stable windowed measured Hz used by the serial debug output and web status API
-  - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
-  - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
-   - serial text diagnostics are printed here instead of on the graph screens
+11. Switch to `DEBUG CFG` and confirm:
+  - AP comes up only in this screen
+  - OLED shows AP state, simplified health summary, and active pin map
+   - PPM line shows the same stable windowed measured Hz used by the web status API
+   - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
+   - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
+   - USB CDC keeps streaming the active CRSF source instead of switching to text output
    - status/debug route reporting shows which source currently owns USB CRSF output and PWM
-13. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
+12. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
    - inspect the top status summary (screen, routes, PPM health/rate, CRSF RX health/rate, servo outputs)
    - change all runtime settings live
    - save settings to persistent storage (NVS) for next boot
@@ -118,11 +111,11 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - short press in `DEBUG CFG` returns to the last graph screen
 - CRSF is written to both:
   - UART1 on `GPIO21` TX + `GPIO20` RX at `420000` baud
-  - USB CDC `Serial` only while not in `DEBUG CFG` screen
+  - USB CDC `Serial` on all runtime screens
 - On this firmware config (`ARDUINO_USB_MODE=1`), `/dev/ttyACM0` is native USB CDC, not an automatic mirror of UART pins.
 - `/dev/ttyACM0` should be treated as:
-  - binary CRSF output on `HDZ>CRSF`, `UART>PWM`, and `CRSF TX12`
-  - human-readable debug console only in `DEBUG CFG`
+  - binary CRSF output on `HDZ>CRSF`, `UART>PWM`, `CRSF TX12`, and `DEBUG CFG`
+  - boot-only text console before runtime CRSF output begins
 - Routing ownership uses source health plus route hysteresis:
   - a source keeps its current route until it becomes stale on its configured timeout (`signal_timeout_ms` for PPM, `crsf_rx_timeout_ms` for CRSF RX)
   - a source must re-acquire health with at least `3` valid events inside `150ms` before it can take ownership again
@@ -145,17 +138,11 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - if the OLED is missing or init fails, firmware continues running and reports a warning on serial
 - ESP32 runs a local AP (`waybeam-backpack`) and serves a Web UI on `10.100.0.1` only in `DEBUG CFG`.
 - DHCP is active on the AP only while `DEBUG CFG` is selected.
-- Entering `DEBUG CFG` uses a simple clean SoftAP restart plus a brief debug-loop yield, and keeps WiFi AP timing logs enabled so startup/association delays can be measured without adding more AP control complexity.
-- SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6`, requests `19.5dBm` TX power in `DEBUG CFG`, and logs AP start/configuration in chronological order for easier diagnosis.
+- Entering `DEBUG CFG` now stages SoftAP startup across the main loop instead of blocking inside the mode switch, which keeps CRSF output continuity much tighter while WiFi comes up.
+- SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6` and requests `19.5dBm` TX power in `DEBUG CFG`.
 - Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
 - Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`), with `GPIO4/5` reserved for the OLED.
-- `DEBUG CFG` serial output prints PPM status at roughly `~5Hz`.
-- After switching into `DEBUG CFG`, first stats line appears after one monitor interval (~200ms).
-- `DEBUG CFG` serial output includes:
-  - measured `hz` over the current monitor window
-  - `invalid(+delta)` for stale-signal/noise debugging
-  - `route usb=TEXT` means USB CDC is intentionally reserved for readable debug output in `DEBUG CFG`
-  - WiFi AP timing events (`AP event: START`, `STA connected`, `STA got IP`) to separate AP bring-up from client association problems
+- `DEBUG CFG` no longer switches USB CDC to a text console; OLED and Web UI are the intended debug surfaces while CRSF output continues uninterrupted.
 - Web status JSON reports the same stable windowed PPM rate used by `DEBUG CFG`:
   - `frame_hz`
   - `frame_hz_ema`
@@ -174,6 +161,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - `ap_started_ms`
   - `ap_last_station_join_ms`
   - `ap_last_station_ip_ms`
+- `web_ui_active` reflects an actually running SoftAP, not just a requested debug mode.
 - `crsf_rx_rate_hz` is reported as a live value only while CRSF RX is fresh; stale/missing CRSF reports no carried-over rate.
 - The Web UI keeps the raw JSON status view under an expandable advanced section for deeper debugging.
 - `ch1/ch2/ch3` widths are typically around `1000..2000us`.
