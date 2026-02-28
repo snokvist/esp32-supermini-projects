@@ -108,7 +108,7 @@ constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
 
-constexpr uint16_t kSettingsVersion = 3;
+constexpr uint16_t kSettingsVersion = 4;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -372,8 +372,13 @@ const sections=[
 ['2','Debug / Config']
 ]}
 ]},
-{title:'CRSF / UART', note:'Incoming CRSF drives PWM first. If PPM drops out, healthy CRSF can also take over USB output.', fields:[
-{name:'crsf_uart_baud',label:'CRSF UART baud',type:'number'},
+{title:'CRSF / UART', note:'CRSF output target selects where outgoing CRSF frames are sent. UART baud applies to both RX and TX on the hardware UART (GPIO20/21). USB Serial always runs at 420000.', fields:[
+{name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
+['0','USB Serial'],
+['1','HW UART TX'],
+['2','Both (USB + HW UART)']
+]},
+{name:'crsf_uart_baud',label:'HW UART baud (RX + TX)',type:'number'},
 {name:'crsf_map_min_us',label:'PPM -> CRSF map min us',type:'number'},
 {name:'crsf_map_max_us',label:'PPM -> CRSF map max us',type:'number'},
 {name:'crsf_rx_timeout_ms',label:'CRSF RX stale timeout ms',type:'number'}
@@ -603,6 +608,7 @@ struct RuntimeSettings {
   uint16_t servoPulseMaxUs;
 
   uint8_t outputModeDefault;
+  uint8_t crsfOutputTarget;
 };
 
 volatile uint16_t gIsrPpmMinChannelUs = 800;
@@ -735,6 +741,7 @@ RuntimeSettings defaultSettings() {
   s.servoPulseMaxUs = 2000;
 
   s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfTx12);
+  s.crsfOutputTarget = 0;
   return s;
 }
 
@@ -1253,12 +1260,17 @@ void refreshOledStatus(uint32_t nowMs) {
 }
 
 void initOled() {
-  Serial.printf("OLED I2C: SDA=%u, SCL=%u, addr=0x%02X\n", OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDRESS);
+  const bool serialOk = (gSettings.crsfOutputTarget != 1);
+  if (serialOk) {
+    Serial.printf("OLED I2C: SDA=%u, SCL=%u, addr=0x%02X\n", OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDRESS);
+  }
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   Wire.setClock(kI2cClockHz);
 
   if (!gDisplay.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDRESS)) {
-    Serial.println("WARN: SSD1306 init failed. Continuing without OLED.");
+    if (serialOk) {
+      Serial.println("WARN: SSD1306 init failed. Continuing without OLED.");
+    }
     gOledReady = false;
     return;
   }
@@ -1270,7 +1282,9 @@ void initOled() {
   gDisplay.setCursor(0, 0);
   gDisplay.println("HDZero OLED ready");
   gDisplay.display();
-  Serial.println("OLED status screen ready");
+  if (serialOk) {
+    Serial.println("OLED status screen ready");
+  }
 }
 
 bool validateSettings(const RuntimeSettings &s, String &error);
@@ -1318,6 +1332,7 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   ok &= (gPrefs.putUShort("svmx", s.servoPulseMaxUs) == sizeof(uint16_t));
 
   ok &= (gPrefs.putUChar("omod", s.outputModeDefault) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("cotr", s.crsfOutputTarget) == sizeof(uint8_t));
   return ok;
 }
 
@@ -1328,7 +1343,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -1367,6 +1382,7 @@ RuntimeSettings loadSettingsFromNvs() {
   s.servoPulseMaxUs = gPrefs.getUShort("svmx", s.servoPulseMaxUs);
 
   s.outputModeDefault = gPrefs.getUChar("omod", s.outputModeDefault);
+  s.crsfOutputTarget = gPrefs.getUChar("cotr", s.crsfOutputTarget);
   String validationError;
   if (!validateSettings(s, validationError)) {
     Serial.printf("WARN: Stored settings invalid (%s). Restoring defaults.\n", validationError.c_str());
@@ -1374,9 +1390,9 @@ RuntimeSettings loadSettingsFromNvs() {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to persist restored default settings");
     }
-  } else if (version == 2) {
+  } else if (version < kSettingsVersion) {
     // Bump older settings records to the current schema while preserving any
-    // explicit boot screen the user already saved.
+    // explicit values the user already saved.
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to persist migrated settings");
     }
@@ -1456,6 +1472,10 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
   }
   if (s.outputModeDefault > 3) {
     error = "output_mode_default must be 0, 1, 2, or 3";
+    return false;
+  }
+  if (s.crsfOutputTarget > 2) {
+    error = "crsf_output_target must be 0, 1, or 2";
     return false;
   }
   if (pinListHasDuplicates(s)) {
@@ -1780,16 +1800,6 @@ void sendPpmAsCrsfFrame(bool writeUsbSerial, bool writeHardwareUart) {
   writeCrsfPacket(packet, writeUsbSerial, writeHardwareUart);
 }
 
-void sendCrsfRxToUsbFrame() {
-  uint16_t channels[kCrsfChannelCount] = {0};
-  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
-    channels[i] = gCrsfRxChannels[i];
-  }
-  uint8_t packet[kCrsfPacketSize] = {0};
-  packCrsfRcPacket(channels, packet);
-  writeCrsfPacket(packet, true, false);
-}
-
 bool copyFrameFromIsr(uint32_t &invalidPulses) {
   noInterrupts();
   const bool frameReady = gIsrFrameReady;
@@ -2041,6 +2051,7 @@ String settingsToJson() {
 
   json += ",\"output_mode_live\":" + String(outputModeToUint(gOutputMode));
   json += ",\"output_mode_default\":" + String(gSettings.outputModeDefault);
+  json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
   json += "}";
   return json;
 }
@@ -2088,6 +2099,7 @@ String statusToJson() {
   json += ",\"usb_route_label\":\"" + String(usbCrsfRouteLabel(usbRoute)) + "\"";
   json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(pwmRoute)) + "\"";
   json += ",\"servo_us\":[" + String(gServoPulseUs[0]) + "," + String(gServoPulseUs[1]) + "," + String(gServoPulseUs[2]) + "]";
+  json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
   json += "}";
   return json;
 }
@@ -2299,6 +2311,13 @@ void handlePostSettings() {
   }
   candidate.outputModeDefault = static_cast<uint8_t>(tmp);
 
+  tmp = candidate.crsfOutputTarget;
+  if (!parseUIntArgOptional("crsf_output_target", 0, 2, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.crsfOutputTarget = static_cast<uint8_t>(tmp);
+
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   tmp = requestedLiveMode;
   if (!parseUIntArgOptional("output_mode_live", 0, 3, tmp, error)) {
@@ -2503,7 +2522,7 @@ void setOutputMode(OutputMode mode, const char *source, bool force) {
   } else {
     stopDebugServices();
   }
-  if (!isDebugOutputMode(gOutputMode)) {
+  if (!isDebugOutputMode(gOutputMode) && gSettings.crsfOutputTarget != 1) {
     Serial.printf("Screen -> %s (%s)\n", outputModeLabel(gOutputMode), source);
   }
   gLastOledRefreshMs = 0;
@@ -2512,22 +2531,25 @@ void setOutputMode(OutputMode mode, const char *source, bool force) {
 } // namespace
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(420000);
   delay(250);
-  Serial.println("Boot: hdzero-headtracker-monitor");
-  const esp_reset_reason_t resetReason = esp_reset_reason();
-  Serial.printf("Reset reason: %s (%d)\n", resetReasonLabel(resetReason), static_cast<int>(resetReason));
-  Serial.printf("Pins: PPM=%u LED=%u BTN=%u UART_RX=%u UART_TX=%u SERVO=%u,%u,%u\n", PPM_INPUT_PIN, LED_PIN,
-                MODE_BUTTON_PIN, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN, SERVO_PWM_1_PIN, SERVO_PWM_2_PIN,
-                SERVO_PWM_3_PIN);
   WiFi.onEvent(onWiFiEvent);
   gPrefsReady = gPrefs.begin("waybeam", false);
-  if (!gPrefsReady) {
-    Serial.println("WARN: Preferences init failed; persistence disabled");
-  }
-
   gSettings = loadSettingsFromNvs();
   applySettings(gSettings);
+
+  const bool serialOk = (gSettings.crsfOutputTarget != 1);
+  if (serialOk) {
+    Serial.println("Boot: hdzero-headtracker-monitor");
+    const esp_reset_reason_t resetReason = esp_reset_reason();
+    Serial.printf("Reset reason: %s (%d)\n", resetReasonLabel(resetReason), static_cast<int>(resetReason));
+    Serial.printf("Pins: PPM=%u LED=%u BTN=%u UART_RX=%u UART_TX=%u SERVO=%u,%u,%u\n", PPM_INPUT_PIN, LED_PIN,
+                  MODE_BUTTON_PIN, CRSF_UART_RX_PIN, CRSF_UART_TX_PIN, SERVO_PWM_1_PIN, SERVO_PWM_2_PIN,
+                  SERVO_PWM_3_PIN);
+    if (!gPrefsReady) {
+      Serial.println("WARN: Preferences init failed; persistence disabled");
+    }
+  }
   setOutputMode(static_cast<OutputMode>(gSettings.outputModeDefault), "boot", true);
   initOled();
   refreshOledStatus(millis());
@@ -2562,11 +2584,22 @@ void loop() {
   }
   refreshOledStatus(nowMs);
 
+  const bool outputToUsb = (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
+  const bool outputToUart = (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
+
   if (frameReady) {
-    sendPpmAsCrsfFrame(usbRoute == UsbCrsfRoute::kPpm, !isSourceStale(ppmHealth));
+    sendPpmAsCrsfFrame(
+      outputToUsb && (usbRoute == UsbCrsfRoute::kPpm),
+      outputToUart || !isSourceStale(ppmHealth));
   }
   if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
-    sendCrsfRxToUsbFrame();
+    uint16_t channels[kCrsfChannelCount] = {0};
+    for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+      channels[i] = gCrsfRxChannels[i];
+    }
+    uint8_t packet[kCrsfPacketSize] = {0};
+    packCrsfRcPacket(channels, packet);
+    writeCrsfPacket(packet, outputToUsb, outputToUart);
   }
   updateLed();
 

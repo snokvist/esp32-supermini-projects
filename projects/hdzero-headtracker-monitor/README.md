@@ -12,10 +12,10 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
   - `SSD1306` `128x64` over I2C
   - fixed wiring: `GPIO4`=`SDA`, `GPIO5`=`SCL`, address `0x3C`
 - CRSF outputs:
-  - USB CDC (`/dev/ttyACM0`) carries binary CRSF on every runtime screen, including `DEBUG CFG`
-  - USB CDC normally follows PPM, but falls back to incoming CRSF RX when PPM is no longer healthy
-  - UART1 on `GPIO21` TX + `GPIO20` RX at `420000` baud for direct FC/receiver wiring
-  - UART1 TX remains PPM-driven only; incoming CRSF RX is not echoed back to UART1
+  - USB CDC (`/dev/ttyACM0`) and UART1 both run at `420000` baud (standard CRSF rate)
+  - a web UI dropdown selects the CRSF output target: USB Serial (default), HW UART TX, or Both
+  - the active output target normally follows PPM, but falls back to incoming CRSF RX when PPM is no longer healthy
+  - UART1 on `GPIO21` TX + `GPIO20` RX for direct FC/receiver wiring
 - Servo PWM outputs:
   - `GPIO0`, `GPIO1`, `GPIO2` at `100Hz`
   - normally driven from incoming CRSF CH1..CH3, with fallback to headtracker PPM when CRSF RX becomes stale
@@ -40,10 +40,10 @@ Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CR
 ```bash
 pio run
 pio run -t upload --upload-port /dev/ttyACM0
-pio device monitor -p /dev/ttyACM0 -b 115200
+pio device monitor -p /dev/ttyACM0 -b 420000
 ```
 
-`/dev/ttyACM0` carries binary CRSF during normal runtime on all four screens. Use the OLED and Web UI for debug/config visibility.
+`/dev/ttyACM0` carries binary CRSF at `420000` baud during normal runtime when USB Serial is the selected output target. Use the OLED and Web UI for debug/config visibility.
 
 ## How To Interact With This Project
 
@@ -110,9 +110,11 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - short press cycles `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
   - long press (`>3s`) enters `DEBUG CFG`
   - short press in `DEBUG CFG` returns to the last graph screen
-- CRSF is written to both:
-  - UART1 on `GPIO21` TX + `GPIO20` RX at `420000` baud
-  - USB CDC `Serial` on all runtime screens
+- CRSF output target is selectable via web UI:
+  - USB Serial (default): CRSF frames sent over USB CDC on all runtime screens
+  - HW UART TX: CRSF frames sent over UART1 `GPIO21` TX instead, USB Serial completely silenced
+  - Both (USB + HW UART): CRSF frames sent to both outputs simultaneously
+  - all outputs run at `420000` baud (standard CRSF rate)
 - On this firmware config (`ARDUINO_USB_MODE=1`), `/dev/ttyACM0` is native USB CDC, not an automatic mirror of UART pins.
 - `/dev/ttyACM0` should be treated as:
   - binary CRSF output on `HDZ>CRSF`, `UART>PWM`, `CRSF TX12`, and `DEBUG CFG`
@@ -131,7 +133,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - output rate: `100Hz`
 - If CRSF RX is no longer healthy, PWM falls back to fresh PPM headtracker channels (`PAN/ROL/TIL -> S1/S2/S3`). If neither source is healthy, servo outputs return to center (`1500us`).
 - If PPM is no longer healthy, USB CRSF output falls back to healthy incoming CRSF RX packets.
-- Incoming CRSF RX is mirrored only to USB during fallback. It is intentionally not re-sent on UART1 TX, which avoids output loops on attached CRSF hardware.
+- During CRSF RX fallback, incoming CRSF is forwarded to whichever output target is selected in the web UI (USB Serial or HW UART TX).
 - The PPM input uses `INPUT_PULLDOWN` to reduce floating/noisy interrupt bursts when the headtracker cable is unplugged or bouncing.
 - Boot serial now prints the ESP reset reason, which helps distinguish software faults from brownouts or hot-plug power glitches.
 - OLED status output runs independently of serial/web behavior:
