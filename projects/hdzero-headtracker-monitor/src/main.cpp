@@ -388,7 +388,8 @@ const sections=[
 {name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
 ['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
 ]},
-{name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'number'}
+{name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'select',options:[
+['50','50 Hz'],['100','100 Hz'],['150','150 Hz'],['200','200 Hz'],['250','250 Hz'],['333','333 Hz'],['400','400 Hz']]}
 ]},
 {title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
