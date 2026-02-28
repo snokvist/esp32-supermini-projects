@@ -424,6 +424,18 @@ Use this file as a running implementation log.
     - observed `OLED status screen ready`
   - direct runtime cross-route validation with live source drop/recovery is still pending manual confirmation
 
+### 2026-02-28 - Make CRSF TX12 the Boot Default
+
+- Changed the runtime boot default screen from `HDZ>CRSF` to `CRSF TX12`.
+- Updated startup defaults so a clean power-on lands on the 12-channel CRSF view before any persisted settings are applied.
+- Fixed `output_mode_default` validation to accept mode `3`, matching the existing `CRSF TX12` screen and Web UI options.
+- Follow-up: older saved settings now preserve any explicit user-selected boot screen during the schema migration instead of forcing `CRSF TX12` onto every upgraded board.
+- Updated README and hardware notes to reflect the new boot order and short-press cycle.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run -t upload --upload-port /dev/ttyACM0`
+  - observed boot serial `Screen -> CRSF TX12 (boot)`
+
 ### 2026-02-27 - Route Hysteresis Follow-Up Fixes
 
 - Fixed the first hysteresis pass so route ownership now behaves as intended:
@@ -481,5 +493,26 @@ Use this file as a running implementation log.
   - `CRSF STAL` when packets are stale
   - `CRSF NONE` before any valid CRSF RC packet has been seen
 - Status JSON and Web UI summary now expose `crsf_rx_rate_hz` as a live-only value, reported as `0` when CRSF is stale or missing.
+- Validation:
+  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+
+### 2026-02-27 - Add CRSF TX12 OLED Screen
+
+- Added a third main OLED runtime screen, `CRSF TX12`, alongside `HDZ>CRSF` and `UART>PWM`.
+- Short-press BOOT behavior now cycles across the three main screens:
+  - `HDZ>CRSF`
+  - `UART>PWM`
+  - `CRSF TX12`
+- Long-press behavior is unchanged:
+  - long press (`>3s`) enters `DEBUG CFG`
+  - short press in `DEBUG CFG` returns to the last selected main screen
+- Implemented a compact two-column channel view for the first 12 outgoing CRSF channels:
+  - reuses the same PPM -> CRSF mapping path as UART1 TX
+  - shows slim centered bars so all 12 channels fit on the OLED
+  - by default, channels `1..3` move with the headtracker and channels `4..12` stay centered
+- Follow-up fix:
+  - the screen now follows the active CRSF output route instead of assuming PPM is always the source
+  - when USB CRSF output falls back to incoming CRSF RX, `CRSF TX12` shows the decoded CRSF RX channels
+- Extended the Web UI mode dropdowns and mode validation to include the new screen.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful

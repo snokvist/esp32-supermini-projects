@@ -104,7 +104,7 @@ constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
 
-constexpr uint16_t kSettingsVersion = 2;
+constexpr uint16_t kSettingsVersion = 3;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -358,11 +358,13 @@ const sections=[
 {name:'output_mode_live',label:'Live screen',type:'select',options:[
 ['0','HDZero -> CRSF'],
 ['1','UART -> PWM'],
+['3','CRSF TX 1-12'],
 ['2','Debug / Config']
 ]},
 {name:'output_mode_default',label:'Boot default screen',type:'select',options:[
 ['0','HDZero -> CRSF'],
 ['1','UART -> PWM'],
+['3','CRSF TX 1-12'],
 ['2','Debug / Config']
 ]}
 ]},
@@ -660,9 +662,9 @@ RuntimeSettings gSettings;
 bool gWebUiActive = false;
 bool gWebRoutesConfigured = false;
 
-enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2 };
-OutputMode gOutputMode = OutputMode::kHdzeroCrsf;
-OutputMode gLastMainOutputMode = OutputMode::kHdzeroCrsf;
+enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2, kCrsfTx12 = 3 };
+OutputMode gOutputMode = OutputMode::kCrsfTx12;
+OutputMode gLastMainOutputMode = OutputMode::kCrsfTx12;
 enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
 enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
 enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
@@ -708,7 +710,7 @@ RuntimeSettings defaultSettings() {
   s.servoPulseCenterUs = 1500;
   s.servoPulseMaxUs = 2000;
 
-  s.outputModeDefault = static_cast<uint8_t>(OutputMode::kHdzeroCrsf);
+  s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfTx12);
   return s;
 }
 
@@ -914,6 +916,8 @@ const char *outputModeLabel(OutputMode mode) {
       return "HDZ>CRSF";
     case OutputMode::kUartToPwm:
       return "UART>PWM";
+    case OutputMode::kCrsfTx12:
+      return "CRSF TX12";
     case OutputMode::kDebugConfig:
       return "DEBUG";
   }
@@ -994,6 +998,9 @@ const char *crsfRxHealthLabel(uint32_t nowMs) {
 float liveCrsfRxRateHz(uint32_t nowMs) {
   return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxRateHzEma : 0.0f;
 }
+
+void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
+void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]);
 
 int16_t centeredFillPixels(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
                            int16_t halfWidth) {
@@ -1089,6 +1096,34 @@ void drawCenteredGraphRow(int16_t y, const char *label, bool hasValue, uint16_t 
   gDisplay.print("----");
 }
 
+void drawCompactCrsfChannelRow(int16_t x, int16_t y, uint8_t channelIndex, bool hasValue, uint16_t value) {
+  constexpr int16_t kGraphXOffset = 14;
+  constexpr int16_t kGraphWidth = 48;
+  constexpr int16_t kGraphHeight = 7;
+  const int16_t graphX = x + kGraphXOffset;
+  const int16_t centerX = graphX + (kGraphWidth / 2);
+  const int16_t halfWidth = (kGraphWidth / 2) - 2;
+
+  gDisplay.setTextColor(SSD1306_WHITE);
+  gDisplay.setCursor(x, y);
+  gDisplay.printf("%02u", static_cast<unsigned>(channelIndex + 1));
+  gDisplay.drawRect(graphX, y, kGraphWidth, kGraphHeight, SSD1306_WHITE);
+  gDisplay.drawFastVLine(centerX, y + 1, kGraphHeight - 2, SSD1306_WHITE);
+
+  if (!hasValue) {
+    return;
+  }
+
+  const int16_t fill = centeredFillPixels(value, kCrsfMinValue, kCrsfCenterValue, kCrsfMaxValue, halfWidth);
+  const int16_t markerX = centerX + centeredMarkerOffset(value, kCrsfMinValue, kCrsfCenterValue, kCrsfMaxValue, halfWidth);
+  if (fill > 0) {
+    gDisplay.fillRect(centerX + 1, y + 2, fill, kGraphHeight - 4, SSD1306_WHITE);
+  } else if (fill < 0) {
+    gDisplay.fillRect(centerX + fill, y + 2, -fill, kGraphHeight - 4, SSD1306_WHITE);
+  }
+  gDisplay.drawFastVLine(markerX, y + 1, kGraphHeight - 2, SSD1306_BLACK);
+}
+
 void drawHdzeroToCrsfScreen(uint32_t nowMs) {
   const uint16_t centerUs = static_cast<uint16_t>((gSettings.crsfMapMinUs + gSettings.crsfMapMaxUs) / 2U);
   drawHeaderBar("HDZ>CRSF", ppmHealthLabel(nowMs));
@@ -1108,6 +1143,28 @@ void drawUartToPwmScreen(uint32_t nowMs) {
                        gSettings.servoPulseMaxUs);
   drawCenteredGraphRow(46, "S3", true, gServoPulseUs[2], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                        gSettings.servoPulseMaxUs);
+}
+
+void drawCrsfTx12Screen(uint32_t nowMs) {
+  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
+  const bool ppmFresh = isPpmFresh(nowMs, gSettings.signalTimeoutMs);
+  const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
+  bool hasValue = false;
+  uint16_t channels[kCrsfChannelCount] = {0};
+  if (usbRoute == UsbCrsfRoute::kPpm && ppmFresh) {
+    fillOutgoingCrsfChannelsFromPpm(channels);
+    hasValue = true;
+  } else if (usbRoute == UsbCrsfRoute::kCrsfRx && crsfFresh) {
+    fillOutgoingCrsfChannelsFromCrsfRx(channels);
+    hasValue = true;
+  }
+
+  drawHeaderBar("CRSF TX12", usbCrsfRouteLabel(usbRoute));
+  for (uint8_t i = 0; i < 6; ++i) {
+    const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
+    drawCompactCrsfChannelRow(0, y, i, hasValue, channels[i]);
+    drawCompactCrsfChannelRow(64, y, static_cast<uint8_t>(i + 6), hasValue, channels[i + 6]);
+  }
 }
 
 void drawDebugConfigScreen(uint32_t nowMs) {
@@ -1130,7 +1187,7 @@ void drawDebugConfigScreen(uint32_t nowMs) {
   gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
                   gSettings.servoPwmPins[2]);
   gDisplay.setCursor(0, 54);
-  gDisplay.print("short 1/2 long dbg");
+  gDisplay.print("short 1/2/3 long dbg");
 }
 
 void refreshOledStatus(uint32_t nowMs) {
@@ -1147,6 +1204,8 @@ void refreshOledStatus(uint32_t nowMs) {
     drawHdzeroToCrsfScreen(nowMs);
   } else if (gOutputMode == OutputMode::kUartToPwm) {
     drawUartToPwmScreen(nowMs);
+  } else if (gOutputMode == OutputMode::kCrsfTx12) {
+    drawCrsfTx12Screen(nowMs);
   } else {
     drawDebugConfigScreen(nowMs);
   }
@@ -1229,7 +1288,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != kSettingsVersion) {
+  if (version != 2 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -1274,6 +1333,12 @@ RuntimeSettings loadSettingsFromNvs() {
     s = defaultSettings();
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to persist restored default settings");
+    }
+  } else if (version == 2) {
+    // Bump older settings records to the current schema while preserving any
+    // explicit boot screen the user already saved.
+    if (!saveSettingsToNvs(s)) {
+      Serial.println("WARN: Failed to persist migrated settings");
     }
   }
   return s;
@@ -1349,8 +1414,8 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       return false;
     }
   }
-  if (s.outputModeDefault > 2) {
-    error = "output_mode_default must be 0, 1, or 2";
+  if (s.outputModeDefault > 3) {
+    error = "output_mode_default must be 0, 1, 2, or 3";
     return false;
   }
   if (pinListHasDuplicates(s)) {
@@ -1408,6 +1473,23 @@ uint16_t mapPulseUsToCrsf(uint16_t pulseUs) {
       static_cast<uint32_t>(clampedUs - gSettings.crsfMapMinUs) * static_cast<uint32_t>(kCrsfMaxValue - kCrsfMinValue);
   const uint32_t denominator = static_cast<uint32_t>(gSettings.crsfMapMaxUs - gSettings.crsfMapMinUs);
   return static_cast<uint16_t>(kCrsfMinValue + ((numerator + (denominator / 2U)) / denominator));
+}
+
+void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]) {
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = kCrsfCenterValue;
+  }
+
+  const uint8_t count = (gLatestChannelCount < kCrsfChannelCount) ? gLatestChannelCount : kCrsfChannelCount;
+  for (uint8_t i = 0; i < count; ++i) {
+    channels[i] = mapPulseUsToCrsf(gLatestChannels[i]);
+  }
+}
+
+void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]) {
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = gCrsfRxChannels[i];
+  }
 }
 
 uint16_t mapCrsfToServoUs(uint16_t crsfValue) {
@@ -1642,15 +1724,7 @@ void writeCrsfPacket(const uint8_t packet[kCrsfPacketSize], bool writeUsbSerial,
 
 void sendPpmAsCrsfFrame(bool writeUsbSerial, bool writeHardwareUart) {
   uint16_t channels[kCrsfChannelCount];
-  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
-    channels[i] = kCrsfCenterValue;
-  }
-
-  const uint8_t count = (gLatestChannelCount < kCrsfChannelCount) ? gLatestChannelCount : kCrsfChannelCount;
-  for (uint8_t i = 0; i < count; ++i) {
-    channels[i] = mapPulseUsToCrsf(gLatestChannels[i]);
-  }
-
+  fillOutgoingCrsfChannelsFromPpm(channels);
   uint8_t packet[kCrsfPacketSize] = {0};
   packCrsfRcPacket(channels, packet);
   writeCrsfPacket(packet, writeUsbSerial, writeHardwareUart);
@@ -1770,8 +1844,12 @@ void toggleOutputMode() {
     setOutputMode(gLastMainOutputMode, "button-short");
     return;
   }
-  const OutputMode nextMode =
-      (gOutputMode == OutputMode::kHdzeroCrsf) ? OutputMode::kUartToPwm : OutputMode::kHdzeroCrsf;
+  OutputMode nextMode = OutputMode::kHdzeroCrsf;
+  if (gOutputMode == OutputMode::kHdzeroCrsf) {
+    nextMode = OutputMode::kUartToPwm;
+  } else if (gOutputMode == OutputMode::kUartToPwm) {
+    nextMode = OutputMode::kCrsfTx12;
+  }
   setOutputMode(nextMode, "button-short");
 }
 
@@ -2200,7 +2278,7 @@ void handlePostSettings() {
   candidate.servoPulseMaxUs = static_cast<uint16_t>(tmp);
 
   tmp = candidate.outputModeDefault;
-  if (!parseUIntArgOptional("output_mode_default", 0, 2, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_default", 0, 3, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -2208,7 +2286,7 @@ void handlePostSettings() {
 
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   tmp = requestedLiveMode;
-  if (!parseUIntArgOptional("output_mode_live", 0, 2, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_live", 0, 3, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
