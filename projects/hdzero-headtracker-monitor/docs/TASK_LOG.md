@@ -546,6 +546,10 @@ Use this file as a running implementation log.
   - moved AP startup into a small staged loop service so CRSF output keeps flowing during mode switches
   - changed OLED/status reporting so `AP ON` and `web_ui_active` only reflect a real `WIFI_AP_START` event
 - Kept the existing open AP, channel `6`, and `19.5dBm` TX power request unchanged.
+- Follow-up:
+  - added retry backoff for failed SoftAP startup instead of immediate restart loops
+  - exposed AP state explicitly on OLED/status surfaces (`AP WAIT`, `AP RETRY`, `AP ON`)
+  - added status JSON fields for retry tracking: `ap_state_label`, `ap_retry_count`, `ap_last_failure_ms`
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`)
   - `pio run -t upload --upload-port /dev/ttyACM0`

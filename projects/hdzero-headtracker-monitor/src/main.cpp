@@ -103,6 +103,7 @@ constexpr uint32_t kMinCrsfRxRateWindowMs = 200;
 constexpr uint32_t kDebugServiceWifiOffDelayMs = 50;
 constexpr uint32_t kDebugServiceApModeDelayMs = 50;
 constexpr uint32_t kDebugServiceApStartTimeoutMs = 2000;
+constexpr uint32_t kDebugServiceRetryBackoffMs = 3000;
 constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
@@ -678,7 +679,14 @@ OutputMode gLastMainOutputMode = OutputMode::kCrsfTx12;
 enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
 enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
 enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
-enum class DebugServiceState : uint8_t { kStopped = 0, kWaitWifiOff = 1, kWaitApMode = 2, kWaitApStart = 3, kRunning = 4 };
+enum class DebugServiceState : uint8_t {
+  kStopped = 0,
+  kWaitWifiOff = 1,
+  kWaitApMode = 2,
+  kWaitApStart = 3,
+  kBackoff = 4,
+  kRunning = 5
+};
 uint32_t gRecentPpmFrameMs[kRouteEventHistorySize] = {0};
 uint8_t gRecentPpmFrameCount = 0;
 uint32_t gRecentCrsfPacketMs[kRouteEventHistorySize] = {0};
@@ -690,6 +698,8 @@ uint32_t gLastPwmRouteChangeMs = 0;
 bool gDebugServicesWanted = false;
 DebugServiceState gDebugServiceState = DebugServiceState::kStopped;
 uint32_t gDebugServiceStateMs = 0;
+uint32_t gDebugServiceLastFailureMs = 0;
+uint32_t gDebugServiceRetryCount = 0;
 
 RuntimeSettings defaultSettings() {
   RuntimeSettings s{};
@@ -1010,6 +1020,16 @@ float liveCrsfRxRateHz(uint32_t nowMs) {
   return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxWindowHz : 0.0f;
 }
 
+const char *debugApStateLabel() {
+  if (gApRunning) {
+    return "AP ON";
+  }
+  if (!gDebugServicesWanted) {
+    return "AP OFF";
+  }
+  return (gDebugServiceState == DebugServiceState::kBackoff) ? "AP RETRY" : "AP WAIT";
+}
+
 void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
 void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]);
 
@@ -1180,7 +1200,7 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
 
 void drawDebugConfigScreen(uint32_t nowMs) {
   const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
-  drawHeaderBar("DEBUG CFG", gApRunning ? "AP ON" : "AP OFF");
+  drawHeaderBar("DEBUG CFG", debugApStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.setCursor(0, 14);
   gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
@@ -1193,7 +1213,15 @@ void drawDebugConfigScreen(uint32_t nowMs) {
     gDisplay.print("CRSF NONE");
   }
   gDisplay.setCursor(0, 34);
-  gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
+  if (gApRunning) {
+    gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
+  } else if (!gDebugServicesWanted) {
+    gDisplay.print("AP OFF");
+  } else if (gDebugServiceState == DebugServiceState::kBackoff) {
+    gDisplay.printf("AP retry #%lu", static_cast<unsigned long>(gDebugServiceRetryCount));
+  } else {
+    gDisplay.print("AP starting");
+  }
   gDisplay.setCursor(0, 44);
   gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
                   gSettings.servoPwmPins[2]);
@@ -2037,6 +2065,9 @@ String statusToJson() {
   json += ",\"ap_started_ms\":" + String(gApStartedMs);
   json += ",\"ap_last_station_join_ms\":" + String(gApLastStationJoinMs);
   json += ",\"ap_last_station_ip_ms\":" + String(gApLastStationIpMs);
+  json += ",\"ap_state_label\":\"" + String(debugApStateLabel()) + "\"";
+  json += ",\"ap_retry_count\":" + String(gDebugServiceRetryCount);
+  json += ",\"ap_last_failure_ms\":" + String(gDebugServiceLastFailureMs);
   json += ",\"web_ui_active\":" + String(gApRunning ? 1 : 0);
   json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
   json += ",\"oled_ready\":" + String(gOledReady ? 1 : 0);
@@ -2344,12 +2375,23 @@ void stopDebugServicesNow() {
   gDebugServiceStateMs = 0;
 }
 
+void beginDebugServiceRetry(uint32_t nowMs) {
+  stopDebugServicesNow();
+  gDebugServicesWanted = true;
+  gDebugServiceLastFailureMs = nowMs;
+  gDebugServiceRetryCount++;
+  gDebugServiceState = DebugServiceState::kBackoff;
+  gDebugServiceStateMs = nowMs;
+}
+
 void startDebugServices() {
   gDebugServicesWanted = true;
 }
 
 void stopDebugServices() {
   gDebugServicesWanted = false;
+  gDebugServiceRetryCount = 0;
+  gDebugServiceLastFailureMs = 0;
   stopDebugServicesNow();
 }
 
@@ -2388,25 +2430,31 @@ void serviceDebugServices(uint32_t nowMs) {
       WiFi.softAPConfig(kApIp, kApGateway, kApSubnet);
       WiFi.softAP(kApSsid, nullptr, kApChannel);
       WiFi.setTxPower(WIFI_POWER_19_5dBm);
-      if (!gWebUiActive) {
-        gWeb.begin();
-        gWebUiActive = true;
-      }
       gDebugServiceState = DebugServiceState::kWaitApStart;
       gDebugServiceStateMs = nowMs;
       break;
     case DebugServiceState::kWaitApStart:
       if (gApRunning) {
+        gDebugServiceRetryCount = 0;
         gDebugServiceState = DebugServiceState::kRunning;
+        if (!gWebUiActive) {
+          gWeb.begin();
+          gWebUiActive = true;
+        }
         break;
       }
       if ((nowMs - gDebugServiceStateMs) >= kDebugServiceApStartTimeoutMs) {
-        stopDebugServicesNow();
+        beginDebugServiceRetry(nowMs);
+      }
+      break;
+    case DebugServiceState::kBackoff:
+      if ((nowMs - gDebugServiceStateMs) >= kDebugServiceRetryBackoffMs) {
+        gDebugServiceState = DebugServiceState::kStopped;
       }
       break;
     case DebugServiceState::kRunning:
       if (!gApRunning) {
-        stopDebugServicesNow();
+        beginDebugServiceRetry(nowMs);
       }
       break;
   }

@@ -40,6 +40,7 @@
 - DHCP: enabled only while `DEBUG CFG` screen is active
 - Web UI: `http://10.100.0.1/` while `DEBUG CFG` is active
 - AP bring-up is hardened in firmware by a simple clean restart path for `waybeam-backpack`, staged across the main loop so switching into `DEBUG CFG` does not pause CRSF output for long blocking delays.
+- If SoftAP startup does not complete, firmware now enters a visible retry-backoff state instead of immediately spinning repeated restart attempts.
 - SoftAP beacon interval is already at the ESP32-C3 minimum/default (`100 TU`), so firmware now forces channel `6` and requests `19.5dBm` TX power in `DEBUG CFG` to improve visibility.
 - Status JSON includes `nvs_ready` (1 when preferences persistence is available).
 
@@ -138,9 +139,10 @@ Bring-up checklist:
    - when PPM owns CRSF output, channels `1..3` follow live PPM headtracker movement and channels `4..12` remain centered by default
    - when CRSF RX owns fallback CRSF output, the screen follows the decoded CRSF RX channels instead
 8. In `DEBUG CFG`, verify:
-   - AP starts only in this screen
-   - association should complete promptly after the AP appears
-   - OLED shows AP state, health summary, and pin map
+  - AP starts only in this screen
+  - association should complete promptly after the AP appears
+  - OLED shows AP state, health summary, and pin map
+  - OLED header uses `AP WAIT`, `AP RETRY`, or `AP ON` to reflect the real SoftAP state
    - PPM line shows the same stable windowed measured Hz used by the status API
    - CRSF line shows a windowed packet-rate estimate while CRSF is fresh, and no stale carried-over rate once CRSF drops out
    - CRSF RX rate uses at least a `200ms` window even if `monitor_print_interval_ms` is configured lower
@@ -151,6 +153,7 @@ Bring-up checklist:
    - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
    - mode and servo source fields use dropdowns instead of raw numeric entry
    - status JSON updates (`web_ui_active`, `output_mode_label`, CRSF RX counters/rate, servo values, `oled_ready`)
+   - AP state fields update consistently (`ap_state_label`, `ap_retry_count`, `ap_last_failure_ms`)
    - `web_ui_active` only goes high after the SoftAP has actually started
    - route labels update correctly (`usb_route_label`, `pwm_route_label`)
    - status JSON includes `nvs_ready: 1` during normal operation

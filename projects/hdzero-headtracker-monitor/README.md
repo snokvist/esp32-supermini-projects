@@ -87,9 +87,10 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 11. Switch to `DEBUG CFG` and confirm:
   - AP comes up only in this screen
   - OLED shows AP state, simplified health summary, and active pin map
-   - PPM line shows the same stable windowed measured Hz used by the web status API
-   - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
-   - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
+  - OLED header shows `AP WAIT`, `AP RETRY`, or `AP ON` instead of implying a live AP before startup completes
+  - PPM line shows the same stable windowed measured Hz used by the web status API
+  - CRSF line shows a windowed CRSF packet rate instead of raw packet-age spikes
+  - CRSF RX rate reporting uses at least a `200ms` window, so lowering the debug print interval does not make the OLED/Web UI rate jumpy again
    - USB CDC keeps streaming the active CRSF source instead of switching to text output
    - status/debug route reporting shows which source currently owns USB CRSF output and PWM
 12. Connect a phone/laptop to `waybeam-backpack` and open `http://10.100.0.1/` while `DEBUG CFG` is active to:
@@ -139,6 +140,7 @@ pio device monitor -p /dev/ttyACM0 -b 115200
 - ESP32 runs a local AP (`waybeam-backpack`) and serves a Web UI on `10.100.0.1` only in `DEBUG CFG`.
 - DHCP is active on the AP only while `DEBUG CFG` is selected.
 - Entering `DEBUG CFG` now stages SoftAP startup across the main loop instead of blocking inside the mode switch, which keeps CRSF output continuity much tighter while WiFi comes up.
+- If SoftAP startup fails, firmware now surfaces that state and retries with a backoff instead of immediately hammering the WiFi stack in a tight loop.
 - SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6` and requests `19.5dBm` TX power in `DEBUG CFG`.
 - Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
 - Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`), with `GPIO4/5` reserved for the OLED.
@@ -161,6 +163,10 @@ pio device monitor -p /dev/ttyACM0 -b 115200
   - `ap_started_ms`
   - `ap_last_station_join_ms`
   - `ap_last_station_ip_ms`
+- Web status JSON now also exposes AP state and retry tracking:
+  - `ap_state_label`
+  - `ap_retry_count`
+  - `ap_last_failure_ms`
 - `web_ui_active` reflects an actually running SoftAP, not just a requested debug mode.
 - `crsf_rx_rate_hz` is reported as a live value only while CRSF RX is fresh; stale/missing CRSF reports no carried-over rate.
 - The Web UI keeps the raw JSON status view under an expandable advanced section for deeper debugging.
