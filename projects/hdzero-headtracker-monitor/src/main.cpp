@@ -100,6 +100,10 @@ constexpr uint32_t kButtonLongPressMs = 3000;
 constexpr uint32_t kRouteAcquireWindowMs = 150;
 constexpr uint32_t kRouteSwitchHoldMs = 250;
 constexpr uint32_t kMinCrsfRxRateWindowMs = 200;
+constexpr uint32_t kDebugServiceWifiOffDelayMs = 50;
+constexpr uint32_t kDebugServiceApModeDelayMs = 50;
+constexpr uint32_t kDebugServiceApStartTimeoutMs = 2000;
+constexpr uint32_t kDebugServiceRetryBackoffMs = 3000;
 constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
@@ -618,7 +622,6 @@ uint8_t gLatestChannelCount = 0;
 uint32_t gLastFrameMs = 0;
 bool gLedState = false;
 uint32_t gLastLedToggleMs = 0;
-uint32_t gLastDebugMessageMs = 0;
 uint32_t gApStartRequestMs = 0;
 uint32_t gApStartedMs = 0;
 uint32_t gApLastStationJoinMs = 0;
@@ -667,6 +670,7 @@ bool gPrefsReady = false;
 WebServer gWeb(80);
 RuntimeSettings gSettings;
 bool gWebUiActive = false;
+bool gApRunning = false;
 bool gWebRoutesConfigured = false;
 
 enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2, kCrsfTx12 = 3 };
@@ -675,6 +679,14 @@ OutputMode gLastMainOutputMode = OutputMode::kCrsfTx12;
 enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
 enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
 enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
+enum class DebugServiceState : uint8_t {
+  kStopped = 0,
+  kWaitWifiOff = 1,
+  kWaitApMode = 2,
+  kWaitApStart = 3,
+  kBackoff = 4,
+  kRunning = 5
+};
 uint32_t gRecentPpmFrameMs[kRouteEventHistorySize] = {0};
 uint8_t gRecentPpmFrameCount = 0;
 uint32_t gRecentCrsfPacketMs[kRouteEventHistorySize] = {0};
@@ -683,6 +695,11 @@ UsbCrsfRoute gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
 PwmRoute gActivePwmRoute = PwmRoute::kCenter;
 uint32_t gLastUsbRouteChangeMs = 0;
 uint32_t gLastPwmRouteChangeMs = 0;
+bool gDebugServicesWanted = false;
+DebugServiceState gDebugServiceState = DebugServiceState::kStopped;
+uint32_t gDebugServiceStateMs = 0;
+uint32_t gDebugServiceLastFailureMs = 0;
+uint32_t gDebugServiceRetryCount = 0;
 
 RuntimeSettings defaultSettings() {
   RuntimeSettings s{};
@@ -835,11 +852,7 @@ bool canAcquirePwmRoute(PwmRoute route, SourceHealth ppmHealth, SourceHealth crs
   return false;
 }
 
-UsbCrsfRoute selectDesiredUsbCrsfRoute(uint32_t nowMs, bool usbTextMode, UsbCrsfRoute activeRoute) {
-  if (usbTextMode) {
-    return UsbCrsfRoute::kNone;
-  }
-
+UsbCrsfRoute selectDesiredUsbCrsfRoute(uint32_t nowMs, UsbCrsfRoute activeRoute) {
   const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
   const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
 
@@ -885,8 +898,8 @@ PwmRoute selectDesiredPwmRoute(uint32_t nowMs, PwmRoute activeRoute) {
   return PwmRoute::kCenter;
 }
 
-UsbCrsfRoute updateUsbCrsfRoute(uint32_t nowMs, bool usbTextMode) {
-  const UsbCrsfRoute desiredRoute = selectDesiredUsbCrsfRoute(nowMs, usbTextMode, gActiveUsbCrsfRoute);
+UsbCrsfRoute updateUsbCrsfRoute(uint32_t nowMs) {
+  const UsbCrsfRoute desiredRoute = selectDesiredUsbCrsfRoute(nowMs, gActiveUsbCrsfRoute);
   if (desiredRoute == gActiveUsbCrsfRoute) {
     return gActiveUsbCrsfRoute;
   }
@@ -941,10 +954,6 @@ const char *usbCrsfRouteLabel(UsbCrsfRoute route) {
       return "CRSF";
   }
   return "UNK";
-}
-
-const char *usbRouteReportLabel(UsbCrsfRoute route, bool usbTextMode) {
-  return usbTextMode ? "TEXT" : usbCrsfRouteLabel(route);
 }
 
 const char *pwmRouteLabel(PwmRoute route) {
@@ -1007,39 +1016,18 @@ uint32_t crsfRxRateWindowMs() {
                                                                      : gSettings.monitorPrintIntervalMs;
 }
 
-const char *wifiPowerLabel(wifi_power_t power) {
-  switch (power) {
-    case WIFI_POWER_19_5dBm:
-      return "19.5dBm";
-    case WIFI_POWER_19dBm:
-      return "19dBm";
-    case WIFI_POWER_18_5dBm:
-      return "18.5dBm";
-    case WIFI_POWER_17dBm:
-      return "17dBm";
-    case WIFI_POWER_15dBm:
-      return "15dBm";
-    case WIFI_POWER_13dBm:
-      return "13dBm";
-    case WIFI_POWER_11dBm:
-      return "11dBm";
-    case WIFI_POWER_8_5dBm:
-      return "8.5dBm";
-    case WIFI_POWER_7dBm:
-      return "7dBm";
-    case WIFI_POWER_5dBm:
-      return "5dBm";
-    case WIFI_POWER_2dBm:
-      return "2dBm";
-    case WIFI_POWER_MINUS_1dBm:
-      return "-1dBm";
-    default:
-      return "unknown";
-  }
-}
-
 float liveCrsfRxRateHz(uint32_t nowMs) {
   return isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs) ? gCrsfRxWindowHz : 0.0f;
+}
+
+const char *debugApStateLabel() {
+  if (gApRunning) {
+    return "AP ON";
+  }
+  if (!gDebugServicesWanted) {
+    return "AP OFF";
+  }
+  return (gDebugServiceState == DebugServiceState::kBackoff) ? "AP RETRY" : "AP WAIT";
 }
 
 void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
@@ -1212,7 +1200,7 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
 
 void drawDebugConfigScreen(uint32_t nowMs) {
   const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
-  drawHeaderBar("DEBUG CFG", gWebUiActive ? "AP ON" : "AP OFF");
+  drawHeaderBar("DEBUG CFG", debugApStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.setCursor(0, 14);
   gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
@@ -1225,7 +1213,15 @@ void drawDebugConfigScreen(uint32_t nowMs) {
     gDisplay.print("CRSF NONE");
   }
   gDisplay.setCursor(0, 34);
-  gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
+  if (gApRunning) {
+    gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
+  } else if (!gDebugServicesWanted) {
+    gDisplay.print("AP OFF");
+  } else if (gDebugServiceState == DebugServiceState::kBackoff) {
+    gDisplay.printf("AP retry #%lu", static_cast<unsigned long>(gDebugServiceRetryCount));
+  } else {
+    gDisplay.print("AP starting");
+  }
   gDisplay.setCursor(0, 44);
   gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
                   gSettings.servoPwmPins[2]);
@@ -1835,52 +1831,6 @@ bool updatePpmMonitorWindow(uint32_t nowMs, uint32_t invalidPulses) {
   return true;
 }
 
-void printPpmMonitorFrame(uint32_t invalidPulses) {
-  const uint32_t nowMs = millis();
-  const uint32_t crsfRxAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
-  const bool crsfRxFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
-  const bool usbTextMode = isDebugOutputMode(gOutputMode);
-  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
-  const PwmRoute pwmRoute = gActivePwmRoute;
-
-  uint16_t minChannelUs = 0;
-  uint16_t maxChannelUs = 0;
-  if (gLatestChannelCount > 0) {
-    minChannelUs = gLatestChannels[0];
-    maxChannelUs = gLatestChannels[0];
-    for (uint8_t i = 1; i < gLatestChannelCount; ++i) {
-      if (gLatestChannels[i] < minChannelUs) {
-        minChannelUs = gLatestChannels[i];
-      }
-      if (gLatestChannels[i] > maxChannelUs) {
-        maxChannelUs = gLatestChannels[i];
-      }
-    }
-  }
-
-  Serial.printf("PPM: ch=%u hz=%.1fHz invalid=%lu(+%lu) span=%u..%u", gLatestChannelCount,
-                static_cast<double>(gLastMeasuredWindowHz),
-                static_cast<unsigned long>(invalidPulses),
-                static_cast<unsigned long>(gLastMeasuredInvalidDelta), static_cast<unsigned>(minChannelUs),
-                static_cast<unsigned>(maxChannelUs));
-  Serial.printf(" | crsf_rx=%s age=%lums pkts=%lu bad=%lu",
-                crsfRxFresh ? "ok" : (gHasCrsfRxFrame ? "stale" : "none"),
-                static_cast<unsigned long>(crsfRxAgeMs), static_cast<unsigned long>(gCrsfRxPacketCounter),
-                static_cast<unsigned long>(gCrsfRxInvalidCounter));
-  Serial.printf(" | route usb=%s pwm=%s", usbRouteReportLabel(usbRoute, usbTextMode), pwmRouteLabel(pwmRoute));
-  Serial.printf(" | servo=%u,%u,%u", static_cast<unsigned>(gServoPulseUs[0]), static_cast<unsigned>(gServoPulseUs[1]),
-                static_cast<unsigned>(gServoPulseUs[2]));
-  for (uint8_t i = 0; i < gLatestChannelCount; ++i) {
-    Serial.printf(" ch%u=%u", static_cast<unsigned>(i + 1), static_cast<unsigned>(gLatestChannels[i]));
-  }
-  if (gLatestChannelCount >= 3) {
-    Serial.printf(" | pan=%u roll=%u tilt=%u", static_cast<unsigned>(gLatestChannels[0]),
-                  static_cast<unsigned>(gLatestChannels[1]), static_cast<unsigned>(gLatestChannels[2]));
-  }
-  Serial.println();
-
-}
-
 void updateLed() {
   const uint32_t nowMs = millis();
   const bool hasSignal = (nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs;
@@ -2097,7 +2047,6 @@ String settingsToJson() {
 
 String statusToJson() {
   const uint32_t nowMs = millis();
-  const bool usbTextMode = isDebugOutputMode(gOutputMode);
   const char *ppmHealth = ppmHealthLabel(nowMs);
   const char *crsfHealth = crsfRxHealthLabel(nowMs);
   const float crsfRateHz = liveCrsfRxRateHz(nowMs);
@@ -2116,7 +2065,10 @@ String statusToJson() {
   json += ",\"ap_started_ms\":" + String(gApStartedMs);
   json += ",\"ap_last_station_join_ms\":" + String(gApLastStationJoinMs);
   json += ",\"ap_last_station_ip_ms\":" + String(gApLastStationIpMs);
-  json += ",\"web_ui_active\":" + String(gWebUiActive ? 1 : 0);
+  json += ",\"ap_state_label\":\"" + String(debugApStateLabel()) + "\"";
+  json += ",\"ap_retry_count\":" + String(gDebugServiceRetryCount);
+  json += ",\"ap_last_failure_ms\":" + String(gDebugServiceLastFailureMs);
+  json += ",\"web_ui_active\":" + String(gApRunning ? 1 : 0);
   json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
   json += ",\"oled_ready\":" + String(gOledReady ? 1 : 0);
   json += ",\"oled_sda_pin\":" + String(OLED_SDA_PIN);
@@ -2133,7 +2085,7 @@ String statusToJson() {
   json += ",\"crsf_rx_invalid\":" + String(gCrsfRxInvalidCounter);
   json += ",\"crsf_rx_age_ms\":" + String(crsfAgeMs);
   json += ",\"crsf_rx_rate_hz\":" + String(crsfRateHz, 2);
-  json += ",\"usb_route_label\":\"" + String(usbRouteReportLabel(usbRoute, usbTextMode)) + "\"";
+  json += ",\"usb_route_label\":\"" + String(usbCrsfRouteLabel(usbRoute)) + "\"";
   json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(pwmRoute)) + "\"";
   json += ",\"servo_us\":[" + String(gServoPulseUs[0]) + "," + String(gServoPulseUs[1]) + "," + String(gServoPulseUs[2]) + "]";
   json += "}";
@@ -2411,53 +2363,101 @@ void configureWebUiRoutes() {
   gWebRoutesConfigured = true;
 }
 
-void startDebugServices() {
+void stopDebugServicesNow() {
   if (gWebUiActive) {
-    return;
+    gWeb.stop();
+    gWebUiActive = false;
   }
-  configureWebUiRoutes();
-  gApStartRequestMs = millis();
-  gApStartedMs = 0;
-  gApLastStationJoinMs = 0;
-  gApLastStationIpMs = 0;
-  const String requestedApIp = kApIp.toString();
-  Serial.printf("Debug/config AP start requested: ssid=%s ch=%u ip=%s tx=%s\n", kApSsid,
-                static_cast<unsigned>(kApChannel), requestedApIp.c_str(),
-                wifiPowerLabel(WIFI_POWER_19_5dBm));
-  WiFi.persistent(false);
+  gApRunning = false;
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
-  delay(50);
-  WiFi.setSleep(false);
-  WiFi.mode(WIFI_AP);
-  delay(50);
-  if (!WiFi.softAPConfig(kApIp, kApGateway, kApSubnet)) {
-    Serial.println("WARN: Failed to configure AP network settings");
-  }
-  if (!WiFi.softAP(kApSsid, nullptr, kApChannel)) {
-    Serial.println("WARN: Failed to start SoftAP");
-  }
-  if (!WiFi.setTxPower(WIFI_POWER_19_5dBm)) {
-    Serial.println("WARN: Failed to raise WiFi TX power");
-  }
-  delay(100);
-  gWeb.begin();
-  gWebUiActive = true;
-  const String liveApIp = WiFi.softAPIP().toString();
-  Serial.printf("Debug/config AP configured: ip=%s tx=%s\n", liveApIp.c_str(),
-                wifiPowerLabel(WiFi.getTxPower()));
+  gDebugServiceState = DebugServiceState::kStopped;
+  gDebugServiceStateMs = 0;
+}
+
+void beginDebugServiceRetry(uint32_t nowMs) {
+  stopDebugServicesNow();
+  gDebugServicesWanted = true;
+  gDebugServiceLastFailureMs = nowMs;
+  gDebugServiceRetryCount++;
+  gDebugServiceState = DebugServiceState::kBackoff;
+  gDebugServiceStateMs = nowMs;
+}
+
+void startDebugServices() {
+  gDebugServicesWanted = true;
 }
 
 void stopDebugServices() {
-  if (!gWebUiActive) {
+  gDebugServicesWanted = false;
+  gDebugServiceRetryCount = 0;
+  gDebugServiceLastFailureMs = 0;
+  stopDebugServicesNow();
+}
+
+void serviceDebugServices(uint32_t nowMs) {
+  if (!gDebugServicesWanted) {
     return;
   }
-  gWeb.stop();
-  WiFi.softAPdisconnect(true);
-  delay(20);
-  WiFi.mode(WIFI_OFF);
-  gWebUiActive = false;
-  Serial.println("Debug/config AP disabled");
+
+  switch (gDebugServiceState) {
+    case DebugServiceState::kStopped:
+      configureWebUiRoutes();
+      gApStartRequestMs = nowMs;
+      gApStartedMs = 0;
+      gApLastStationJoinMs = 0;
+      gApLastStationIpMs = 0;
+      gApRunning = false;
+      WiFi.persistent(false);
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      gDebugServiceState = DebugServiceState::kWaitWifiOff;
+      gDebugServiceStateMs = nowMs;
+      break;
+    case DebugServiceState::kWaitWifiOff:
+      if ((nowMs - gDebugServiceStateMs) < kDebugServiceWifiOffDelayMs) {
+        break;
+      }
+      WiFi.setSleep(false);
+      WiFi.mode(WIFI_AP);
+      gDebugServiceState = DebugServiceState::kWaitApMode;
+      gDebugServiceStateMs = nowMs;
+      break;
+    case DebugServiceState::kWaitApMode:
+      if ((nowMs - gDebugServiceStateMs) < kDebugServiceApModeDelayMs) {
+        break;
+      }
+      WiFi.softAPConfig(kApIp, kApGateway, kApSubnet);
+      WiFi.softAP(kApSsid, nullptr, kApChannel);
+      WiFi.setTxPower(WIFI_POWER_19_5dBm);
+      gDebugServiceState = DebugServiceState::kWaitApStart;
+      gDebugServiceStateMs = nowMs;
+      break;
+    case DebugServiceState::kWaitApStart:
+      if (gApRunning) {
+        gDebugServiceRetryCount = 0;
+        gDebugServiceState = DebugServiceState::kRunning;
+        if (!gWebUiActive) {
+          gWeb.begin();
+          gWebUiActive = true;
+        }
+        break;
+      }
+      if ((nowMs - gDebugServiceStateMs) >= kDebugServiceApStartTimeoutMs) {
+        beginDebugServiceRetry(nowMs);
+      }
+      break;
+    case DebugServiceState::kBackoff:
+      if ((nowMs - gDebugServiceStateMs) >= kDebugServiceRetryBackoffMs) {
+        gDebugServiceState = DebugServiceState::kStopped;
+      }
+      break;
+    case DebugServiceState::kRunning:
+      if (!gApRunning) {
+        beginDebugServiceRetry(nowMs);
+      }
+      break;
+  }
 }
 
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -2465,26 +2465,20 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_AP_START:
       gApStartedMs = nowMs;
-      Serial.printf("AP event: START after %lums\n", static_cast<unsigned long>(nowMs - gApStartRequestMs));
+      gApRunning = true;
       break;
     case ARDUINO_EVENT_WIFI_AP_STOP:
-      Serial.println("AP event: STOP");
+      gApRunning = false;
       break;
     case ARDUINO_EVENT_WIFI_AP_STACONNECTED:
       gApLastStationJoinMs = nowMs;
       gApStationJoinCount++;
-      Serial.printf("AP event: STA connected after %lums (joins=%lu)\n",
-                    static_cast<unsigned long>(nowMs - gApStartRequestMs),
-                    static_cast<unsigned long>(gApStationJoinCount));
       break;
     case ARDUINO_EVENT_WIFI_AP_STAIPASSIGNED:
       gApLastStationIpMs = nowMs;
-      Serial.printf("AP event: STA got IP after %lums\n",
-                    static_cast<unsigned long>(nowMs - gApStartRequestMs));
       break;
     case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
       gApStationLeaveCount++;
-      Serial.printf("AP event: STA disconnected (leaves=%lu)\n", static_cast<unsigned long>(gApStationLeaveCount));
       break;
     default:
       break;
@@ -2505,12 +2499,13 @@ void setOutputMode(OutputMode mode, const char *source, bool force) {
     gLastMonitorSampleMs = millis();
     gLastMeasuredWindowHz = 0.0f;
     gLastMeasuredInvalidDelta = 0;
-    gLastDebugMessageMs = millis();
     startDebugServices();
   } else {
     stopDebugServices();
   }
-  Serial.printf("Screen -> %s (%s)\n", outputModeLabel(gOutputMode), source);
+  if (!isDebugOutputMode(gOutputMode)) {
+    Serial.printf("Screen -> %s (%s)\n", outputModeLabel(gOutputMode), source);
+  }
   gLastOledRefreshMs = 0;
 }
 
@@ -2539,6 +2534,8 @@ void setup() {
 }
 
 void loop() {
+  serviceDebugServices(millis());
+
   if (gWebUiActive) {
     gWeb.handleClient();
   }
@@ -2556,12 +2553,13 @@ void loop() {
   updateCrsfRxRateWindow(nowMs);
   const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
   const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
-  const bool usbTextMode = isDebugOutputMode(gOutputMode);
-  const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs, usbTextMode);
+  const bool debugScreenActive = isDebugOutputMode(gOutputMode);
+  const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs);
   const PwmRoute pwmRoute = updatePwmRoute(nowMs);
   applyPwmRoute(pwmRoute);
-  const bool monitorWindowUpdated =
-      usbTextMode && frameReady && updatePpmMonitorWindow(nowMs, invalidPulses);
+  if (debugScreenActive && frameReady) {
+    updatePpmMonitorWindow(nowMs, invalidPulses);
+  }
   refreshOledStatus(nowMs);
 
   if (frameReady) {
@@ -2570,17 +2568,7 @@ void loop() {
   if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
     sendCrsfRxToUsbFrame();
   }
-  if (monitorWindowUpdated) {
-    printPpmMonitorFrame(invalidPulses);
-  }
-
   updateLed();
-
-  if (isDebugOutputMode(gOutputMode) && (nowMs - gLastFrameMs) > gSettings.signalTimeoutMs &&
-      (nowMs - gLastDebugMessageMs) > 1000) {
-    gLastDebugMessageMs = nowMs;
-    Serial.println("No PPM frame detected yet. Check HT enabled + wiring.");
-  }
 
   if (gWebUiActive) {
     delay(1);
