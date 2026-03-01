@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_system.h>
+#include <NimBLEDevice.h>
 
 #include <cstdlib>
 
@@ -88,6 +89,7 @@ constexpr uint16_t kCrsfCenterValue = 992;
 constexpr uint16_t kCrsfMaxValue = 1811;
 
 constexpr uint8_t kServoCount = 3;
+constexpr uint8_t kMergeMaxChannels = 8;
 constexpr uint8_t kServoPwmResolutionBits = 14;
 constexpr uint8_t kServoPwmChannels[kServoCount] = {0, 1, 2};
 constexpr uint16_t kCrsfRxBytesPerLoopLimit = 256;
@@ -106,9 +108,21 @@ constexpr uint32_t kDebugServiceRetryBackoffMs = 3000;
 constexpr uint8_t kPpmHealthyFrameCount = 3;
 constexpr uint8_t kCrsfHealthyPacketCount = 3;
 constexpr uint8_t kRouteEventHistorySize = 8;
-constexpr uint8_t kDebugPageCount = 3;
+constexpr uint8_t kDebugPageCount = 4;
 
-constexpr uint16_t kSettingsVersion = 6;
+constexpr uint8_t kBtSourceSlotCount = 12;
+constexpr uint8_t kBtMaxHidFields = 24;
+constexpr uint8_t kBtMaxFieldUsages = 8;
+constexpr uint32_t kBtScanRestartDelayMs = 1000;
+constexpr uint32_t kBtRssiUpdateIntervalMs = 5000;
+constexpr uint32_t kBtReportTimeoutMs = 2000;
+// BLE scan duty cycle: normal (no WiFi) vs relaxed (WiFi coex)
+constexpr uint16_t kBtScanIntervalNormal = 160;   // 100ms
+constexpr uint16_t kBtScanWindowNormal   = 112;   // ~70% duty — leaves headroom for connect
+constexpr uint16_t kBtScanIntervalCoex   = 160;   // 100ms
+constexpr uint16_t kBtScanWindowCoex     = 80;    // ~50% duty
+
+constexpr uint16_t kSettingsVersion = 8;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -279,11 +293,18 @@ input,select{
   background:#fff;
   color:var(--text);
 }
+.row.dirty{border-left:3px solid #e8a317;padding-left:6px}
+.row.dirty select,.row.dirty input:not([type=checkbox]){border-color:#e8a317;background:#fffbf0}
+.row-inline{display:flex;align-items:center;gap:8px}
+.row-inline select{flex:1}
+.row-inline label.cb{display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;margin:0}
+.row-inline input[type=checkbox]{width:auto;margin:0}
 .actions{
   display:flex;
+  justify-content:center;
   gap:8px;
   flex-wrap:wrap;
-  margin-top:16px;
+  margin-top:10px;
 }
 button{
   padding:10px 14px;
@@ -292,8 +313,8 @@ button{
   cursor:pointer;
   font-weight:700;
 }
-.apply{background:var(--accent);color:#fff}
 .save{background:var(--accent-2);color:#fff}
+.save:disabled{opacity:.45;cursor:default}
 .refresh{background:#385261;color:#fff}
 .reset{background:var(--danger);color:#fff}
 .status-block{
@@ -335,7 +356,8 @@ pre{
 }
 .adv-bar{
   display:flex;
-  justify-content:flex-end;
+  justify-content:center;
+  gap:8px;
   margin-top:14px;
 }
 .adv-toggle{
@@ -355,8 +377,11 @@ pre{
 .adv-toggle:hover{border-color:var(--accent);color:var(--accent)}
 .adv-toggle.active{border-color:var(--accent);background:#edf5fa;color:var(--accent)}
 .section.advanced{display:none}
+.section.bluetooth{display:none}
 .show-advanced .section.advanced{display:block}
-.show-advanced .section:not(.advanced){display:none}
+.show-advanced .section:not(.advanced):not(.bluetooth){display:none}
+.show-bluetooth .section.bluetooth{display:block}
+.show-bluetooth .section:not(.bluetooth):not(.advanced){display:none}
 </style>
 </head>
 <body>
@@ -372,15 +397,16 @@ pre{
   <div class="summary" id="summary"></div>
   <form id="cfg">
     <div class="adv-bar">
-      <button class="adv-toggle" id="adv-btn" type="button" onclick="toggleAdvanced()">Show Advanced</button>
+      <button class="adv-toggle" id="bt-btn" type="button" onclick="showView('bluetooth')">Gamepad</button>
+      <button class="adv-toggle" id="adv-btn" type="button" onclick="showView('advanced')">Advanced</button>
+      <button class="adv-toggle active" id="setup-btn" type="button" onclick="showView('setup')">Setup</button>
     </div>
-    <div class="sections" id="sections"></div>
     <div class="actions">
-      <button class="apply" type="button" onclick="submitCfg(false)">Apply Live</button>
-      <button class="save" type="button" onclick="submitCfg(true)">Apply + Save</button>
-      <button class="reset" type="button" onclick="resetDefaults()">Reset to defaults</button>
+      <button class="save" id="save-btn" type="button" onclick="submitCfg()" disabled>Apply + Save</button>
+      <button class="reset" type="button" onclick="resetDefaults()">Reset</button>
       <button class="refresh" type="button" onclick="loadAll()">Refresh</button>
     </div>
+    <div class="sections" id="sections"></div>
   </form>
   <div class="status-block">
     <div class="status-top">
@@ -396,7 +422,8 @@ pre{
 <script>
 const chOpts=[['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
 ['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']];
-const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug Status'],['4','Debug Routes'],['5','Debug Ranges']];
+const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug Status'],['4','Debug Routes'],['5','Debug Ranges'],['6','Debug Bluetooth']];
+const btSrcOpts=[['0','L-Stick X'],['1','L-Stick Y'],['2','R-Stick X'],['3','L-Trigger'],['4','R-Trigger'],['5','R-Stick Y'],['6','D-Pad X'],['7','D-Pad Y'],['8','Btn 1'],['9','Btn 2'],['10','Btn 3'],['11','Btn 4']];
 const sections=[
 {title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
 {name:'output_mode_live',label:'Live screen',type:'select',options:modeOpts},
@@ -405,6 +432,10 @@ const sections=[
 ['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
 ]}
 ]},
+{title:'Gamepad', bluetooth:true, note:'Enable BLE gamepad input. When enabled, PPM and UART RX inputs are disabled. Requires save + reboot.', fields:[
+{name:'bt_enabled',label:'Bluetooth mode',type:'select',options:[['0','Off'],['1','On']]},
+...Array.from({length:12},(_,i)=>({name:`bt_ch_src_${i+1}`,label:`CH${i+1} source`,type:'select',options:btSrcOpts,inline:{name:`bt_ch_inv_${i+1}`,label:'Inv'}}))
+]},
 {title:'Servo Mapping', note:'Select which input channel drives each servo output and the PWM frequency.', fields:[
 {name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:chOpts},
 {name:'servo_map_2',label:'Servo 2 source channel',type:'select',options:chOpts},
@@ -412,11 +443,10 @@ const sections=[
 {name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'select',options:[
 ['50','50 Hz'],['100','100 Hz'],['150','150 Hz'],['200','200 Hz'],['250','250 Hz'],['333','333 Hz'],['400','400 Hz']]}
 ]},
-{title:'CRSF Channel Merge', note:'Overlays PPM headtracker channels onto the CRSF RX stream at configurable output positions.', fields:[
+{title:'CRSF Channel Merge', note:'Overlays PPM input channels onto the CRSF RX stream at configurable output positions.', fields:[
 {name:'crsf_merge_enabled',label:'CRSF channel merge',type:'select',options:[['0','Off'],['1','On']]},
-{name:'crsf_merge_map_1',label:'PPM CH1 (Pan) \u2192 output',type:'select',options:chOpts},
-{name:'crsf_merge_map_2',label:'PPM CH2 (Roll) \u2192 output',type:'select',options:chOpts},
-{name:'crsf_merge_map_3',label:'PPM CH3 (Tilt) \u2192 output',type:'select',options:chOpts}
+{name:'crsf_merge_count',label:'PPM channels to merge',type:'select',options:[['1','1'],['2','2'],['3','3 (Headtracker)'],['4','4'],['5','5'],['6','6'],['7','7'],['8','8 (EdgeTX Trainer)']]},
+...Array.from({length:8},(_,i)=>({name:`crsf_merge_map_${i+1}`,label:`PPM CH${i+1} \u2192 output`,type:'select',options:chOpts}))
 ]},
 {title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
@@ -467,12 +497,14 @@ const summaryFields=[
   {label:'PWM Route', value:(s)=>s.pwm_route_label||'--', sub:()=>`Outputs S1/S2/S3`},
   {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
   {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
-  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mm1=readField('crsf_merge_map_1','10'),mm2=readField('crsf_merge_map_2','11'),mm3=readField('crsf_merge_map_3','12');return `MERGE CH${mm1}/CH${mm2}/CH${mm3}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}}
+  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mc=parseInt(readField('crsf_merge_count','3'))||3;const chs=Array.from({length:mc},(_,i)=>'CH'+readField(`crsf_merge_map_${i+1}`,String(10+i)));return `MERGE ${chs.join('/')}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}},
+  {label:'Bluetooth', value:(s)=>s.bt_state||'--', sub:(s)=>s.bt_device ? `${s.bt_device} ${formatHz(s.bt_report_hz)}` : (readField('bt_enabled','0')==='1' ? 'Scanning...' : 'Disabled')}
 ];
 
 function readField(name,fallback=''){
   const el=document.querySelector(`[name="${name}"]`);
-  return el ? el.value : fallback;
+  if(!el) return fallback;
+  return el.type==='checkbox' ? (el.checked ? '1' : '0') : el.value;
 }
 
 function showFlash(message,isError=false){
@@ -515,19 +547,30 @@ function renderSummary(status){
   });
 }
 
-function toggleAdvanced(){
+function showView(view){
   const card=document.querySelector('.card');
-  card.classList.toggle('show-advanced');
-  const btn=document.getElementById('adv-btn');
-  const on=card.classList.contains('show-advanced');
-  btn.textContent=on ? 'Hide Advanced' : 'Show Advanced';
-  btn.classList.toggle('active',on);
+  card.classList.remove('show-advanced','show-bluetooth');
+  document.getElementById('adv-btn').classList.remove('active');
+  document.getElementById('bt-btn').classList.remove('active');
+  document.getElementById('setup-btn').classList.remove('active');
+  if(view==='advanced'){card.classList.add('show-advanced');document.getElementById('adv-btn').classList.add('active')}
+  else if(view==='bluetooth'){card.classList.add('show-bluetooth');document.getElementById('bt-btn').classList.add('active')}
+  else{document.getElementById('setup-btn').classList.add('active')}
+}
+
+function markDirty(el){const row=el.closest('.row');if(row)row.classList.add('dirty');updateSaveBtn()}
+function clearAllDirty(){document.querySelectorAll('.row.dirty').forEach(el=>el.classList.remove('dirty'));updateSaveBtn()}
+function trackChange(el){el.addEventListener('change',()=>markDirty(el));if(el.type==='text'||el.type==='number')el.addEventListener('input',()=>markDirty(el))}
+function updateSaveBtn(){const btn=document.getElementById('save-btn');if(!btn)return;const cnt=document.querySelectorAll('.row.dirty').length;btn.textContent=cnt?`Apply + Save (${cnt})`:'Apply + Save';btn.disabled=!cnt}
+function updateMergeMapVisibility(){
+  const cnt=parseInt(document.querySelector('[name="crsf_merge_count"]')?.value)||3;
+  for(let i=1;i<=8;i++){const el=document.querySelector(`[name="crsf_merge_map_${i}"]`);if(el)el.closest('.row').style.display=i<=cnt?'':'none'}
 }
 
 function buildForm(){
   const root=document.getElementById('sections');
   sections.forEach((section)=>{
-    const block=document.createElement('div'); block.className=section.advanced ? 'section advanced' : 'section';
+    const block=document.createElement('div'); block.className=section.advanced ? 'section advanced' : section.bluetooth ? 'section bluetooth' : 'section';
     const head=document.createElement('div'); head.className='section-head';
     const titleWrap=document.createElement('div');
     const title=document.createElement('h3'); title.textContent=section.title;
@@ -559,7 +602,21 @@ function buildForm(){
           i.step='1';
         }
       }
-      row.appendChild(l); row.appendChild(i); grid.appendChild(row);
+      row.appendChild(l);
+      if(field.inline){
+        const wrap=document.createElement('div');wrap.className='row-inline';
+        wrap.appendChild(i);
+        const cb=document.createElement('input');cb.type='checkbox';cb.name=field.inline.name;cb.value='1';
+        const cbl=document.createElement('label');cbl.className='cb';cbl.appendChild(cb);cbl.appendChild(document.createTextNode(field.inline.label));
+        wrap.appendChild(cbl);
+        trackChange(cb);
+        row.appendChild(wrap);
+      }else{
+        row.appendChild(i);
+      }
+      trackChange(i);
+      if(field.name==='crsf_merge_count')i.addEventListener('change',updateMergeMapVisibility);
+      grid.appendChild(row);
     });
     block.appendChild(head);
     block.appendChild(grid);
@@ -575,8 +632,14 @@ async function loadSettings(){
     section.fields.forEach((field)=>{
       const el=document.querySelector(`[name="${field.name}"]`);
       if(el && s[field.name]!==undefined) el.value=s[field.name];
+      if(field.inline){
+        const cb=document.querySelector(`[name="${field.inline.name}"]`);
+        if(cb && s[field.inline.name]!==undefined) cb.checked=!!parseInt(s[field.inline.name]);
+      }
     });
   });
+  clearAllDirty();
+  updateMergeMapVisibility();
 }
 
 async function loadStatus(){
@@ -601,9 +664,12 @@ async function loadAll(){
   }
 }
 
-async function submitCfg(persist){
+async function submitCfg(){
   const fd=new FormData(document.getElementById('cfg'));
-  fd.set('persist', persist ? '1' : '0');
+  fd.set('persist', '1');
+  document.querySelectorAll('#cfg input[type=checkbox]').forEach(cb=>{
+    fd.set(cb.name, cb.checked ? '1' : '0');
+  });
   const body=new URLSearchParams(fd);
   const r=await fetch('/api/settings', {method:'POST', body});
   const text=await r.text();
@@ -624,13 +690,16 @@ async function resetDefaults(){
 buildForm();
 loadAll();
 setInterval(()=>{
-  loadStatus().catch((err)=>{
+  loadStatus().then(()=>{
+    const fl=document.getElementById('flash');
+    if(fl.textContent.startsWith('Status refresh failed')) showFlash('');
+  }).catch((err)=>{
     renderSummary({});
     document.getElementById('status-meta').textContent='Status unavailable';
     document.getElementById('status').textContent=`Error: ${err.message}`;
     showFlash(`Status refresh failed: ${err.message}`, true);
   });
-}, 1000);
+}, 3000);
 </script>
 </body>
 </html>
@@ -667,9 +736,14 @@ struct RuntimeSettings {
   uint8_t outputModeDefault;
   uint8_t crsfOutputTarget;
   uint8_t crsfMergeEnabled;
-  uint8_t crsfMergeMap[kServoCount];
+  uint8_t crsfMergeMap[kMergeMaxChannels];
+  uint8_t crsfMergeCount;
   uint8_t wifiChannel;
   uint8_t wifiTxPower;  // raw wifi_power_t value (e.g. 78 = 19.5dBm)
+
+  uint8_t btEnabled;
+  uint8_t btChannelSource[kMaxChannels];  // source slot (0-11) per CRSF ch
+  uint16_t btChannelInvert;  // bitmask: bit N = invert ch N
 };
 
 volatile uint16_t gIsrPpmMinChannelUs = 800;
@@ -726,6 +800,7 @@ Adafruit_SSD1306 gDisplay(kScreenWidth, kScreenHeight, &Wire, -1);
 bool gOledReady = false;
 uint32_t gLastOledRefreshMs = 0;
 
+bool gDebugServicesWanted = false;
 bool gPpmInterruptAttached = false;
 uint8_t gAttachedPpmPin = PPM_INPUT_PIN;
 uint8_t gAttachedLedPin = LED_PIN;
@@ -739,6 +814,605 @@ RuntimeSettings gSettings;
 bool gWebUiActive = false;
 bool gApRunning = false;
 bool gWebRoutesConfigured = false;
+
+// --- Bluetooth Gamepad Subsystem ---
+
+enum class BtState : uint8_t {
+  kIdle = 0,
+  kScanning = 1,
+  kConnecting = 2,
+  kSubscribed = 3
+};
+
+struct BtHidField {
+  uint16_t bitOffset;
+  uint8_t  bitSize;
+  uint8_t  count;
+  uint16_t usagePage;
+  uint16_t usages[kBtMaxFieldUsages];
+  uint8_t  usageCount;
+  uint16_t usageMin;
+  uint16_t usageMax;
+  int32_t  logMin;
+  int32_t  logMax;
+  bool     isConstant;
+  uint8_t  reportId;
+};
+
+BtState gBtState = BtState::kIdle;
+bool gBtInitialized = false;
+NimBLEClient* gBtClient = nullptr;
+NimBLEAddress gBtTargetAddress;
+bool gBtHasTarget = false;
+uint32_t gBtLastStateChangeMs = 0;
+
+volatile uint16_t gBtSourceSlots[kBtSourceSlotCount] = {0};
+volatile uint32_t gBtLastReportMs = 0;
+volatile uint32_t gBtReportCounter = 0;
+uint32_t gBtErrorCounter = 0;
+uint32_t gBtReconnectCounter = 0;
+volatile bool gBtConnected = false;
+char gBtDeviceName[24] = "";
+int gBtRssi = 0;
+uint32_t gBtLastRssiMs = 0;
+uint32_t gBtLastRateWindowMs = 0;
+uint32_t gBtLastRateWindowCounter = 0;
+float gBtReportRateHz = 0.0f;
+uint32_t gBtLastCrsfOutputMs = 0;
+volatile bool gBtDisconnectPending = false;
+volatile int8_t gBtConnectResult = -1;  // -1=in progress, 0=fail, 1=success
+
+BtHidField gBtHidFields[kBtMaxHidFields];
+uint8_t gBtHidFieldCount = 0;
+uint8_t gBtInputReportId = 0;
+bool gBtHasInputReportId = false;
+int8_t gBtAxisFieldIdx[6] = {-1, -1, -1, -1, -1, -1};
+int8_t gBtAxisSubIdx[6] = {-1, -1, -1, -1, -1, -1};
+int8_t gBtHatFieldIdx = -1;
+int8_t gBtHatSubIdx = -1;
+int8_t gBtButtonFieldIdx = -1;
+
+// Hat switch direction to X/Y (-1, 0, +1).  Index 8 = released.
+static const int8_t kHatToXY[9][2] = {
+    {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, 0}};
+
+int32_t btExtractField(const uint8_t *data, uint16_t bitOffset, uint8_t bitSize,
+                       bool isSigned) {
+  const uint16_t byteOffset = bitOffset / 8;
+  const uint8_t bitShift = bitOffset % 8;
+  const uint32_t mask = (1UL << bitSize) - 1;
+  uint32_t raw = 0;
+  const uint8_t bytesNeeded = (bitShift + bitSize + 7) / 8;
+  for (uint8_t b = 0; b < bytesNeeded && b < 4; b++) {
+    raw |= static_cast<uint32_t>(data[byteOffset + b]) << (b * 8);
+  }
+  uint32_t value = (raw >> bitShift) & mask;
+  if (isSigned && bitSize > 0 && bitSize < 32 && (value & (1UL << (bitSize - 1)))) {
+    value |= ~mask;  // sign-extend
+  }
+  return static_cast<int32_t>(value);
+}
+
+uint16_t btNormalizeToCrsf(int32_t value, int32_t logMin, int32_t logMax) {
+  if (logMax <= logMin) return kCrsfCenterValue;
+  const int32_t clamped = (value < logMin) ? logMin : (value > logMax) ? logMax : value;
+  const uint32_t numerator =
+      static_cast<uint32_t>(clamped - logMin) * (kCrsfMaxValue - kCrsfMinValue);
+  const uint32_t denominator = static_cast<uint32_t>(logMax - logMin);
+  return static_cast<uint16_t>(kCrsfMinValue + (numerator + denominator / 2) / denominator);
+}
+
+bool parseBtHidDescriptor(const uint8_t *data, size_t len) {
+  uint16_t usagePage = 0;
+  int32_t logMin = 0, logMax = 0;
+  uint8_t reportSize = 0, reportCount = 0;
+  uint16_t usageMin = 0, usageMax = 0;
+  uint16_t localUsages[kBtMaxFieldUsages];
+  uint8_t localUsageCount = 0;
+  uint16_t bitOffset = 0;
+  uint8_t currentReportId = 0;
+  gBtHidFieldCount = 0;
+  gBtInputReportId = 0;
+  gBtHasInputReportId = false;
+
+  size_t i = 0;
+  while (i < len && gBtHidFieldCount < kBtMaxHidFields) {
+    const uint8_t prefix = data[i];
+    uint8_t bSize = prefix & 0x03;
+    if (bSize == 3) bSize = 4;
+    const uint8_t bType = (prefix >> 2) & 0x03;
+    const uint8_t bTag = (prefix >> 4) & 0x0F;
+    if (i + 1 + bSize > len) break;
+
+    int32_t svalue = 0;
+    uint32_t uvalue = 0;
+    for (uint8_t b = 0; b < bSize; b++) {
+      uvalue |= static_cast<uint32_t>(data[i + 1 + b]) << (b * 8);
+    }
+    if (bSize == 1)
+      svalue = static_cast<int8_t>(data[i + 1]);
+    else if (bSize == 2)
+      svalue = static_cast<int16_t>(uvalue & 0xFFFF);
+    else if (bSize == 4)
+      svalue = static_cast<int32_t>(uvalue);
+
+    if (bType == 1) {  // Global
+      switch (bTag) {
+        case 0: usagePage = static_cast<uint16_t>(uvalue); break;
+        case 1: logMin = svalue; break;
+        case 2: logMax = svalue; break;
+        case 7: reportSize = static_cast<uint8_t>(uvalue); break;
+        case 8: {
+          const uint8_t newId = static_cast<uint8_t>(uvalue);
+          if (newId != currentReportId) {
+            bitOffset = 0;  // each report ID has its own bit layout
+          }
+          currentReportId = newId;
+          gBtHasInputReportId = true;
+          break;
+        }
+        case 9: reportCount = static_cast<uint8_t>(uvalue); break;
+      }
+    } else if (bType == 2) {  // Local
+      switch (bTag) {
+        case 0:
+          if (localUsageCount < kBtMaxFieldUsages)
+            localUsages[localUsageCount++] = static_cast<uint16_t>(uvalue);
+          break;
+        case 1: usageMin = static_cast<uint16_t>(uvalue); break;
+        case 2: usageMax = static_cast<uint16_t>(uvalue); break;
+      }
+    } else if (bType == 0 && bTag == 8) {  // Main: Input
+      BtHidField &f = gBtHidFields[gBtHidFieldCount];
+      f.bitOffset = bitOffset;
+      f.bitSize = reportSize;
+      f.count = reportCount;
+      f.usagePage = usagePage;
+      f.usageCount =
+          (localUsageCount <= kBtMaxFieldUsages) ? localUsageCount : kBtMaxFieldUsages;
+      for (uint8_t u = 0; u < f.usageCount; u++) {
+        f.usages[u] = localUsages[u];
+      }
+      f.usageMin = usageMin;
+      f.usageMax = usageMax;
+      f.logMin = logMin;
+      f.logMax = logMax;
+      f.isConstant = (uvalue & 0x01) != 0;
+      f.reportId = currentReportId;
+      gBtHidFieldCount++;
+      bitOffset += static_cast<uint16_t>(reportSize) * reportCount;
+      localUsageCount = 0;
+      usageMin = 0;
+      usageMax = 0;
+    }
+    i += 1 + bSize;
+  }
+  return gBtHidFieldCount > 0;
+}
+
+void btBuildFieldIndex() {
+  for (uint8_t j = 0; j < 6; j++) {
+    gBtAxisFieldIdx[j] = -1;
+    gBtAxisSubIdx[j] = -1;
+  }
+  gBtHatFieldIdx = -1;
+  gBtHatSubIdx = -1;
+  gBtButtonFieldIdx = -1;
+
+  // X=0x30, Y=0x31, Z=0x32, Rx=0x33, Ry=0x34, Rz=0x35
+  const uint16_t axisUsages[6] = {0x30, 0x31, 0x32, 0x33, 0x34, 0x35};
+
+  // Find the report ID that contains Generic Desktop axis usages (the gamepad report).
+  uint8_t targetReportId = 0;
+  bool foundTarget = false;
+  for (uint8_t fi = 0; fi < gBtHidFieldCount && !foundTarget; fi++) {
+    const BtHidField &f = gBtHidFields[fi];
+    if (f.isConstant || f.usagePage != 0x01) continue;
+    for (uint8_t u = 0; u < f.usageCount; u++) {
+      if (f.usages[u] >= 0x30 && f.usages[u] <= 0x35) {
+        targetReportId = f.reportId;
+        foundTarget = true;
+        break;
+      }
+    }
+  }
+
+  gBtInputReportId = targetReportId;
+
+  for (uint8_t fi = 0; fi < gBtHidFieldCount; fi++) {
+    const BtHidField &f = gBtHidFields[fi];
+    if (f.isConstant || f.reportId != targetReportId) continue;
+
+    if (f.usagePage == 0x01) {  // Generic Desktop
+      for (uint8_t u = 0; u < f.usageCount; u++) {
+        for (uint8_t a = 0; a < 6; a++) {
+          if (f.usages[u] == axisUsages[a] && gBtAxisFieldIdx[a] < 0) {
+            gBtAxisFieldIdx[a] = static_cast<int8_t>(fi);
+            gBtAxisSubIdx[a] = static_cast<int8_t>(u);
+          }
+        }
+        if (f.usages[u] == 0x39 && gBtHatFieldIdx < 0) {
+          gBtHatFieldIdx = static_cast<int8_t>(fi);
+          gBtHatSubIdx = static_cast<int8_t>(u);
+        }
+      }
+    } else if (f.usagePage == 0x09 && gBtButtonFieldIdx < 0) {
+      gBtButtonFieldIdx = static_cast<int8_t>(fi);
+    } else if (f.usagePage == 0x02) {  // Simulation controls (triggers)
+      // Fill first available empty axis slot (prefer 3-5, then 2)
+      static const uint8_t simSlotOrder[] = {3, 4, 5, 2};
+      for (uint8_t u = 0; u < f.usageCount; u++) {
+        for (uint8_t si = 0; si < 4; si++) {
+          uint8_t a = simSlotOrder[si];
+          if (gBtAxisFieldIdx[a] < 0) {
+            gBtAxisFieldIdx[a] = static_cast<int8_t>(fi);
+            gBtAxisSubIdx[a] = static_cast<int8_t>(u);
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+void decodeBtReport(const uint8_t *data, size_t length) {
+  const uint8_t *reportData = data;
+  // NimBLE notifications do NOT include the report ID prefix — each 2A4D
+  // characteristic already corresponds to a specific report ID via the
+  // Report Reference descriptor.  We subscribe only to the target
+  // characteristic, so all data here is the raw report payload.
+
+  for (uint8_t a = 0; a < 6; a++) {
+    if (gBtAxisFieldIdx[a] >= 0) {
+      const BtHidField &f = gBtHidFields[gBtAxisFieldIdx[a]];
+      const uint16_t offset =
+          f.bitOffset + static_cast<uint16_t>(gBtAxisSubIdx[a]) * f.bitSize;
+      const int32_t raw = btExtractField(reportData, offset, f.bitSize,
+                                         f.logMin < 0);
+      gBtSourceSlots[a] = btNormalizeToCrsf(raw, f.logMin, f.logMax);
+    }
+  }
+
+  if (gBtHatFieldIdx >= 0) {
+    const BtHidField &f = gBtHidFields[gBtHatFieldIdx];
+    // Hat switch is always a single value (cnt=1); ignore subIdx and read
+    // directly at f.bitOffset to avoid reading past the field when the
+    // usage array contains non-data usages like Application Collection.
+    const uint16_t offset = f.bitOffset;
+    int32_t hatVal = btExtractField(reportData, offset, f.bitSize, false);
+    hatVal = hatVal - f.logMin;
+    if (hatVal < 0 || hatVal > 7) hatVal = 8;
+    gBtSourceSlots[6] = (kHatToXY[hatVal][0] == 0)
+                             ? kCrsfCenterValue
+                             : (kHatToXY[hatVal][0] > 0) ? kCrsfMaxValue : kCrsfMinValue;
+    gBtSourceSlots[7] = (kHatToXY[hatVal][1] == 0)
+                             ? kCrsfCenterValue
+                             : (kHatToXY[hatVal][1] > 0) ? kCrsfMaxValue : kCrsfMinValue;
+  }
+
+  if (gBtButtonFieldIdx >= 0) {
+    const BtHidField &f = gBtHidFields[gBtButtonFieldIdx];
+    for (uint8_t b = 0; b < 4 && b < f.count; b++) {
+      const uint16_t offset = f.bitOffset + static_cast<uint16_t>(b) * f.bitSize;
+      const int32_t val = btExtractField(reportData, offset, f.bitSize, false);
+      gBtSourceSlots[8 + b] = (val != 0) ? kCrsfMaxValue : kCrsfMinValue;
+    }
+  }
+}
+
+// Forward declarations for BLE callbacks
+void btNotifyCallback(NimBLERemoteCharacteristic *, uint8_t *, size_t, bool);
+bool btStartScan(bool coex = false);
+void btConnectTask(void *);
+
+class BtScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
+  void onResult(NimBLEAdvertisedDevice *device) override {
+    if (gBtHasTarget) return;  // already found a target
+    if (device->isAdvertisingService(NimBLEUUID(static_cast<uint16_t>(0x1812)))) {
+      NimBLEDevice::getScan()->stop();
+      gBtTargetAddress = device->getAddress();
+      const std::string name = device->getName();
+      strncpy(gBtDeviceName, name.c_str(), sizeof(gBtDeviceName) - 1);
+      gBtDeviceName[sizeof(gBtDeviceName) - 1] = '\0';
+      gBtHasTarget = true;
+    }
+  }
+};
+
+class BtClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient *) override { gBtConnected = true; }
+  void onDisconnect(NimBLEClient *) override {
+    gBtConnected = false;
+    gBtDisconnectPending = true;  // defer cleanup to main loop
+  }
+};
+
+BtScanCallbacks gBtScanCb;
+BtClientCallbacks gBtClientCb;
+
+void btNotifyCallback(NimBLERemoteCharacteristic *, uint8_t *data, size_t length, bool) {
+  if (data && length > 0) {
+    decodeBtReport(data, length);
+    gBtLastReportMs = millis();
+    gBtReportCounter++;
+  }
+}
+
+void btInit() {
+  NimBLEDevice::init("waybeam");
+  NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_SC);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  for (uint8_t i = 0; i < kBtSourceSlotCount; i++) {
+    gBtSourceSlots[i] = kCrsfCenterValue;
+  }
+  gBtInitialized = true;
+  gBtState = BtState::kIdle;
+  gBtLastStateChangeMs = millis();
+}
+
+void btScanComplete(NimBLEScanResults) {
+  // Finite scan ended — return to idle so btUpdate restarts it.
+  if (gBtState == BtState::kScanning && !gBtHasTarget) {
+    gBtState = BtState::kIdle;
+    gBtLastStateChangeMs = millis();
+  }
+}
+
+bool btStartScan(bool coex) {
+  NimBLEScan *pScan = NimBLEDevice::getScan();
+  pScan->clearResults();
+  pScan->setAdvertisedDeviceCallbacks(&gBtScanCb, false);  // false = no duplicate filter
+  pScan->setActiveScan(true);
+  if (coex) {
+    pScan->setInterval(kBtScanIntervalCoex);
+    pScan->setWindow(kBtScanWindowCoex);
+  } else {
+    pScan->setInterval(kBtScanIntervalNormal);
+    pScan->setWindow(kBtScanWindowNormal);
+  }
+  if (!pScan->start(5, btScanComplete, false)) {
+    return false;
+  }
+  gBtState = BtState::kScanning;
+  gBtLastStateChangeMs = millis();
+  return true;
+}
+
+// Runs BLE connect + GATT discovery.  Sets gBtClient on success.
+// Does NOT manage gBtState — caller (btUpdate via btConnectTask) handles that.
+bool btConnectInner() {
+  NimBLEClient *pClient = NimBLEDevice::createClient();
+  pClient->setClientCallbacks(&gBtClientCb);
+  pClient->setConnectionParams(48, 80, 4, 600);  // 60-100ms interval, latency 4, 6s timeout
+  pClient->setConnectTimeout(5);
+
+  if (!pClient->connect(gBtTargetAddress)) {
+    NimBLEDevice::deleteClient(pClient);
+    gBtErrorCounter++;
+    gBtHasTarget = false;
+    return false;
+  }
+
+  gBtClient = pClient;
+  gBtRssi = pClient->getRssi();
+
+  NimBLERemoteService *pSvc =
+      pClient->getService(NimBLEUUID(static_cast<uint16_t>(0x1812)));
+  if (!pSvc) {
+    pClient->disconnect();
+    NimBLEDevice::deleteClient(pClient);
+    gBtClient = nullptr;
+    gBtErrorCounter++;
+    gBtHasTarget = false;
+    return false;
+  }
+
+  NimBLERemoteCharacteristic *pReportMap =
+      pSvc->getCharacteristic(NimBLEUUID(static_cast<uint16_t>(0x2A4B)));
+  if (pReportMap) {
+    std::string mapData = pReportMap->readValue();
+    if (parseBtHidDescriptor(reinterpret_cast<const uint8_t *>(mapData.data()),
+                             mapData.length())) {
+      btBuildFieldIndex();
+    }
+  }
+
+  bool subscribed = false;
+  std::vector<NimBLERemoteCharacteristic *> *chars = pSvc->getCharacteristics(true);
+  if (chars) {
+    for (auto *chr : *chars) {
+      if (chr->getUUID() != NimBLEUUID(static_cast<uint16_t>(0x2A4D)) ||
+          !chr->canNotify()) {
+        continue;
+      }
+      // Read Report Reference descriptor (0x2908) to match report ID.
+      // Format: [reportId, reportType] where type 1 = Input.
+      if (gBtHasInputReportId) {
+        NimBLERemoteDescriptor *refDesc =
+            chr->getDescriptor(NimBLEUUID(static_cast<uint16_t>(0x2908)));
+        if (refDesc) {
+          std::string refVal = refDesc->readValue();
+          if (refVal.length() >= 2) {
+            uint8_t descReportId = static_cast<uint8_t>(refVal[0]);
+            uint8_t descReportType = static_cast<uint8_t>(refVal[1]);
+            if (descReportType != 1 || descReportId != gBtInputReportId) {
+              continue;  // skip non-input or wrong report ID
+            }
+          }
+        }
+      }
+      if (chr->subscribe(true, btNotifyCallback)) {
+        subscribed = true;
+      }
+    }
+  }
+
+  if (!subscribed) {
+    pClient->disconnect();
+    NimBLEDevice::deleteClient(pClient);
+    gBtClient = nullptr;
+    gBtErrorCounter++;
+    gBtHasTarget = false;
+    return false;
+  }
+
+  return true;
+}
+
+// FreeRTOS task wrapper — runs btConnectInner() off the main loop.
+void btConnectTask(void *) {
+  bool ok = btConnectInner();
+  gBtConnectResult = ok ? 1 : 0;
+  vTaskDelete(nullptr);
+}
+
+void btForget() {
+  // Wait for any in-progress connect task to complete before touching state.
+  if (gBtState == BtState::kConnecting && gBtConnectResult < 0) {
+    const uint32_t start = millis();
+    while (gBtConnectResult < 0 && (millis() - start) < 10000) {
+      delay(50);
+    }
+  }
+  if (gBtClient) {
+    if (gBtClient->isConnected()) {
+      gBtClient->disconnect();
+    }
+    NimBLEDevice::deleteClient(gBtClient);
+    gBtClient = nullptr;
+  }
+  NimBLEDevice::deleteAllBonds();
+  gBtHasTarget = false;
+  gBtConnected = false;
+  gBtDeviceName[0] = '\0';
+  gBtRssi = 0;
+  gBtReportRateHz = 0.0f;
+  gBtLastReportMs = 0;
+  gBtLastRateWindowMs = 0;
+  gBtLastRateWindowCounter = 0;
+  gBtReportCounter = 0;
+  for (uint8_t i = 0; i < kBtSourceSlotCount; i++) {
+    gBtSourceSlots[i] = kCrsfCenterValue;
+  }
+  gBtState = BtState::kIdle;
+  gBtLastStateChangeMs = millis();
+}
+
+void btUpdate() {
+  if (!gSettings.btEnabled || !gBtInitialized) return;
+
+  const uint32_t nowMs = millis();
+
+  // --- Process disconnect flag (set by onDisconnect in NimBLE task context) ---
+  if (gBtDisconnectPending) {
+    gBtDisconnectPending = false;
+    gBtConnectResult = -1;  // cancel any stale connect result
+    gBtReconnectCounter++;
+    if (gBtClient) {
+      NimBLEDevice::deleteClient(gBtClient);
+      gBtClient = nullptr;
+    }
+    gBtHasTarget = false;
+    gBtState = BtState::kIdle;
+    gBtLastStateChangeMs = nowMs;
+    for (uint8_t i = 0; i < kBtSourceSlotCount; i++) {
+      gBtSourceSlots[i] = kCrsfCenterValue;
+    }
+  }
+
+  const bool wantCoex = gDebugServicesWanted;
+  switch (gBtState) {
+    case BtState::kIdle:
+      if ((nowMs - gBtLastStateChangeMs) >= kBtScanRestartDelayMs) {
+        if (!btStartScan(wantCoex)) {
+          gBtLastStateChangeMs = nowMs;  // retry after delay
+        }
+      }
+      break;
+    case BtState::kScanning:
+      if (gBtHasTarget) {
+        NimBLEDevice::getScan()->stop();
+        gBtState = BtState::kConnecting;
+        gBtLastStateChangeMs = nowMs;
+        gBtConnectResult = -1;
+        xTaskCreate(btConnectTask, "btconn", 4096, nullptr, 1, nullptr);
+      } else if ((nowMs - gBtLastStateChangeMs) > 30000) {
+        // Safety timeout — scan callback never fired
+        NimBLEDevice::getScan()->stop();
+        gBtState = BtState::kIdle;
+        gBtLastStateChangeMs = nowMs;
+      }
+      break;
+    case BtState::kConnecting:
+      if (gBtConnectResult >= 0) {
+        if (gBtConnectResult == 1) {
+          gBtState = BtState::kSubscribed;
+        } else {
+          gBtState = BtState::kIdle;
+          gBtHasTarget = false;
+        }
+        gBtLastStateChangeMs = nowMs;
+      } else if ((nowMs - gBtLastStateChangeMs) > 15000) {
+        // Safety timeout — task should have finished within NimBLE's connect timeout.
+        // Don't force-kill the FreeRTOS task; just advance the state machine.
+        gBtState = BtState::kIdle;
+        gBtHasTarget = false;
+        gBtLastStateChangeMs = nowMs;
+      }
+      break;
+    case BtState::kSubscribed: {
+      // Stale report detection: center outputs if no reports for kBtReportTimeoutMs
+      if (gBtConnected && gBtLastReportMs != 0 &&
+          (nowMs - gBtLastReportMs) > kBtReportTimeoutMs) {
+        for (uint8_t i = 0; i < kBtSourceSlotCount; i++) {
+          gBtSourceSlots[i] = kCrsfCenterValue;
+        }
+      }
+      // RSSI update — capture pointer to local to avoid race with onDisconnect
+      NimBLEClient *client = gBtClient;
+      if (client && gBtConnected &&
+          (nowMs - gBtLastRssiMs) >= kBtRssiUpdateIntervalMs) {
+        gBtRssi = client->getRssi();
+        gBtLastRssiMs = nowMs;
+      }
+      break;
+    }
+  }
+
+  // Report rate calculation
+  if (gBtLastRateWindowMs == 0) {
+    gBtLastRateWindowMs = nowMs;
+    gBtLastRateWindowCounter = gBtReportCounter;
+  } else {
+    const uint32_t elapsed = nowMs - gBtLastRateWindowMs;
+    if (elapsed >= 500) {
+      const uint32_t delta = gBtReportCounter - gBtLastRateWindowCounter;
+      gBtReportRateHz = (elapsed > 0)
+                            ? (static_cast<float>(delta) * 1000.0f /
+                               static_cast<float>(elapsed))
+                            : 0.0f;
+      gBtLastRateWindowCounter = gBtReportCounter;
+      gBtLastRateWindowMs = nowMs;
+    }
+  }
+}
+
+bool isBtFresh(uint32_t nowMs) {
+  return gBtConnected && gBtLastReportMs != 0 &&
+         ((nowMs - gBtLastReportMs) <= kBtReportTimeoutMs);
+}
+
+const char *btStateLabel() {
+  switch (gBtState) {
+    case BtState::kIdle: return "IDLE";
+    case BtState::kScanning: return "SCAN";
+    case BtState::kConnecting: return "LINK";
+    case BtState::kSubscribed: return gBtConnected ? "OK" : "LOST";
+  }
+  return "UNK";
+}
+
+// --- End Bluetooth Subsystem ---
 
 enum class OutputMode : uint8_t { kHdzeroCrsf = 0, kUartToPwm = 1, kDebugConfig = 2, kCrsfTx12 = 3 };
 OutputMode gOutputMode = OutputMode::kCrsfTx12;
@@ -763,7 +1437,6 @@ UsbCrsfRoute gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
 PwmRoute gActivePwmRoute = PwmRoute::kCenter;
 uint32_t gLastUsbRouteChangeMs = 0;
 uint32_t gLastPwmRouteChangeMs = 0;
-bool gDebugServicesWanted = false;
 DebugServiceState gDebugServiceState = DebugServiceState::kStopped;
 uint32_t gDebugServiceStateMs = 0;
 uint32_t gDebugServiceLastFailureMs = 0;
@@ -805,11 +1478,30 @@ RuntimeSettings defaultSettings() {
   s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfTx12);
   s.crsfOutputTarget = 0;
   s.crsfMergeEnabled = 0;
-  s.crsfMergeMap[0] = 9;
-  s.crsfMergeMap[1] = 10;
-  s.crsfMergeMap[2] = 11;
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    s.crsfMergeMap[i] = i;
+  }
+  s.crsfMergeCount = 3;
   s.wifiChannel = 6;
   s.wifiTxPower = 78;  // WIFI_POWER_19_5dBm
+
+  s.btEnabled = 0;
+  // Default AETR mapping for 8BitDo Ultimate 2C BLE HID:
+  //   Slot 0=L-Stick X, 1=L-Stick Y, 2=R-Stick X, 3=L-Trigger,
+  //   4=R-Trigger, 5=R-Stick Y, 6=D-Pad X, 7=D-Pad Y, 8-11=Buttons
+  s.btChannelSource[0] = 2;   // CH1 -> R-Stick X (Aileron)
+  s.btChannelSource[1] = 5;   // CH2 -> R-Stick Y (Elevator)
+  s.btChannelSource[2] = 1;   // CH3 -> L-Stick Y (Throttle)
+  s.btChannelSource[3] = 0;   // CH4 -> L-Stick X (Rudder)
+  s.btChannelSource[4] = 3;   // CH5 -> L-Trigger
+  s.btChannelSource[5] = 4;   // CH6 -> R-Trigger
+  s.btChannelSource[6] = 6;   // CH7 -> D-Pad X
+  s.btChannelSource[7] = 7;   // CH8 -> D-Pad Y
+  s.btChannelSource[8] = 8;   // CH9 -> Button 1
+  s.btChannelSource[9] = 9;   // CH10 -> Button 2
+  s.btChannelSource[10] = 10;  // CH11 -> Button 3
+  s.btChannelSource[11] = 11;  // CH12 -> Button 4
+  s.btChannelInvert = 0;
   return s;
 }
 
@@ -1012,7 +1704,7 @@ const char *outputModeLabel(OutputMode mode) {
     case OutputMode::kUartToPwm:
       return "UART>PWM";
     case OutputMode::kCrsfTx12:
-      return "CRSF TX12";
+      return gSettings.btEnabled ? "Bluetooth" : "CRSF TX12";
     case OutputMode::kDebugConfig:
       return "DEBUG";
   }
@@ -1108,6 +1800,7 @@ const char *debugApStateLabel() {
 void fillOutgoingCrsfChannelsFromPpm(uint16_t channels[kCrsfChannelCount]);
 void fillOutgoingCrsfChannelsFromCrsfRx(uint16_t channels[kCrsfChannelCount]);
 void fillOutgoingCrsfChannelsMerged(uint16_t channels[kCrsfChannelCount]);
+void fillOutgoingCrsfChannelsFromBluetooth(uint16_t channels[kCrsfChannelCount]);
 
 int16_t centeredFillPixels(uint16_t value, uint16_t minValue, uint16_t centerValue, uint16_t maxValue,
                            int16_t halfWidth) {
@@ -1253,20 +1946,26 @@ void drawUartToPwmScreen(uint32_t nowMs) {
 }
 
 void drawCrsfTx12Screen(uint32_t nowMs) {
-  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
-  const bool ppmFresh = isPpmFresh(nowMs, gSettings.signalTimeoutMs);
-  const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
   bool hasValue = false;
   uint16_t channels[kCrsfChannelCount] = {0};
-  if (usbRoute == UsbCrsfRoute::kPpm && ppmFresh) {
-    fillOutgoingCrsfChannelsFromPpm(channels);
-    hasValue = true;
-  } else if (usbRoute == UsbCrsfRoute::kCrsfRx && crsfFresh) {
-    fillOutgoingCrsfChannelsFromCrsfRx(channels);
-    hasValue = true;
-  }
 
-  drawHeaderBar("CRSF TX12", usbCrsfRouteLabel(usbRoute));
+  if (gSettings.btEnabled) {
+    fillOutgoingCrsfChannelsFromBluetooth(channels);
+    hasValue = isBtFresh(nowMs) || gBtConnected;
+    drawHeaderBar("BLUETOOTH", btStateLabel());
+  } else {
+    const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
+    const bool ppmFresh = isPpmFresh(nowMs, gSettings.signalTimeoutMs);
+    const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
+    if (usbRoute == UsbCrsfRoute::kPpm && ppmFresh) {
+      fillOutgoingCrsfChannelsFromPpm(channels);
+      hasValue = true;
+    } else if (usbRoute == UsbCrsfRoute::kCrsfRx && crsfFresh) {
+      fillOutgoingCrsfChannelsFromCrsfRx(channels);
+      hasValue = true;
+    }
+    drawHeaderBar("CRSF TX12", usbCrsfRouteLabel(usbRoute));
+  }
   for (uint8_t i = 0; i < 6; ++i) {
     const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
     drawCompactCrsfChannelRow(0, y, i, hasValue, channels[i]);
@@ -1275,18 +1974,30 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
 }
 
 void drawDebugConfigScreen(uint32_t nowMs) {
-  const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
   drawHeaderBar("DBG STATUS", debugApStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.setCursor(0, 14);
-  gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
-  gDisplay.setCursor(0, 24);
-  if (crsfFresh) {
-    gDisplay.printf("CRSF %s %3.0fHz", crsfRxHealthLabel(nowMs), static_cast<double>(liveCrsfRxRateHz(nowMs)));
-  } else if (gHasCrsfRxFrame) {
-    gDisplay.printf("CRSF %s", crsfRxHealthLabel(nowMs));
+  if (gSettings.btEnabled) {
+    gDisplay.printf("BT %s %3.0fHz", btStateLabel(), static_cast<double>(gBtReportRateHz));
   } else {
-    gDisplay.print("CRSF NONE");
+    gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
+  }
+  gDisplay.setCursor(0, 24);
+  if (gSettings.btEnabled) {
+    if (gBtDeviceName[0]) {
+      gDisplay.printf("Dev %s", gBtDeviceName);
+    } else {
+      gDisplay.print("Dev --");
+    }
+  } else {
+    const bool crsfFresh = isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
+    if (crsfFresh) {
+      gDisplay.printf("CRSF %s %3.0fHz", crsfRxHealthLabel(nowMs), static_cast<double>(liveCrsfRxRateHz(nowMs)));
+    } else if (gHasCrsfRxFrame) {
+      gDisplay.printf("CRSF %s", crsfRxHealthLabel(nowMs));
+    } else {
+      gDisplay.print("CRSF NONE");
+    }
   }
   gDisplay.setCursor(0, 34);
   if (gApRunning) {
@@ -1299,39 +2010,103 @@ void drawDebugConfigScreen(uint32_t nowMs) {
     gDisplay.print("AP starting");
   }
   gDisplay.setCursor(0, 44);
-  gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
-                  gSettings.servoPwmPins[2]);
+  if (gSettings.btEnabled) {
+    gDisplay.printf("RSSI %d Err %lu", gBtRssi, static_cast<unsigned long>(gBtErrorCounter));
+  } else {
+    gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
+                    gSettings.servoPwmPins[2]);
+  }
   gDisplay.setCursor(0, 54);
   gDisplay.print("short >pg  long exit");
 }
 
 void drawDebugRoutesScreen(uint32_t nowMs) {
-  const char *mergeLabel = gSettings.crsfMergeEnabled ? "MRG ON" : "MRG OFF";
-  drawHeaderBar("DBG ROUTES", mergeLabel);
-  gDisplay.setTextColor(SSD1306_WHITE);
-
-  const SourceHealth ppmH = ppmSourceHealth(nowMs);
-  const SourceHealth crsfH = crsfSourceHealth(nowMs);
-  const char *ppmHl = (ppmH == SourceHealth::kHealthy) ? "OK" : (ppmH == SourceHealth::kTentative) ? "??" : "--";
-  const char *crsfHl = (crsfH == SourceHealth::kHealthy) ? "OK" : (crsfH == SourceHealth::kTentative) ? "??" : "--";
-
-  gDisplay.setCursor(0, 14);
-  gDisplay.printf("USB:%s src PPM:%s", usbCrsfRouteLabel(gActiveUsbCrsfRoute), ppmHl);
-  gDisplay.setCursor(0, 24);
-  gDisplay.printf("PWM:%s src CRSF:%s", pwmRouteLabel(gActivePwmRoute), crsfHl);
-  gDisplay.setCursor(0, 34);
-  if (gSettings.crsfMergeEnabled) {
-    gDisplay.printf("Mrg CH%u/%u/%u", gSettings.crsfMergeMap[0] + 1, gSettings.crsfMergeMap[1] + 1,
-                    gSettings.crsfMergeMap[2] + 1);
+  if (gSettings.btEnabled) {
+    drawHeaderBar("DBG BT MAP", btStateLabel());
+    gDisplay.setTextColor(SSD1306_WHITE);
+    gDisplay.setCursor(0, 14);
+    gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
+                    gSettings.servoMap[2] + 1);
+    gDisplay.setCursor(0, 24);
+    const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
+    gDisplay.printf("CRSF out: %s", outTgt);
+    gDisplay.setCursor(0, 34);
+    gDisplay.printf("Reconn %lu Err %lu",
+                    static_cast<unsigned long>(gBtReconnectCounter),
+                    static_cast<unsigned long>(gBtErrorCounter));
+    gDisplay.setCursor(0, 44);
+    gDisplay.printf("Reports %lu", static_cast<unsigned long>(gBtReportCounter));
+    gDisplay.setCursor(0, 54);
+    gDisplay.print("short >pg  long exit");
   } else {
-    gDisplay.print("Merge OFF");
+    const char *mergeLabel = gSettings.crsfMergeEnabled ? "MRG ON" : "MRG OFF";
+    drawHeaderBar("DBG ROUTES", mergeLabel);
+    gDisplay.setTextColor(SSD1306_WHITE);
+
+    const SourceHealth ppmH = ppmSourceHealth(nowMs);
+    const SourceHealth crsfH = crsfSourceHealth(nowMs);
+    const char *ppmHl = (ppmH == SourceHealth::kHealthy) ? "OK" : (ppmH == SourceHealth::kTentative) ? "??" : "--";
+    const char *crsfHl = (crsfH == SourceHealth::kHealthy) ? "OK" : (crsfH == SourceHealth::kTentative) ? "??" : "--";
+
+    gDisplay.setCursor(0, 14);
+    gDisplay.printf("USB:%s src PPM:%s", usbCrsfRouteLabel(gActiveUsbCrsfRoute), ppmHl);
+    gDisplay.setCursor(0, 24);
+    gDisplay.printf("PWM:%s src CRSF:%s", pwmRouteLabel(gActivePwmRoute), crsfHl);
+    gDisplay.setCursor(0, 34);
+    if (gSettings.crsfMergeEnabled) {
+      if (gSettings.crsfMergeCount <= 3) {
+        gDisplay.printf("Mrg %uch", gSettings.crsfMergeCount);
+        for (uint8_t i = 0; i < gSettings.crsfMergeCount; ++i) {
+          gDisplay.printf("%s%u", i == 0 ? " " : "/", gSettings.crsfMergeMap[i] + 1);
+        }
+      } else {
+        gDisplay.printf("Mrg %uch", gSettings.crsfMergeCount);
+      }
+    } else {
+      gDisplay.print("Merge OFF");
+    }
+    gDisplay.setCursor(0, 44);
+    gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
+                    gSettings.servoMap[2] + 1);
+    gDisplay.setCursor(0, 54);
+    const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
+    gDisplay.printf("Out:%s short>pg", outTgt);
+  }
+}
+
+void drawBluetoothDebugScreen(uint32_t nowMs) {
+  drawHeaderBar("DBG BT", btStateLabel());
+  gDisplay.setTextColor(SSD1306_WHITE);
+  gDisplay.setCursor(0, 14);
+  if (gBtConnected) {
+    gDisplay.print("CONNECTED");
+  } else if (gBtState == BtState::kScanning) {
+    gDisplay.print("SCANNING...");
+  } else if (gBtState == BtState::kConnecting) {
+    gDisplay.print("CONNECTING...");
+  } else {
+    gDisplay.print(gSettings.btEnabled ? "WAITING" : "BT OFF");
+  }
+  gDisplay.setCursor(0, 24);
+  if (gBtDeviceName[0]) {
+    gDisplay.printf("Dev: %.16s", gBtDeviceName);
+  } else {
+    gDisplay.print("Dev: --");
+  }
+  gDisplay.setCursor(0, 34);
+  if (gBtConnected) {
+    gDisplay.printf("RSSI:%d Rate:%.0fHz", gBtRssi,
+                    static_cast<double>(gBtReportRateHz));
+  } else {
+    gDisplay.print("RSSI:-- Rate:--");
   }
   gDisplay.setCursor(0, 44);
-  gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
-                  gSettings.servoMap[2] + 1);
+  gDisplay.printf("Fld:%u Rpts:%lu", gBtHidFieldCount,
+                  static_cast<unsigned long>(gBtReportCounter));
   gDisplay.setCursor(0, 54);
-  const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
-  gDisplay.printf("Out:%s short>pg", outTgt);
+  gDisplay.printf("Err:%lu Recon:%lu",
+                  static_cast<unsigned long>(gBtErrorCounter),
+                  static_cast<unsigned long>(gBtReconnectCounter));
 }
 
 void drawDebugRangesScreen(uint32_t nowMs) {
@@ -1342,15 +2117,27 @@ void drawDebugRangesScreen(uint32_t nowMs) {
   gDisplay.setTextColor(SSD1306_WHITE);
 
   gDisplay.setCursor(0, 14);
-  gDisplay.printf("PPM %u-%uus", gSettings.ppmMinChannelUs, gSettings.ppmMaxChannelUs);
+  if (gSettings.btEnabled) {
+    gDisplay.print("Mode: BLE Gamepad");
+  } else {
+    gDisplay.printf("PPM %u-%uus", gSettings.ppmMinChannelUs, gSettings.ppmMaxChannelUs);
+  }
   gDisplay.setCursor(0, 24);
-  gDisplay.printf("CRSF map %u-%uus", gSettings.crsfMapMinUs, gSettings.crsfMapMaxUs);
+  if (gSettings.btEnabled) {
+    gDisplay.printf("CRSF out baud %lu", static_cast<unsigned long>(gSettings.crsfUartBaud));
+  } else {
+    gDisplay.printf("CRSF map %u-%uus", gSettings.crsfMapMinUs, gSettings.crsfMapMaxUs);
+  }
   gDisplay.setCursor(0, 34);
   gDisplay.printf("Srv %u/%u/%uus", gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                   gSettings.servoPulseMaxUs);
   gDisplay.setCursor(0, 44);
-  gDisplay.printf("T/O PPM:%lums CRSF:%lums", static_cast<unsigned long>(gSettings.signalTimeoutMs),
-                  static_cast<unsigned long>(gSettings.crsfRxTimeoutMs));
+  if (gSettings.btEnabled) {
+    gDisplay.printf("WiFi ch%u", gSettings.wifiChannel);
+  } else {
+    gDisplay.printf("T/O PPM:%lums CRSF:%lums", static_cast<unsigned long>(gSettings.signalTimeoutMs),
+                    static_cast<unsigned long>(gSettings.crsfRxTimeoutMs));
+  }
   gDisplay.setCursor(0, 54);
   gDisplay.printf("UART %lu  WiFi ch%u", static_cast<unsigned long>(gSettings.crsfUartBaud), gSettings.wifiChannel);
 }
@@ -1376,6 +2163,8 @@ void refreshOledStatus(uint32_t nowMs) {
       drawDebugRoutesScreen(nowMs);
     } else if (gDebugPage == 2) {
       drawDebugRangesScreen(nowMs);
+    } else if (gDebugPage == 3) {
+      drawBluetoothDebugScreen(nowMs);
     } else {
       drawDebugConfigScreen(nowMs);
     }
@@ -1459,11 +2248,22 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   ok &= (gPrefs.putUChar("omod", s.outputModeDefault) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("cotr", s.crsfOutputTarget) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("cme", s.crsfMergeEnabled) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm1", s.crsfMergeMap[0]) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm2", s.crsfMergeMap[1]) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm3", s.crsfMergeMap[2]) == sizeof(uint8_t));
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "mm%u", i + 1);
+    ok &= (gPrefs.putUChar(key, s.crsfMergeMap[i]) == sizeof(uint8_t));
+  }
+  ok &= (gPrefs.putUChar("mmc", s.crsfMergeCount) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("wch", s.wifiChannel) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("wtx", s.wifiTxPower) == sizeof(uint8_t));
+
+  ok &= (gPrefs.putUChar("bte", s.btEnabled) == sizeof(uint8_t));
+  for (uint8_t i = 0; i < kMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "bs%x", i);
+    ok &= (gPrefs.putUChar(key, s.btChannelSource[i]) == sizeof(uint8_t));
+  }
+  ok &= (gPrefs.putUShort("bti", s.btChannelInvert) == sizeof(uint16_t));
   return ok;
 }
 
@@ -1474,7 +2274,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != 4 && version != 5 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -1515,11 +2315,22 @@ RuntimeSettings loadSettingsFromNvs() {
   s.outputModeDefault = gPrefs.getUChar("omod", s.outputModeDefault);
   s.crsfOutputTarget = gPrefs.getUChar("cotr", s.crsfOutputTarget);
   s.crsfMergeEnabled = gPrefs.getUChar("cme", s.crsfMergeEnabled);
-  s.crsfMergeMap[0] = gPrefs.getUChar("mm1", s.crsfMergeMap[0]);
-  s.crsfMergeMap[1] = gPrefs.getUChar("mm2", s.crsfMergeMap[1]);
-  s.crsfMergeMap[2] = gPrefs.getUChar("mm3", s.crsfMergeMap[2]);
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "mm%u", i + 1);
+    s.crsfMergeMap[i] = gPrefs.getUChar(key, s.crsfMergeMap[i]);
+  }
+  s.crsfMergeCount = gPrefs.getUChar("mmc", s.crsfMergeCount);
   s.wifiChannel = gPrefs.getUChar("wch", s.wifiChannel);
   s.wifiTxPower = gPrefs.getUChar("wtx", s.wifiTxPower);
+
+  s.btEnabled = gPrefs.getUChar("bte", s.btEnabled);
+  for (uint8_t i = 0; i < kMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "bs%x", i);
+    s.btChannelSource[i] = gPrefs.getUChar(key, s.btChannelSource[i]);
+  }
+  s.btChannelInvert = gPrefs.getUShort("bti", s.btChannelInvert);
   String validationError;
   if (!validateSettings(s, validationError)) {
     Serial.printf("WARN: Stored settings invalid (%s). Restoring defaults.\n", validationError.c_str());
@@ -1607,8 +2418,8 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       return false;
     }
   }
-  if (s.outputModeDefault > 5) {
-    error = "output_mode_default must be 0..5";
+  if (s.outputModeDefault > 6) {
+    error = "output_mode_default must be 0..6";
     return false;
   }
   if (s.crsfOutputTarget > 2) {
@@ -1619,17 +2430,25 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
     error = "crsf_merge_enabled must be 0 or 1";
     return false;
   }
-  for (uint8_t i = 0; i < kServoCount; ++i) {
+  if (s.crsfMergeCount < 1 || s.crsfMergeCount > kMergeMaxChannels) {
+    error = "crsf_merge_count must be 1..8";
+    return false;
+  }
+  for (uint8_t i = 0; i < kMergeMaxChannels; ++i) {
     if (s.crsfMergeMap[i] >= kCrsfChannelCount) {
       error = "crsf_merge_map values must be within 1..16";
       return false;
     }
   }
   if (s.crsfMergeEnabled) {
-    if (s.crsfMergeMap[0] == s.crsfMergeMap[1] || s.crsfMergeMap[0] == s.crsfMergeMap[2] ||
-        s.crsfMergeMap[1] == s.crsfMergeMap[2]) {
-      error = "crsf_merge_map entries must be unique when merge is enabled";
-      return false;
+    uint16_t seen = 0;
+    for (uint8_t i = 0; i < s.crsfMergeCount; ++i) {
+      uint16_t bit = static_cast<uint16_t>(1U << s.crsfMergeMap[i]);
+      if (seen & bit) {
+        error = "crsf_merge_map entries must be unique when merge is enabled";
+        return false;
+      }
+      seen |= bit;
     }
   }
   if (s.wifiChannel < 1 || s.wifiChannel > 11) {
@@ -1648,6 +2467,16 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
   if (pinListHasDuplicates(s)) {
     error = "pin assignment conflict: all configured pins must be unique";
     return false;
+  }
+  if (s.btEnabled > 1) {
+    error = "bt_enabled must be 0 or 1";
+    return false;
+  }
+  for (uint8_t i = 0; i < kMaxChannels; i++) {
+    if (s.btChannelSource[i] >= kBtSourceSlotCount) {
+      error = "bt channel source must be 0..11";
+      return false;
+    }
   }
   return true;
 }
@@ -1720,9 +2549,24 @@ void fillOutgoingCrsfChannelsMerged(uint16_t channels[kCrsfChannelCount]) {
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
     channels[i] = gCrsfRxChannels[i];
   }
-  const uint8_t count = (gLatestChannelCount < kServoCount) ? gLatestChannelCount : kServoCount;
+  const uint8_t mergeCount = gSettings.crsfMergeCount;
+  const uint8_t count = (gLatestChannelCount < mergeCount) ? gLatestChannelCount : mergeCount;
   for (uint8_t i = 0; i < count; ++i) {
     channels[gSettings.crsfMergeMap[i]] = mapPulseUsToCrsf(gLatestChannels[i]);
+  }
+}
+
+void fillOutgoingCrsfChannelsFromBluetooth(uint16_t channels[kCrsfChannelCount]) {
+  for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+    channels[i] = kCrsfCenterValue;
+  }
+  for (uint8_t i = 0; i < kMaxChannels; ++i) {
+    const uint8_t src = gSettings.btChannelSource[i];
+    uint16_t val = (src < kBtSourceSlotCount) ? gBtSourceSlots[src] : kCrsfCenterValue;
+    if (gSettings.btChannelInvert & (1U << i)) {
+      val = static_cast<uint16_t>(kCrsfMaxValue - (val - kCrsfMinValue));
+    }
+    channels[i] = val;
   }
 }
 
@@ -2017,7 +2861,9 @@ bool updatePpmMonitorWindow(uint32_t nowMs, uint32_t invalidPulses) {
 
 void updateLed() {
   const uint32_t nowMs = millis();
-  const bool hasSignal = (nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs;
+  const bool hasSignal = gSettings.btEnabled
+      ? gBtConnected
+      : (nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs;
   const uint32_t blinkPeriodMs = hasSignal ? 100 : 500;
   if (nowMs - gLastLedToggleMs < blinkPeriodMs) {
     return;
@@ -2033,11 +2879,17 @@ void toggleOutputMode() {
     gLastOledRefreshMs = 0;
     return;
   }
-  OutputMode nextMode = OutputMode::kHdzeroCrsf;
-  if (gOutputMode == OutputMode::kHdzeroCrsf) {
-    nextMode = OutputMode::kUartToPwm;
-  } else if (gOutputMode == OutputMode::kUartToPwm) {
+  OutputMode nextMode;
+  if (gSettings.btEnabled) {
+    // BT mode: only CRSF TX12 is useful — skip HDZero and UART screens
     nextMode = OutputMode::kCrsfTx12;
+  } else {
+    nextMode = OutputMode::kHdzeroCrsf;
+    if (gOutputMode == OutputMode::kHdzeroCrsf) {
+      nextMode = OutputMode::kUartToPwm;
+    } else if (gOutputMode == OutputMode::kUartToPwm) {
+      nextMode = OutputMode::kCrsfTx12;
+    }
   }
   setOutputMode(nextMode, "button-short");
 }
@@ -2120,16 +2972,23 @@ void applySettings(const RuntimeSettings &newSettings) {
   gButtonPressStartMs = (gButtonStableState == LOW) ? millis() : 0;
   gButtonLongPressHandled = false;
 
-  pinMode(gSettings.ppmInputPin, INPUT_PULLDOWN);
-  attachInterrupt(digitalPinToInterrupt(gSettings.ppmInputPin), onPpmRise, RISING);
-  gPpmInterruptAttached = true;
-  gAttachedPpmPin = gSettings.ppmInputPin;
+  if (!gSettings.btEnabled) {
+    pinMode(gSettings.ppmInputPin, INPUT_PULLDOWN);
+    attachInterrupt(digitalPinToInterrupt(gSettings.ppmInputPin), onPpmRise, RISING);
+    gPpmInterruptAttached = true;
+    gAttachedPpmPin = gSettings.ppmInputPin;
+  }
 
 #if CRSF_UART_ENABLED
   if (gCrsfUartReady) {
     gCrsfUart.end();
   }
-  gCrsfUart.begin(gSettings.crsfUartBaud, SERIAL_8N1, gSettings.crsfUartRxPin, gSettings.crsfUartTxPin);
+  if (gSettings.btEnabled) {
+    // BT mode: init UART for TX only (-1 disables RX pin)
+    gCrsfUart.begin(gSettings.crsfUartBaud, SERIAL_8N1, -1, gSettings.crsfUartTxPin);
+  } else {
+    gCrsfUart.begin(gSettings.crsfUartBaud, SERIAL_8N1, gSettings.crsfUartRxPin, gSettings.crsfUartTxPin);
+  }
   gCrsfUartReady = true;
 #endif
 
@@ -2163,6 +3022,7 @@ void applySettings(const RuntimeSettings &newSettings) {
   gActivePwmRoute = PwmRoute::kCenter;
   gLastUsbRouteChangeMs = 0;
   gLastPwmRouteChangeMs = 0;
+  gBtLastCrsfOutputMs = 0;
 
   if (oldSettings.monitorPrintIntervalMs != gSettings.monitorPrintIntervalMs) {
     gLastMonitorSampleMs = 0;
@@ -2232,65 +3092,50 @@ String settingsToJson() {
   if (gOutputMode == OutputMode::kDebugConfig) {
     if (gDebugPage == 1) expandedLiveMode = 4;
     else if (gDebugPage == 2) expandedLiveMode = 5;
+    else if (gDebugPage == 3) expandedLiveMode = 6;
   }
   json += ",\"output_mode_live\":" + String(expandedLiveMode);
   json += ",\"output_mode_default\":" + String(gSettings.outputModeDefault);
   json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
   json += ",\"crsf_merge_enabled\":" + String(gSettings.crsfMergeEnabled);
-  json += ",\"crsf_merge_map_1\":" + String(gSettings.crsfMergeMap[0] + 1);
-  json += ",\"crsf_merge_map_2\":" + String(gSettings.crsfMergeMap[1] + 1);
-  json += ",\"crsf_merge_map_3\":" + String(gSettings.crsfMergeMap[2] + 1);
+  json += ",\"crsf_merge_count\":" + String(gSettings.crsfMergeCount);
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    json += ",\"crsf_merge_map_" + String(i + 1) + "\":" + String(gSettings.crsfMergeMap[i] + 1);
+  }
   json += ",\"wifi_channel\":" + String(gSettings.wifiChannel);
   json += ",\"wifi_tx_power\":" + String(gSettings.wifiTxPower);
+
+  json += ",\"bt_enabled\":" + String(gSettings.btEnabled);
+  for (uint8_t i = 0; i < kMaxChannels; i++) {
+    json += ",\"bt_ch_src_" + String(i + 1) + "\":" + String(gSettings.btChannelSource[i]);
+    json += ",\"bt_ch_inv_" + String(i + 1) + "\":" +
+            String((gSettings.btChannelInvert & (1U << i)) ? 1 : 0);
+  }
   json += "}";
   return json;
 }
 
 String statusToJson() {
   const uint32_t nowMs = millis();
-  const char *ppmHealth = ppmHealthLabel(nowMs);
-  const char *crsfHealth = crsfRxHealthLabel(nowMs);
-  const float crsfRateHz = liveCrsfRxRateHz(nowMs);
-  const uint32_t crsfAgeMs = gHasCrsfRxFrame ? (nowMs - gLastCrsfRxMs) : 0;
-  const UsbCrsfRoute usbRoute = gActiveUsbCrsfRoute;
-  const PwmRoute pwmRoute = gActivePwmRoute;
 
   String json;
-  json.reserve(560);
+  json.reserve(320);
   json = "{";
-  json += "\"ap_ssid\":\"" + String(kApSsid) + "\"";
-  json += ",\"ap_channel\":" + String(gSettings.wifiChannel);
-  json += ",\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"";
-  json += ",\"stations\":" + String(WiFi.softAPgetStationNum());
-  json += ",\"ap_start_request_ms\":" + String(gApStartRequestMs);
-  json += ",\"ap_started_ms\":" + String(gApStartedMs);
-  json += ",\"ap_last_station_join_ms\":" + String(gApLastStationJoinMs);
-  json += ",\"ap_last_station_ip_ms\":" + String(gApLastStationIpMs);
-  json += ",\"ap_state_label\":\"" + String(debugApStateLabel()) + "\"";
-  json += ",\"ap_retry_count\":" + String(gDebugServiceRetryCount);
-  json += ",\"ap_last_failure_ms\":" + String(gDebugServiceLastFailureMs);
-  json += ",\"web_ui_active\":" + String(gApRunning ? 1 : 0);
-  json += ",\"nvs_ready\":" + String(gPrefsReady ? 1 : 0);
+  json += "\"output_mode_label\":\"" + String(outputModeLabel(gOutputMode)) + "\"";
   json += ",\"oled_ready\":" + String(gOledReady ? 1 : 0);
-  json += ",\"oled_sda_pin\":" + String(OLED_SDA_PIN);
-  json += ",\"oled_scl_pin\":" + String(OLED_SCL_PIN);
-  json += ",\"oled_i2c_addr\":\"0x" + String(OLED_I2C_ADDRESS, HEX) + "\"";
-  json += ",\"output_mode\":" + String(outputModeToUint(gOutputMode));
-  json += ",\"output_mode_label\":\"" + String(outputModeLabel(gOutputMode)) + "\"";
-  json += ",\"ppm_health_label\":\"" + String(ppmHealth) + "\"";
-  json += ",\"frame_hz\":" + String(gLastMeasuredWindowHz, 2);
-  json += ",\"frame_hz_ema\":" + String(gLastMeasuredWindowHz, 2);
+  json += ",\"web_ui_active\":" + String(gApRunning ? 1 : 0);
+  json += ",\"usb_route_label\":\"" + String(usbCrsfRouteLabel(gActiveUsbCrsfRoute)) + "\"";
+  json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(gActivePwmRoute)) + "\"";
+  json += ",\"ppm_health_label\":\"" + String(ppmHealthLabel(nowMs)) + "\"";
   json += ",\"ppm_window_hz\":" + String(gLastMeasuredWindowHz, 2);
-  json += ",\"crsf_rx_health_label\":\"" + String(crsfHealth) + "\"";
+  json += ",\"crsf_rx_health_label\":\"" + String(crsfRxHealthLabel(nowMs)) + "\"";
+  json += ",\"crsf_rx_rate_hz\":" + String(liveCrsfRxRateHz(nowMs), 2);
   json += ",\"crsf_rx_packets\":" + String(gCrsfRxPacketCounter);
   json += ",\"crsf_rx_invalid\":" + String(gCrsfRxInvalidCounter);
-  json += ",\"crsf_rx_age_ms\":" + String(crsfAgeMs);
-  json += ",\"crsf_rx_rate_hz\":" + String(crsfRateHz, 2);
-  json += ",\"usb_route_label\":\"" + String(usbCrsfRouteLabel(usbRoute)) + "\"";
-  json += ",\"pwm_route_label\":\"" + String(pwmRouteLabel(pwmRoute)) + "\"";
   json += ",\"servo_us\":[" + String(gServoPulseUs[0]) + "," + String(gServoPulseUs[1]) + "," + String(gServoPulseUs[2]) + "]";
-  json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
-  json += ",\"crsf_merge_active\":" + String(gSettings.crsfMergeEnabled ? 1 : 0);
+  json += ",\"bt_state\":\"" + String(gSettings.btEnabled ? btStateLabel() : "OFF") + "\"";
+  json += ",\"bt_device\":\"" + String(gBtDeviceName) + "\"";
+  json += ",\"bt_report_hz\":" + String(gBtReportRateHz, 1);
   json += "}";
   return json;
 }
@@ -2516,26 +3361,23 @@ void handlePostSettings() {
   }
   candidate.crsfMergeEnabled = static_cast<uint8_t>(tmp);
 
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[0] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_1", 1, 16, tmp, error)) {
+  tmp = candidate.crsfMergeCount;
+  if (!parseUIntArgOptional("crsf_merge_count", 1, 8, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
-  candidate.crsfMergeMap[0] = static_cast<uint8_t>(tmp - 1U);
+  candidate.crsfMergeCount = static_cast<uint8_t>(tmp);
 
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[1] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_2", 1, 16, tmp, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char fieldName[20];
+    snprintf(fieldName, sizeof(fieldName), "crsf_merge_map_%u", i + 1);
+    tmp = static_cast<uint32_t>(candidate.crsfMergeMap[i] + 1U);
+    if (!parseUIntArgOptional(fieldName, 1, 16, tmp, error)) {
+      gWeb.send(400, "text/plain", error);
+      return;
+    }
+    candidate.crsfMergeMap[i] = static_cast<uint8_t>(tmp - 1U);
   }
-  candidate.crsfMergeMap[1] = static_cast<uint8_t>(tmp - 1U);
-
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[2] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_3", 1, 16, tmp, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
-  }
-  candidate.crsfMergeMap[2] = static_cast<uint8_t>(tmp - 1U);
 
   tmp = candidate.wifiChannel;
   if (!parseUIntArgOptional("wifi_channel", 1, 11, tmp, error)) {
@@ -2551,13 +3393,43 @@ void handlePostSettings() {
   }
   candidate.wifiTxPower = clampU8(tmp);
 
+  tmp = candidate.btEnabled;
+  if (!parseUIntArgOptional("bt_enabled", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.btEnabled = static_cast<uint8_t>(tmp);
+
+  for (uint8_t i = 0; i < kMaxChannels; i++) {
+    String srcName = "bt_ch_src_" + String(i + 1);
+    tmp = candidate.btChannelSource[i];
+    if (!parseUIntArgOptional(srcName.c_str(), 0, 11, tmp, error)) {
+      gWeb.send(400, "text/plain", error);
+      return;
+    }
+    candidate.btChannelSource[i] = static_cast<uint8_t>(tmp);
+
+    String invName = "bt_ch_inv_" + String(i + 1);
+    tmp = (candidate.btChannelInvert & (1U << i)) ? 1 : 0;
+    if (!parseUIntArgOptional(invName.c_str(), 0, 1, tmp, error)) {
+      gWeb.send(400, "text/plain", error);
+      return;
+    }
+    if (tmp) {
+      candidate.btChannelInvert |= (1U << i);
+    } else {
+      candidate.btChannelInvert &= ~(1U << i);
+    }
+  }
+
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   if (gOutputMode == OutputMode::kDebugConfig) {
     if (gDebugPage == 1) requestedLiveMode = 4;
     else if (gDebugPage == 2) requestedLiveMode = 5;
+    else if (gDebugPage == 3) requestedLiveMode = 6;
   }
   tmp = requestedLiveMode;
-  if (!parseUIntArgOptional("output_mode_live", 0, 5, tmp, error)) {
+  if (!parseUIntArgOptional("output_mode_live", 0, 6, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
@@ -2568,6 +3440,7 @@ void handlePostSettings() {
     return;
   }
 
+  const bool btChanged = (candidate.btEnabled != gSettings.btEnabled);
   applySettings(candidate);
   OutputMode requestedMode;
   uint8_t requestedDebugPage = 0;
@@ -2577,6 +3450,9 @@ void handlePostSettings() {
   } else if (requestedLiveMode == 5) {
     requestedMode = OutputMode::kDebugConfig;
     requestedDebugPage = 2;
+  } else if (requestedLiveMode == 6) {
+    requestedMode = OutputMode::kDebugConfig;
+    requestedDebugPage = 3;
   } else {
     requestedMode = static_cast<OutputMode>(requestedLiveMode);
   }
@@ -2592,6 +3468,14 @@ void handlePostSettings() {
     gWeb.send(500, "text/plain", "Applied live, but failed to save to NVS");
     return;
   }
+
+  if (btChanged && persist && persisted) {
+    gWeb.send(200, "text/plain", "Bluetooth mode changed. Saved. Rebooting...");
+    delay(250);
+    ESP.restart();
+    return;
+  }
+
   gWeb.send(200, "text/plain", persist ? "Applied live and saved" : "Applied live");
   setOutputMode(requestedMode, "web", true, requestedDebugPage);
 }
@@ -2613,6 +3497,9 @@ void handleResetDefaults() {
   } else if (defaults.outputModeDefault == 5) {
     defaultMode = OutputMode::kDebugConfig;
     defaultDebugPage = 2;
+  } else if (defaults.outputModeDefault == 6) {
+    defaultMode = OutputMode::kDebugConfig;
+    defaultDebugPage = 3;
   } else {
     defaultMode = static_cast<OutputMode>(defaults.outputModeDefault);
   }
@@ -2635,6 +3522,11 @@ void configureWebUiRoutes() {
   gWeb.on("/api/settings", HTTP_POST, handlePostSettings);
   gWeb.on("/api/reset_defaults", HTTP_POST, handleResetDefaults);
   gWeb.on("/api/status", HTTP_GET, handleGetStatus);
+  gWeb.on("/api/bt_forget", HTTP_POST, []() {
+    btForget();
+    setNoCacheHeaders();
+    gWeb.send(200, "text/plain", "Bluetooth device forgotten, restarting scan");
+  });
   gWeb.onNotFound([]() { gWeb.send(404, "text/plain", "Not Found"); });
   gWebRoutesConfigured = true;
 }
@@ -2694,7 +3586,7 @@ void serviceDebugServices(uint32_t nowMs) {
       if ((nowMs - gDebugServiceStateMs) < kDebugServiceWifiOffDelayMs) {
         break;
       }
-      WiFi.setSleep(false);
+      WiFi.setSleep(gSettings.btEnabled);  // allow modem sleep when BLE active
       WiFi.mode(WIFI_AP);
       gDebugServiceState = DebugServiceState::kWaitApMode;
       gDebugServiceStateMs = nowMs;
@@ -2795,6 +3687,11 @@ void setup() {
   gPrefsReady = gPrefs.begin("waybeam", false);
   gSettings = loadSettingsFromNvs();
   applySettings(gSettings);
+  initOled();
+
+  if (gSettings.btEnabled) {
+    btInit();
+  }
 
   const bool serialOk = (gSettings.crsfOutputTarget != 1);
   if (serialOk) {
@@ -2817,12 +3714,14 @@ void setup() {
     } else if (gSettings.outputModeDefault == 5) {
       bootMode = OutputMode::kDebugConfig;
       bootDebugPage = 2;
+    } else if (gSettings.outputModeDefault == 6) {
+      bootMode = OutputMode::kDebugConfig;
+      bootDebugPage = 3;
     } else {
       bootMode = static_cast<OutputMode>(gSettings.outputModeDefault);
     }
     setOutputMode(bootMode, "boot", true, bootDebugPage);
   }
-  initOled();
   refreshOledStatus(millis());
 }
 
@@ -2833,74 +3732,110 @@ void loop() {
     gWeb.handleClient();
   }
 
-  uint32_t invalidPulses = 0;
-  const bool frameReady = copyFrameFromIsr(invalidPulses);
-  if (frameReady) {
-    recordRecentEvent(gRecentPpmFrameMs, gRecentPpmFrameCount, gLastFrameMs);
-  }
-  const uint32_t crsfRxPacketCounterBefore = gCrsfRxPacketCounter;
-  processCrsfRxInput();
   handleModeButton();
   pollButtonLongPress();
   const uint32_t nowMs = millis();
-  updateCrsfRxRateWindow(nowMs);
-  const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
-  const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
   const bool debugScreenActive = isDebugOutputMode(gOutputMode);
-  const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs);
-  const PwmRoute pwmRoute = updatePwmRoute(nowMs);
-  applyPwmRoute(pwmRoute);
-  if (debugScreenActive && frameReady) {
-    updatePpmMonitorWindow(nowMs, invalidPulses);
-  }
-  refreshOledStatus(nowMs);
 
-  const bool outputToUsb = (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
-  const bool outputToUart = (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
+  if (gSettings.btEnabled) {
+    // --- Bluetooth mode: skip PPM/CRSF, use gamepad data ---
+    btUpdate();
 
-  if (gSettings.crsfMergeEnabled) {
-    const bool ppmFresh = !isSourceStale(ppmHealth);
-    const bool crsfFresh = !isSourceStale(crsfSourceHealth(nowMs));
-    if (ppmFresh && crsfFresh) {
-      if (frameReady || crsfRxUpdated) {
-        uint16_t channels[kCrsfChannelCount] = {0};
-        fillOutgoingCrsfChannelsMerged(channels);
-        uint8_t packet[kCrsfPacketSize] = {0};
-        packCrsfRcPacket(channels, packet);
-        writeCrsfPacket(packet, outputToUsb, outputToUart);
+    // Drive servos from BT channels (only when reports are fresh)
+    if (isBtFresh(nowMs)) {
+      uint16_t btCh[kCrsfChannelCount] = {0};
+      fillOutgoingCrsfChannelsFromBluetooth(btCh);
+      for (uint8_t i = 0; i < kServoCount; ++i) {
+        const uint8_t src = gSettings.servoMap[i];
+        writeServoPulseUs(i, mapCrsfToServoUs(btCh[src]));
       }
-    } else if (!ppmFresh && crsfFresh) {
-      if (crsfRxUpdated) {
-        uint16_t channels[kCrsfChannelCount] = {0};
-        fillOutgoingCrsfChannelsFromCrsfRx(channels);
-        uint8_t packet[kCrsfPacketSize] = {0};
-        packCrsfRcPacket(channels, packet);
-        writeCrsfPacket(packet, outputToUsb, outputToUart);
-      }
-    } else if (ppmFresh && !crsfFresh) {
-      if (frameReady) {
-        sendPpmAsCrsfFrame(outputToUsb, outputToUart);
+    } else {
+      for (uint8_t i = 0; i < kServoCount; ++i) {
+        writeServoPulseUs(i, gSettings.servoPulseCenterUs);
       }
     }
-  } else {
-    if (frameReady) {
-      sendPpmAsCrsfFrame(
-        outputToUsb && (usbRoute == UsbCrsfRoute::kPpm),
-        outputToUart || !isSourceStale(ppmHealth));
-    }
-    if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
+
+    refreshOledStatus(nowMs);
+
+    // Output CRSF from BT at ~50Hz (only when reports are fresh)
+    if (isBtFresh(nowMs) && (nowMs - gBtLastCrsfOutputMs) >= 20) {
+      gBtLastCrsfOutputMs = nowMs;
+      const bool outputToUsb =
+          (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
+      const bool outputToUart =
+          (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
       uint16_t channels[kCrsfChannelCount] = {0};
-      for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
-        channels[i] = gCrsfRxChannels[i];
-      }
+      fillOutgoingCrsfChannelsFromBluetooth(channels);
       uint8_t packet[kCrsfPacketSize] = {0};
       packCrsfRcPacket(channels, packet);
       writeCrsfPacket(packet, outputToUsb, outputToUart);
     }
-  }
-  updateLed();
+  } else {
+    // --- Normal mode: PPM/CRSF processing ---
+    uint32_t invalidPulses = 0;
+    const bool frameReady = copyFrameFromIsr(invalidPulses);
+    if (frameReady) {
+      recordRecentEvent(gRecentPpmFrameMs, gRecentPpmFrameCount, gLastFrameMs);
+    }
+    const uint32_t crsfRxPacketCounterBefore = gCrsfRxPacketCounter;
+    processCrsfRxInput();
+    updateCrsfRxRateWindow(nowMs);
+    const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+    const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
+    const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs);
+    const PwmRoute pwmRoute = updatePwmRoute(nowMs);
+    applyPwmRoute(pwmRoute);
+    if (debugScreenActive && frameReady) {
+      updatePpmMonitorWindow(nowMs, invalidPulses);
+    }
+    refreshOledStatus(nowMs);
 
-  if (gWebUiActive) {
-    delay(1);
+    const bool outputToUsb =
+        (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
+    const bool outputToUart =
+        (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
+
+    if (gSettings.crsfMergeEnabled) {
+      const bool ppmFresh = !isSourceStale(ppmHealth);
+      const bool crsfFresh = !isSourceStale(crsfSourceHealth(nowMs));
+      if (ppmFresh && crsfFresh) {
+        if (frameReady || crsfRxUpdated) {
+          uint16_t channels[kCrsfChannelCount] = {0};
+          fillOutgoingCrsfChannelsMerged(channels);
+          uint8_t packet[kCrsfPacketSize] = {0};
+          packCrsfRcPacket(channels, packet);
+          writeCrsfPacket(packet, outputToUsb, outputToUart);
+        }
+      } else if (!ppmFresh && crsfFresh) {
+        if (crsfRxUpdated) {
+          uint16_t channels[kCrsfChannelCount] = {0};
+          fillOutgoingCrsfChannelsFromCrsfRx(channels);
+          uint8_t packet[kCrsfPacketSize] = {0};
+          packCrsfRcPacket(channels, packet);
+          writeCrsfPacket(packet, outputToUsb, outputToUart);
+        }
+      } else if (ppmFresh && !crsfFresh) {
+        if (frameReady) {
+          sendPpmAsCrsfFrame(outputToUsb, outputToUart);
+        }
+      }
+    } else {
+      if (frameReady) {
+        sendPpmAsCrsfFrame(outputToUsb && (usbRoute == UsbCrsfRoute::kPpm),
+                           outputToUart || !isSourceStale(ppmHealth));
+      }
+      if (crsfRxUpdated && usbRoute == UsbCrsfRoute::kCrsfRx) {
+        uint16_t channels[kCrsfChannelCount] = {0};
+        for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
+          channels[i] = gCrsfRxChannels[i];
+        }
+        uint8_t packet[kCrsfPacketSize] = {0};
+        packCrsfRcPacket(channels, packet);
+        writeCrsfPacket(packet, outputToUsb, outputToUart);
+      }
+    }
   }
+
+  updateLed();
+  delay(1);
 }
