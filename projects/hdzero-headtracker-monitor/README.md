@@ -81,7 +81,7 @@ pio device monitor -p /dev/ttyACM0 -b 420000
    - header shows `RXOK`, `NONE`, or `STAL`
 10. Short press once more and observe `CRSF TX12`:
    - two slim graph columns show channels `1..12` of the active outgoing CRSF payload
-   - when PPM owns CRSF output, channels `1..3` move with the headtracker input and channels `4..12` stay centered by default
+   - when PPM owns CRSF output, the configured merge channels (1–8, default 3) move with PPM input and the rest stay centered
    - when CRSF RX owns fallback CRSF output, the screen follows the decoded incoming CRSF RX channels instead
    - header shows the active CRSF output source (`PPM`, `CRSF`, or `NONE`)
 11. Switch to `DEBUG CFG` and confirm:
@@ -98,8 +98,10 @@ pio device monitor -p /dev/ttyACM0 -b 420000
    - change all runtime settings live
    - save settings to persistent storage (NVS) for next boot
    - reset all settings to firmware defaults with the `Reset to defaults` button (live + saved)
-   - navigate settings in grouped sections with inline guidance (Pins, Modes, CRSF/UART, Servo Outputs, PPM Decode, Timing/Health)
-   - use dropdowns for screen modes and servo source channels instead of manual numeric entry
+   - switch between **Setup**, **Advanced**, and **Gamepad** views using centered tab buttons
+   - use dropdowns for screen modes, servo source channels, and CRSF merge mapping
+   - see changed fields highlighted in amber; save button shows pending change count and is disabled when clean
+   - BLE gamepad channel sources have inline "Inv" checkboxes instead of separate direction dropdowns
    - see save-state diagnostics (`nvs_ready`), OLED status (`oled_ready`), current screen, and AP activity in status output
 
 ## Expected Behavior
@@ -146,6 +148,8 @@ pio device monitor -p /dev/ttyACM0 -b 420000
 - SoftAP beaconing is already at the ESP32-C3 minimum/default interval (`100 TU`), so the remaining safe levers are channel selection and maximum WiFi TX power; firmware now forces channel `6` and requests `19.5dBm` TX power in `DEBUG CFG`.
 - Stored settings are validated on boot; invalid/corrupt persisted settings are auto-replaced with firmware defaults.
 - Web pin settings are validated against ESP32-C3-safe configurable pins (`GPIO0..10, GPIO20, GPIO21`), with `GPIO4/5` reserved for the OLED.
+- CRSF channel merge overlays 1–8 PPM input channels onto the CRSF RX stream at configurable output positions (default: 3 channels, 1:1 mapping).
+- BLE gamepad mode (8BitDo Ultimate 2C tested): connects via BLE HID, maps sticks/triggers/D-pad/buttons to 12 CRSF channels with configurable source and invert per channel.
 - `DEBUG CFG` keeps CRSF output active on the selected target; OLED and Web UI are the intended debug surfaces.
 - Web status JSON reports the same stable windowed PPM rate used by `DEBUG CFG`:
   - `frame_hz`

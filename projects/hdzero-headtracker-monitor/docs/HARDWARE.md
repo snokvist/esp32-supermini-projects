@@ -135,7 +135,7 @@ Bring-up checklist:
    - header shows the active CRSF output source (`PPM`, `CRSF`, or `NONE`)
    - two compact columns show outgoing CRSF channels `1..12`
    - the slim bars are visibly narrower than the main graph screens
-   - when PPM owns CRSF output, channels `1..3` follow live PPM headtracker movement and channels `4..12` remain centered by default
+   - when PPM owns CRSF output, the configured merge channels (1–8, default 3) follow live PPM input and the rest remain centered
    - when CRSF RX owns fallback CRSF output, the screen follows the decoded CRSF RX channels instead
 8. In `DEBUG CFG`, verify:
   - AP starts only in this screen
@@ -149,15 +149,16 @@ Bring-up checklist:
 9. Connect client device to `waybeam-backpack`, browse to `http://10.100.0.1/`, and verify:
    - settings page loads
    - top summary cards show current screen, route ownership, PPM health/rate, CRSF RX health/rate, and servo outputs
-   - settings are grouped by section for quick navigation (Pins, Modes, CRSF/UART, Servo, PPM, Timing)
-   - mode and servo source fields use dropdowns instead of raw numeric entry
+   - settings are organized into Setup, Advanced, and Gamepad views with centered tab buttons
+   - mode, servo source, and merge map fields use dropdowns; gamepad invert uses inline checkboxes
+   - changed fields are highlighted in amber; save button shows pending count and is disabled when clean
    - status JSON updates (`web_ui_active`, `output_mode_label`, CRSF RX counters/rate, servo values, `oled_ready`)
    - AP state fields update consistently (`ap_state_label`, `ap_retry_count`, `ap_last_failure_ms`)
    - `web_ui_active` only goes high after the SoftAP has actually started
    - route labels update correctly (`usb_route_label`, `pwm_route_label`)
    - status JSON includes `nvs_ready: 1` during normal operation
    - apply/save actions are accepted
-   - `Reset to defaults` restores firmware defaults live and persists them
+   - `Reset` restores firmware defaults live and persists them
    - invalid pin selections are rejected by API validation, including any attempt to use `GPIO4/5`
 10. If CRSF output target is USB Serial (default), open serial monitor at `420000`:
    - readable boot output before runtime CRSF starts, including `Reset reason: ...`

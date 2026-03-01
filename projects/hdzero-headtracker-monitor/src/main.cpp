@@ -89,6 +89,7 @@ constexpr uint16_t kCrsfCenterValue = 992;
 constexpr uint16_t kCrsfMaxValue = 1811;
 
 constexpr uint8_t kServoCount = 3;
+constexpr uint8_t kMergeMaxChannels = 8;
 constexpr uint8_t kServoPwmResolutionBits = 14;
 constexpr uint8_t kServoPwmChannels[kServoCount] = {0, 1, 2};
 constexpr uint16_t kCrsfRxBytesPerLoopLimit = 256;
@@ -121,7 +122,7 @@ constexpr uint16_t kBtScanWindowNormal   = 112;   // ~70% duty — leaves headro
 constexpr uint16_t kBtScanIntervalCoex   = 160;   // 100ms
 constexpr uint16_t kBtScanWindowCoex     = 80;    // ~50% duty
 
-constexpr uint16_t kSettingsVersion = 7;
+constexpr uint16_t kSettingsVersion = 8;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -292,11 +293,18 @@ input,select{
   background:#fff;
   color:var(--text);
 }
+.row.dirty{border-left:3px solid #e8a317;padding-left:6px}
+.row.dirty select,.row.dirty input:not([type=checkbox]){border-color:#e8a317;background:#fffbf0}
+.row-inline{display:flex;align-items:center;gap:8px}
+.row-inline select{flex:1}
+.row-inline label.cb{display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;margin:0}
+.row-inline input[type=checkbox]{width:auto;margin:0}
 .actions{
   display:flex;
+  justify-content:center;
   gap:8px;
   flex-wrap:wrap;
-  margin-top:16px;
+  margin-top:10px;
 }
 button{
   padding:10px 14px;
@@ -305,8 +313,8 @@ button{
   cursor:pointer;
   font-weight:700;
 }
-.apply{background:var(--accent);color:#fff}
 .save{background:var(--accent-2);color:#fff}
+.save:disabled{opacity:.45;cursor:default}
 .refresh{background:#385261;color:#fff}
 .reset{background:var(--danger);color:#fff}
 .status-block{
@@ -348,7 +356,8 @@ pre{
 }
 .adv-bar{
   display:flex;
-  justify-content:flex-end;
+  justify-content:center;
+  gap:8px;
   margin-top:14px;
 }
 .adv-toggle{
@@ -368,9 +377,9 @@ pre{
 .adv-toggle:hover{border-color:var(--accent);color:var(--accent)}
 .adv-toggle.active{border-color:var(--accent);background:#edf5fa;color:var(--accent)}
 .section.advanced{display:none}
+.section.bluetooth{display:none}
 .show-advanced .section.advanced{display:block}
 .show-advanced .section:not(.advanced):not(.bluetooth){display:none}
-.section.bluetooth{display:none}
 .show-bluetooth .section.bluetooth{display:block}
 .show-bluetooth .section:not(.bluetooth):not(.advanced){display:none}
 </style>
@@ -388,16 +397,16 @@ pre{
   <div class="summary" id="summary"></div>
   <form id="cfg">
     <div class="adv-bar">
-      <button class="adv-toggle" id="bt-btn" type="button" onclick="toggleBluetooth()">Bluetooth Gamepad</button>
-      <button class="adv-toggle" id="adv-btn" type="button" onclick="toggleAdvanced()">Show Advanced</button>
+      <button class="adv-toggle" id="bt-btn" type="button" onclick="showView('bluetooth')">Gamepad</button>
+      <button class="adv-toggle" id="adv-btn" type="button" onclick="showView('advanced')">Advanced</button>
+      <button class="adv-toggle active" id="setup-btn" type="button" onclick="showView('setup')">Setup</button>
     </div>
-    <div class="sections" id="sections"></div>
     <div class="actions">
-      <button class="apply" type="button" onclick="submitCfg(false)">Apply Live</button>
-      <button class="save" type="button" onclick="submitCfg(true)">Apply + Save</button>
-      <button class="reset" type="button" onclick="resetDefaults()">Reset to defaults</button>
+      <button class="save" id="save-btn" type="button" onclick="submitCfg()" disabled>Apply + Save</button>
+      <button class="reset" type="button" onclick="resetDefaults()">Reset</button>
       <button class="refresh" type="button" onclick="loadAll()">Refresh</button>
     </div>
+    <div class="sections" id="sections"></div>
   </form>
   <div class="status-block">
     <div class="status-top">
@@ -414,8 +423,7 @@ pre{
 const chOpts=[['1','CH1'],['2','CH2'],['3','CH3'],['4','CH4'],['5','CH5'],['6','CH6'],['7','CH7'],['8','CH8'],
 ['9','CH9'],['10','CH10'],['11','CH11'],['12','CH12'],['13','CH13'],['14','CH14'],['15','CH15'],['16','CH16']];
 const modeOpts=[['0','HDZero -> CRSF'],['1','UART -> PWM'],['3','CRSF TX 1-12'],['2','Debug Status'],['4','Debug Routes'],['5','Debug Ranges'],['6','Debug Bluetooth']];
-const btSrcOpts=[['0','L-Stick X'],['1','L-Stick Y'],['2','R-Stick X'],['3','R-Stick Y'],['4','L-Trigger'],['5','R-Trigger'],['6','D-Pad X'],['7','D-Pad Y'],['8','Btn 1'],['9','Btn 2'],['10','Btn 3'],['11','Btn 4']];
-const btInvOpts=[['0','Normal'],['1','Inverted']];
+const btSrcOpts=[['0','L-Stick X'],['1','L-Stick Y'],['2','R-Stick X'],['3','L-Trigger'],['4','R-Trigger'],['5','R-Stick Y'],['6','D-Pad X'],['7','D-Pad Y'],['8','Btn 1'],['9','Btn 2'],['10','Btn 3'],['11','Btn 4']];
 const sections=[
 {title:'Modes', note:'Live mode changes the active OLED/runtime screen immediately. Default mode selects the boot screen.', fields:[
 {name:'output_mode_live',label:'Live screen',type:'select',options:modeOpts},
@@ -424,32 +432,9 @@ const sections=[
 ['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
 ]}
 ]},
-{title:'Bluetooth Gamepad', bluetooth:true, note:'Enable BLE gamepad input. When enabled, PPM and UART RX inputs are disabled. Requires save + reboot.', fields:[
+{title:'Gamepad', bluetooth:true, note:'Enable BLE gamepad input. When enabled, PPM and UART RX inputs are disabled. Requires save + reboot.', fields:[
 {name:'bt_enabled',label:'Bluetooth mode',type:'select',options:[['0','Off'],['1','On']]},
-{name:'bt_ch_src_1',label:'CH1 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_1',label:'CH1 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_2',label:'CH2 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_2',label:'CH2 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_3',label:'CH3 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_3',label:'CH3 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_4',label:'CH4 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_4',label:'CH4 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_5',label:'CH5 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_5',label:'CH5 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_6',label:'CH6 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_6',label:'CH6 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_7',label:'CH7 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_7',label:'CH7 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_8',label:'CH8 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_8',label:'CH8 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_9',label:'CH9 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_9',label:'CH9 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_10',label:'CH10 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_10',label:'CH10 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_11',label:'CH11 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_11',label:'CH11 direction',type:'select',options:btInvOpts},
-{name:'bt_ch_src_12',label:'CH12 source',type:'select',options:btSrcOpts},
-{name:'bt_ch_inv_12',label:'CH12 direction',type:'select',options:btInvOpts}
+...Array.from({length:12},(_,i)=>({name:`bt_ch_src_${i+1}`,label:`CH${i+1} source`,type:'select',options:btSrcOpts,inline:{name:`bt_ch_inv_${i+1}`,label:'Inv'}}))
 ]},
 {title:'Servo Mapping', note:'Select which input channel drives each servo output and the PWM frequency.', fields:[
 {name:'servo_map_1',label:'Servo 1 source channel',type:'select',options:chOpts},
@@ -458,11 +443,10 @@ const sections=[
 {name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'select',options:[
 ['50','50 Hz'],['100','100 Hz'],['150','150 Hz'],['200','200 Hz'],['250','250 Hz'],['333','333 Hz'],['400','400 Hz']]}
 ]},
-{title:'CRSF Channel Merge', note:'Overlays PPM headtracker channels onto the CRSF RX stream at configurable output positions.', fields:[
+{title:'CRSF Channel Merge', note:'Overlays PPM input channels onto the CRSF RX stream at configurable output positions.', fields:[
 {name:'crsf_merge_enabled',label:'CRSF channel merge',type:'select',options:[['0','Off'],['1','On']]},
-{name:'crsf_merge_map_1',label:'PPM CH1 (Pan) \u2192 output',type:'select',options:chOpts},
-{name:'crsf_merge_map_2',label:'PPM CH2 (Roll) \u2192 output',type:'select',options:chOpts},
-{name:'crsf_merge_map_3',label:'PPM CH3 (Tilt) \u2192 output',type:'select',options:chOpts}
+{name:'crsf_merge_count',label:'PPM channels to merge',type:'select',options:[['1','1'],['2','2'],['3','3 (Headtracker)'],['4','4'],['5','5'],['6','6'],['7','7'],['8','8 (EdgeTX Trainer)']]},
+...Array.from({length:8},(_,i)=>({name:`crsf_merge_map_${i+1}`,label:`PPM CH${i+1} \u2192 output`,type:'select',options:chOpts}))
 ]},
 {title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
@@ -513,13 +497,14 @@ const summaryFields=[
   {label:'PWM Route', value:(s)=>s.pwm_route_label||'--', sub:()=>`Outputs S1/S2/S3`},
   {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
   {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
-  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mm1=readField('crsf_merge_map_1','10'),mm2=readField('crsf_merge_map_2','11'),mm3=readField('crsf_merge_map_3','12');return `MERGE CH${mm1}/CH${mm2}/CH${mm3}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}},
+  {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mc=parseInt(readField('crsf_merge_count','3'))||3;const chs=Array.from({length:mc},(_,i)=>'CH'+readField(`crsf_merge_map_${i+1}`,String(10+i)));return `MERGE ${chs.join('/')}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}},
   {label:'Bluetooth', value:(s)=>s.bt_state||'--', sub:(s)=>s.bt_device ? `${s.bt_device} ${formatHz(s.bt_report_hz)}` : (readField('bt_enabled','0')==='1' ? 'Scanning...' : 'Disabled')}
 ];
 
 function readField(name,fallback=''){
   const el=document.querySelector(`[name="${name}"]`);
-  return el ? el.value : fallback;
+  if(!el) return fallback;
+  return el.type==='checkbox' ? (el.checked ? '1' : '0') : el.value;
 }
 
 function showFlash(message,isError=false){
@@ -562,26 +547,24 @@ function renderSummary(status){
   });
 }
 
-function toggleAdvanced(){
+function showView(view){
   const card=document.querySelector('.card');
-  card.classList.remove('show-bluetooth');
+  card.classList.remove('show-advanced','show-bluetooth');
+  document.getElementById('adv-btn').classList.remove('active');
   document.getElementById('bt-btn').classList.remove('active');
-  card.classList.toggle('show-advanced');
-  const btn=document.getElementById('adv-btn');
-  const on=card.classList.contains('show-advanced');
-  btn.textContent=on ? 'Hide Advanced' : 'Show Advanced';
-  btn.classList.toggle('active',on);
+  document.getElementById('setup-btn').classList.remove('active');
+  if(view==='advanced'){card.classList.add('show-advanced');document.getElementById('adv-btn').classList.add('active')}
+  else if(view==='bluetooth'){card.classList.add('show-bluetooth');document.getElementById('bt-btn').classList.add('active')}
+  else{document.getElementById('setup-btn').classList.add('active')}
 }
-function toggleBluetooth(){
-  const card=document.querySelector('.card');
-  card.classList.remove('show-advanced');
-  const advBtn=document.getElementById('adv-btn');
-  advBtn.textContent='Show Advanced';
-  advBtn.classList.remove('active');
-  card.classList.toggle('show-bluetooth');
-  const btn=document.getElementById('bt-btn');
-  const on=card.classList.contains('show-bluetooth');
-  btn.classList.toggle('active',on);
+
+function markDirty(el){const row=el.closest('.row');if(row)row.classList.add('dirty');updateSaveBtn()}
+function clearAllDirty(){document.querySelectorAll('.row.dirty').forEach(el=>el.classList.remove('dirty'));updateSaveBtn()}
+function trackChange(el){el.addEventListener('change',()=>markDirty(el));if(el.type==='text'||el.type==='number')el.addEventListener('input',()=>markDirty(el))}
+function updateSaveBtn(){const btn=document.getElementById('save-btn');if(!btn)return;const cnt=document.querySelectorAll('.row.dirty').length;btn.textContent=cnt?`Apply + Save (${cnt})`:'Apply + Save';btn.disabled=!cnt}
+function updateMergeMapVisibility(){
+  const cnt=parseInt(document.querySelector('[name="crsf_merge_count"]')?.value)||3;
+  for(let i=1;i<=8;i++){const el=document.querySelector(`[name="crsf_merge_map_${i}"]`);if(el)el.closest('.row').style.display=i<=cnt?'':'none'}
 }
 
 function buildForm(){
@@ -619,7 +602,21 @@ function buildForm(){
           i.step='1';
         }
       }
-      row.appendChild(l); row.appendChild(i); grid.appendChild(row);
+      row.appendChild(l);
+      if(field.inline){
+        const wrap=document.createElement('div');wrap.className='row-inline';
+        wrap.appendChild(i);
+        const cb=document.createElement('input');cb.type='checkbox';cb.name=field.inline.name;cb.value='1';
+        const cbl=document.createElement('label');cbl.className='cb';cbl.appendChild(cb);cbl.appendChild(document.createTextNode(field.inline.label));
+        wrap.appendChild(cbl);
+        trackChange(cb);
+        row.appendChild(wrap);
+      }else{
+        row.appendChild(i);
+      }
+      trackChange(i);
+      if(field.name==='crsf_merge_count')i.addEventListener('change',updateMergeMapVisibility);
+      grid.appendChild(row);
     });
     block.appendChild(head);
     block.appendChild(grid);
@@ -635,8 +632,14 @@ async function loadSettings(){
     section.fields.forEach((field)=>{
       const el=document.querySelector(`[name="${field.name}"]`);
       if(el && s[field.name]!==undefined) el.value=s[field.name];
+      if(field.inline){
+        const cb=document.querySelector(`[name="${field.inline.name}"]`);
+        if(cb && s[field.inline.name]!==undefined) cb.checked=!!parseInt(s[field.inline.name]);
+      }
     });
   });
+  clearAllDirty();
+  updateMergeMapVisibility();
 }
 
 async function loadStatus(){
@@ -661,9 +664,12 @@ async function loadAll(){
   }
 }
 
-async function submitCfg(persist){
+async function submitCfg(){
   const fd=new FormData(document.getElementById('cfg'));
-  fd.set('persist', persist ? '1' : '0');
+  fd.set('persist', '1');
+  document.querySelectorAll('#cfg input[type=checkbox]').forEach(cb=>{
+    fd.set(cb.name, cb.checked ? '1' : '0');
+  });
   const body=new URLSearchParams(fd);
   const r=await fetch('/api/settings', {method:'POST', body});
   const text=await r.text();
@@ -730,7 +736,8 @@ struct RuntimeSettings {
   uint8_t outputModeDefault;
   uint8_t crsfOutputTarget;
   uint8_t crsfMergeEnabled;
-  uint8_t crsfMergeMap[kServoCount];
+  uint8_t crsfMergeMap[kMergeMaxChannels];
+  uint8_t crsfMergeCount;
   uint8_t wifiChannel;
   uint8_t wifiTxPower;  // raw wifi_power_t value (e.g. 78 = 19.5dBm)
 
@@ -1032,8 +1039,11 @@ void btBuildFieldIndex() {
     } else if (f.usagePage == 0x09 && gBtButtonFieldIdx < 0) {
       gBtButtonFieldIdx = static_cast<int8_t>(fi);
     } else if (f.usagePage == 0x02) {  // Simulation controls (triggers)
+      // Fill first available empty axis slot (prefer 3-5, then 2)
+      static const uint8_t simSlotOrder[] = {3, 4, 5, 2};
       for (uint8_t u = 0; u < f.usageCount; u++) {
-        for (uint8_t a = 4; a < 6; a++) {
+        for (uint8_t si = 0; si < 4; si++) {
+          uint8_t a = simSlotOrder[si];
           if (gBtAxisFieldIdx[a] < 0) {
             gBtAxisFieldIdx[a] = static_cast<int8_t>(fi);
             gBtAxisSubIdx[a] = static_cast<int8_t>(u);
@@ -1065,8 +1075,10 @@ void decodeBtReport(const uint8_t *data, size_t length) {
 
   if (gBtHatFieldIdx >= 0) {
     const BtHidField &f = gBtHidFields[gBtHatFieldIdx];
-    const uint16_t offset =
-        f.bitOffset + static_cast<uint16_t>(gBtHatSubIdx) * f.bitSize;
+    // Hat switch is always a single value (cnt=1); ignore subIdx and read
+    // directly at f.bitOffset to avoid reading past the field when the
+    // usage array contains non-data usages like Application Collection.
+    const uint16_t offset = f.bitOffset;
     int32_t hatVal = btExtractField(reportData, offset, f.bitSize, false);
     hatVal = hatVal - f.logMin;
     if (hatVal < 0 || hatVal > 7) hatVal = 8;
@@ -1466,22 +1478,23 @@ RuntimeSettings defaultSettings() {
   s.outputModeDefault = static_cast<uint8_t>(OutputMode::kCrsfTx12);
   s.crsfOutputTarget = 0;
   s.crsfMergeEnabled = 0;
-  s.crsfMergeMap[0] = 9;
-  s.crsfMergeMap[1] = 10;
-  s.crsfMergeMap[2] = 11;
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    s.crsfMergeMap[i] = i;
+  }
+  s.crsfMergeCount = 3;
   s.wifiChannel = 6;
   s.wifiTxPower = 78;  // WIFI_POWER_19_5dBm
 
   s.btEnabled = 0;
-  // Default AETR mapping: CH1=RStickX(2), CH2=RStickY(3), CH3=LStickY(1), CH4=LStickX(0)
-  // CH5=LTrigger(4), CH6=RTrigger(5), CH7=DpadX(6), CH8=DpadY(7)
-  // CH9-12=Buttons(8-11)
+  // Default AETR mapping for 8BitDo Ultimate 2C BLE HID:
+  //   Slot 0=L-Stick X, 1=L-Stick Y, 2=R-Stick X, 3=L-Trigger,
+  //   4=R-Trigger, 5=R-Stick Y, 6=D-Pad X, 7=D-Pad Y, 8-11=Buttons
   s.btChannelSource[0] = 2;   // CH1 -> R-Stick X (Aileron)
-  s.btChannelSource[1] = 3;   // CH2 -> R-Stick Y (Elevator)
+  s.btChannelSource[1] = 5;   // CH2 -> R-Stick Y (Elevator)
   s.btChannelSource[2] = 1;   // CH3 -> L-Stick Y (Throttle)
   s.btChannelSource[3] = 0;   // CH4 -> L-Stick X (Rudder)
-  s.btChannelSource[4] = 4;   // CH5 -> L-Trigger
-  s.btChannelSource[5] = 5;   // CH6 -> R-Trigger
+  s.btChannelSource[4] = 3;   // CH5 -> L-Trigger
+  s.btChannelSource[5] = 4;   // CH6 -> R-Trigger
   s.btChannelSource[6] = 6;   // CH7 -> D-Pad X
   s.btChannelSource[7] = 7;   // CH8 -> D-Pad Y
   s.btChannelSource[8] = 8;   // CH9 -> Button 1
@@ -2041,8 +2054,14 @@ void drawDebugRoutesScreen(uint32_t nowMs) {
     gDisplay.printf("PWM:%s src CRSF:%s", pwmRouteLabel(gActivePwmRoute), crsfHl);
     gDisplay.setCursor(0, 34);
     if (gSettings.crsfMergeEnabled) {
-      gDisplay.printf("Mrg CH%u/%u/%u", gSettings.crsfMergeMap[0] + 1, gSettings.crsfMergeMap[1] + 1,
-                      gSettings.crsfMergeMap[2] + 1);
+      if (gSettings.crsfMergeCount <= 3) {
+        gDisplay.printf("Mrg %uch", gSettings.crsfMergeCount);
+        for (uint8_t i = 0; i < gSettings.crsfMergeCount; ++i) {
+          gDisplay.printf("%s%u", i == 0 ? " " : "/", gSettings.crsfMergeMap[i] + 1);
+        }
+      } else {
+        gDisplay.printf("Mrg %uch", gSettings.crsfMergeCount);
+      }
     } else {
       gDisplay.print("Merge OFF");
     }
@@ -2229,9 +2248,12 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   ok &= (gPrefs.putUChar("omod", s.outputModeDefault) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("cotr", s.crsfOutputTarget) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("cme", s.crsfMergeEnabled) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm1", s.crsfMergeMap[0]) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm2", s.crsfMergeMap[1]) == sizeof(uint8_t));
-  ok &= (gPrefs.putUChar("mm3", s.crsfMergeMap[2]) == sizeof(uint8_t));
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "mm%u", i + 1);
+    ok &= (gPrefs.putUChar(key, s.crsfMergeMap[i]) == sizeof(uint8_t));
+  }
+  ok &= (gPrefs.putUChar("mmc", s.crsfMergeCount) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("wch", s.wifiChannel) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("wtx", s.wifiTxPower) == sizeof(uint8_t));
 
@@ -2252,7 +2274,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -2293,9 +2315,12 @@ RuntimeSettings loadSettingsFromNvs() {
   s.outputModeDefault = gPrefs.getUChar("omod", s.outputModeDefault);
   s.crsfOutputTarget = gPrefs.getUChar("cotr", s.crsfOutputTarget);
   s.crsfMergeEnabled = gPrefs.getUChar("cme", s.crsfMergeEnabled);
-  s.crsfMergeMap[0] = gPrefs.getUChar("mm1", s.crsfMergeMap[0]);
-  s.crsfMergeMap[1] = gPrefs.getUChar("mm2", s.crsfMergeMap[1]);
-  s.crsfMergeMap[2] = gPrefs.getUChar("mm3", s.crsfMergeMap[2]);
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char key[4];
+    snprintf(key, sizeof(key), "mm%u", i + 1);
+    s.crsfMergeMap[i] = gPrefs.getUChar(key, s.crsfMergeMap[i]);
+  }
+  s.crsfMergeCount = gPrefs.getUChar("mmc", s.crsfMergeCount);
   s.wifiChannel = gPrefs.getUChar("wch", s.wifiChannel);
   s.wifiTxPower = gPrefs.getUChar("wtx", s.wifiTxPower);
 
@@ -2405,17 +2430,25 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
     error = "crsf_merge_enabled must be 0 or 1";
     return false;
   }
-  for (uint8_t i = 0; i < kServoCount; ++i) {
+  if (s.crsfMergeCount < 1 || s.crsfMergeCount > kMergeMaxChannels) {
+    error = "crsf_merge_count must be 1..8";
+    return false;
+  }
+  for (uint8_t i = 0; i < kMergeMaxChannels; ++i) {
     if (s.crsfMergeMap[i] >= kCrsfChannelCount) {
       error = "crsf_merge_map values must be within 1..16";
       return false;
     }
   }
   if (s.crsfMergeEnabled) {
-    if (s.crsfMergeMap[0] == s.crsfMergeMap[1] || s.crsfMergeMap[0] == s.crsfMergeMap[2] ||
-        s.crsfMergeMap[1] == s.crsfMergeMap[2]) {
-      error = "crsf_merge_map entries must be unique when merge is enabled";
-      return false;
+    uint16_t seen = 0;
+    for (uint8_t i = 0; i < s.crsfMergeCount; ++i) {
+      uint16_t bit = static_cast<uint16_t>(1U << s.crsfMergeMap[i]);
+      if (seen & bit) {
+        error = "crsf_merge_map entries must be unique when merge is enabled";
+        return false;
+      }
+      seen |= bit;
     }
   }
   if (s.wifiChannel < 1 || s.wifiChannel > 11) {
@@ -2516,7 +2549,8 @@ void fillOutgoingCrsfChannelsMerged(uint16_t channels[kCrsfChannelCount]) {
   for (uint8_t i = 0; i < kCrsfChannelCount; ++i) {
     channels[i] = gCrsfRxChannels[i];
   }
-  const uint8_t count = (gLatestChannelCount < kServoCount) ? gLatestChannelCount : kServoCount;
+  const uint8_t mergeCount = gSettings.crsfMergeCount;
+  const uint8_t count = (gLatestChannelCount < mergeCount) ? gLatestChannelCount : mergeCount;
   for (uint8_t i = 0; i < count; ++i) {
     channels[gSettings.crsfMergeMap[i]] = mapPulseUsToCrsf(gLatestChannels[i]);
   }
@@ -3064,9 +3098,10 @@ String settingsToJson() {
   json += ",\"output_mode_default\":" + String(gSettings.outputModeDefault);
   json += ",\"crsf_output_target\":" + String(gSettings.crsfOutputTarget);
   json += ",\"crsf_merge_enabled\":" + String(gSettings.crsfMergeEnabled);
-  json += ",\"crsf_merge_map_1\":" + String(gSettings.crsfMergeMap[0] + 1);
-  json += ",\"crsf_merge_map_2\":" + String(gSettings.crsfMergeMap[1] + 1);
-  json += ",\"crsf_merge_map_3\":" + String(gSettings.crsfMergeMap[2] + 1);
+  json += ",\"crsf_merge_count\":" + String(gSettings.crsfMergeCount);
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    json += ",\"crsf_merge_map_" + String(i + 1) + "\":" + String(gSettings.crsfMergeMap[i] + 1);
+  }
   json += ",\"wifi_channel\":" + String(gSettings.wifiChannel);
   json += ",\"wifi_tx_power\":" + String(gSettings.wifiTxPower);
 
@@ -3326,26 +3361,23 @@ void handlePostSettings() {
   }
   candidate.crsfMergeEnabled = static_cast<uint8_t>(tmp);
 
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[0] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_1", 1, 16, tmp, error)) {
+  tmp = candidate.crsfMergeCount;
+  if (!parseUIntArgOptional("crsf_merge_count", 1, 8, tmp, error)) {
     gWeb.send(400, "text/plain", error);
     return;
   }
-  candidate.crsfMergeMap[0] = static_cast<uint8_t>(tmp - 1U);
+  candidate.crsfMergeCount = static_cast<uint8_t>(tmp);
 
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[1] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_2", 1, 16, tmp, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
+  for (uint8_t i = 0; i < kMergeMaxChannels; i++) {
+    char fieldName[20];
+    snprintf(fieldName, sizeof(fieldName), "crsf_merge_map_%u", i + 1);
+    tmp = static_cast<uint32_t>(candidate.crsfMergeMap[i] + 1U);
+    if (!parseUIntArgOptional(fieldName, 1, 16, tmp, error)) {
+      gWeb.send(400, "text/plain", error);
+      return;
+    }
+    candidate.crsfMergeMap[i] = static_cast<uint8_t>(tmp - 1U);
   }
-  candidate.crsfMergeMap[1] = static_cast<uint8_t>(tmp - 1U);
-
-  tmp = static_cast<uint32_t>(candidate.crsfMergeMap[2] + 1U);
-  if (!parseUIntArgOptional("crsf_merge_map_3", 1, 16, tmp, error)) {
-    gWeb.send(400, "text/plain", error);
-    return;
-  }
-  candidate.crsfMergeMap[2] = static_cast<uint8_t>(tmp - 1U);
 
   tmp = candidate.wifiChannel;
   if (!parseUIntArgOptional("wifi_channel", 1, 11, tmp, error)) {

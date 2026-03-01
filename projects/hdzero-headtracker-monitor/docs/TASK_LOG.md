@@ -605,6 +605,37 @@ Use this file as a running implementation log.
 - Validation:
   - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
 
+### 2026-02-28 - CRSF Channel Merge Expansion (3 → 8 Channels)
+
+- Expanded the CRSF merge feature from 3 hardcoded channels to a configurable 1–8 range.
+- New settings:
+  - `crsfMergeCount` (1–8, default 3): how many PPM channels to overlay onto CRSF RX
+  - `crsfMergeMap` expanded from 3 to 8 slots (default: 1:1 mapping CH1→CH1 through CH8→CH8)
+- NVS keys `mm1`..`mm8` + `mmc`; backward compatible with existing `mm1`/`mm2`/`mm3` keys
+- Settings version bumped from 7 to 8 (v7 accepted in migration chain)
+- Validation: bitmask-based uniqueness check replaces hardcoded 3-way comparison
+- WebUI: merge count dropdown dynamically shows/hides the relevant map fields
+
+### 2026-02-28 - WebUI Redesign
+
+- Replaced single "Show/Hide Advanced" toggle with three view buttons: **Gamepad**, **Advanced**, **Setup** (default)
+- Buttons are centered; Setup is the default view on page load
+- Moved action buttons (Apply + Save, Reset, Refresh) above the settings sections
+- Removed "Apply Live" — all changes now persist on save
+- Renamed "Bluetooth Gamepad" section to "Gamepad"
+- Gamepad channel invert: replaced 12 separate dropdown rows with inline "Inv" checkboxes next to each source dropdown (halves vertical space)
+- Dirty field highlighting: changed fields get an amber left-border and amber input border, reset on successful save
+- Save button shows pending change count (e.g. "Apply + Save (3)") and is disabled when clean
+- Renamed "Reset to defaults" to "Reset"
+
+### 2026-02-28 - BLE Gamepad Axis Mapping Fix (8BitDo Ultimate 2C)
+
+- Fixed hat switch (D-pad) decoding: the hat is always a single value (`cnt=1`); the old code used the usage-array sub-index to offset into the data, reading past the actual 4-bit hat field when the usage array contained non-data entries (e.g. Application Collection 0x05)
+- Fixed Simulation Controls trigger fallback: expanded candidate slots from 4–5 to include 2–3, so both Gas (L-Trigger) and Brake (R-Trigger) get mapped even when Z/Rz are already used by sticks
+- Corrected WebUI source labels to match 8BitDo Ultimate 2C BLE HID descriptor:
+  - Slot 2: "R-Stick X" (Z axis), Slot 3: "L-Trigger" (Gas via Sim Controls), Slot 4: "R-Trigger" (Brake), Slot 5: "R-Stick Y" (Rz axis)
+- Updated default AETR channel mapping to match corrected slots
+
 ### 2026-02-28 - Selectable CRSF Output Target
 
 - Added a web UI dropdown to select the CRSF output target:
