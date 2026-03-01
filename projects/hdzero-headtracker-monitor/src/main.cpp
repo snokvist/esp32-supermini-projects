@@ -1100,6 +1100,8 @@ void decodeBtReport(const uint8_t *data, size_t length) {
   }
 }
 
+// Forward declarations
+uint16_t mapPulseUsToCrsf(uint16_t pulseUs);
 // Forward declarations for BLE callbacks
 void btNotifyCallback(NimBLERemoteCharacteristic *, uint8_t *, size_t, bool);
 bool btStartScan(bool coex = false);
@@ -1927,12 +1929,26 @@ void drawCompactCrsfChannelRow(int16_t x, int16_t y, uint8_t channelIndex, bool 
 void drawHdzeroToCrsfScreen(uint32_t nowMs) {
   const uint16_t centerUs = static_cast<uint16_t>((gSettings.crsfMapMinUs + gSettings.crsfMapMaxUs) / 2U);
   drawHeaderBar("HDZ>CRSF", ppmHealthLabel(nowMs));
-  drawCenteredGraphRow(14, "PAN", gLatestChannelCount >= 1, gLatestChannelCount >= 1 ? gLatestChannels[0] : 0,
-                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
-  drawCenteredGraphRow(30, "ROL", gLatestChannelCount >= 2, gLatestChannelCount >= 2 ? gLatestChannels[1] : 0,
-                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
-  drawCenteredGraphRow(46, "TIL", gLatestChannelCount >= 3, gLatestChannelCount >= 3 ? gLatestChannels[2] : 0,
-                       gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
+  const uint8_t count = gLatestChannelCount;
+  if (count <= 3) {
+    static const char *labels3[] = {"PAN", "ROL", "TIL"};
+    for (uint8_t i = 0; i < 3; ++i) {
+      drawCenteredGraphRow(14 + i * 16, labels3[i], count > i, count > i ? gLatestChannels[i] : 0,
+                           gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
+    }
+  } else {
+    const uint8_t rows = (count + 1) / 2;
+    for (uint8_t i = 0; i < rows; ++i) {
+      const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
+      const bool hasL = i < count;
+      const uint8_t ri = static_cast<uint8_t>(i + rows);
+      const bool hasR = ri < count;
+      drawCompactCrsfChannelRow(0, y, i, hasL,
+                                hasL ? mapPulseUsToCrsf(gLatestChannels[i]) : kCrsfCenterValue);
+      drawCompactCrsfChannelRow(64, y, ri, hasR,
+                                hasR ? mapPulseUsToCrsf(gLatestChannels[ri]) : kCrsfCenterValue);
+    }
+  }
 }
 
 void drawUartToPwmScreen(uint32_t nowMs) {
