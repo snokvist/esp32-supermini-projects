@@ -660,6 +660,19 @@ async function loadSettings(){
   });
   clearAllDirty();
   updateMergeMapVisibility();
+  syncFallbackSliders();
+}
+
+function syncFallbackSliders(){
+  const lo=parseInt(document.querySelector('[name="servo_pulse_min_us"]')?.value)||500;
+  const hi=parseInt(document.querySelector('[name="servo_pulse_max_us"]')?.value)||2500;
+  document.querySelectorAll('[name^="servo_fallback_"]').forEach(sl=>{
+    sl.min=lo;sl.max=hi;
+    const v=parseInt(sl.value);
+    if(v<lo){sl.value=lo}else if(v>hi){sl.value=hi}
+    const sp=sl.closest('.range-wrap')?.querySelector('.range-val');
+    if(sp)sp.textContent=sl.value;
+  });
 }
 
 async function loadStatus(){
@@ -708,18 +721,22 @@ async function resetDefaults(){
 }
 
 buildForm();
+['servo_pulse_min_us','servo_pulse_max_us'].forEach(n=>{const el=document.querySelector(`[name="${n}"]`);if(el)el.addEventListener('input',syncFallbackSliders)});
 loadAll();
-setInterval(()=>{
+function pollStatus(){
   loadStatus().then(()=>{
     const fl=document.getElementById('flash');
     if(fl.textContent.startsWith('Status refresh failed')) showFlash('');
+    setTimeout(pollStatus,100);
   }).catch((err)=>{
     renderSummary({});
     document.getElementById('status-meta').textContent='Status unavailable';
     document.getElementById('status').textContent=`Error: ${err.message}`;
     showFlash(`Status refresh failed: ${err.message}`, true);
+    setTimeout(pollStatus,2000);
   });
-}, 3000);
+}
+setTimeout(pollStatus,500);
 </script>
 </body>
 </html>
@@ -1127,6 +1144,7 @@ uint16_t mapPulseUsToCrsf(uint16_t pulseUs);
 void btNotifyCallback(NimBLERemoteCharacteristic *, uint8_t *, size_t, bool);
 bool btStartScan(bool coex = false);
 void btConnectTask(void *);
+void btStop();
 
 class BtScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
   void onResult(NimBLEAdvertisedDevice *device) override {
@@ -1204,13 +1222,29 @@ bool btStartScan(bool coex) {
 // Runs BLE connect + GATT discovery.  Sets gBtClient on success.
 // Does NOT manage gBtState — caller (btUpdate via btConnectTask) handles that.
 bool btConnectInner() {
-  NimBLEClient *pClient = NimBLEDevice::createClient();
+  // Reuse an existing disconnected client if available, otherwise create new.
+  // Never delete clients after disconnect — NimBLE may still reference them
+  // internally, and calling deleteClient too soon causes a heap crash.
+  NimBLEClient *pClient = nullptr;
+  for (auto *c : *NimBLEDevice::getClientList()) {
+    if (!c->isConnected()) {
+      pClient = c;
+      break;
+    }
+  }
+  if (!pClient) {
+    if (NimBLEDevice::getClientListSize() >= NIMBLE_MAX_CONNECTIONS) {
+      gBtErrorCounter++;
+      gBtHasTarget = false;
+      return false;
+    }
+    pClient = NimBLEDevice::createClient();
+  }
   pClient->setClientCallbacks(&gBtClientCb);
   pClient->setConnectionParams(48, 80, 4, 600);  // 60-100ms interval, latency 4, 6s timeout
   pClient->setConnectTimeout(5);
 
   if (!pClient->connect(gBtTargetAddress)) {
-    NimBLEDevice::deleteClient(pClient);
     gBtErrorCounter++;
     gBtHasTarget = false;
     return false;
@@ -1223,7 +1257,6 @@ bool btConnectInner() {
       pClient->getService(NimBLEUUID(static_cast<uint16_t>(0x1812)));
   if (!pSvc) {
     pClient->disconnect();
-    NimBLEDevice::deleteClient(pClient);
     gBtClient = nullptr;
     gBtErrorCounter++;
     gBtHasTarget = false;
@@ -1272,7 +1305,6 @@ bool btConnectInner() {
 
   if (!subscribed) {
     pClient->disconnect();
-    NimBLEDevice::deleteClient(pClient);
     gBtClient = nullptr;
     gBtErrorCounter++;
     gBtHasTarget = false;
@@ -1289,6 +1321,35 @@ void btConnectTask(void *) {
   vTaskDelete(nullptr);
 }
 
+void btStop() {
+  if (!gBtInitialized) return;
+  // Wait for any in-progress connect task to complete before touching state.
+  if (gBtState == BtState::kConnecting && gBtConnectResult < 0) {
+    const uint32_t start = millis();
+    while (gBtConnectResult < 0 && (millis() - start) < 10000) {
+      delay(50);
+    }
+  }
+  if (gBtState == BtState::kScanning) {
+    NimBLEDevice::getScan()->stop();
+  }
+  if (gBtClient) {
+    if (gBtClient->isConnected()) {
+      gBtClient->disconnect();
+    }
+    gBtClient = nullptr;
+  }
+  gBtHasTarget = false;
+  gBtConnected = false;
+  gBtDisconnectPending = false;
+  gBtConnectResult = -1;
+  for (uint8_t i = 0; i < kBtSourceSlotCount; i++) {
+    gBtSourceSlots[i] = kCrsfCenterValue;
+  }
+  gBtState = BtState::kIdle;
+  gBtLastStateChangeMs = millis();
+}
+
 void btForget() {
   // Wait for any in-progress connect task to complete before touching state.
   if (gBtState == BtState::kConnecting && gBtConnectResult < 0) {
@@ -1301,7 +1362,6 @@ void btForget() {
     if (gBtClient->isConnected()) {
       gBtClient->disconnect();
     }
-    NimBLEDevice::deleteClient(gBtClient);
     gBtClient = nullptr;
   }
   NimBLEDevice::deleteAllBonds();
@@ -1331,10 +1391,9 @@ void btUpdate() {
     gBtDisconnectPending = false;
     gBtConnectResult = -1;  // cancel any stale connect result
     gBtReconnectCounter++;
-    if (gBtClient) {
-      NimBLEDevice::deleteClient(gBtClient);
-      gBtClient = nullptr;
-    }
+    // Do NOT deleteClient here — NimBLE may still be using it internally.
+    // The stale client is cleaned up in btConnectInner before reconnecting.
+    gBtClient = nullptr;
     gBtHasTarget = false;
     gBtState = BtState::kIdle;
     gBtLastStateChangeMs = nowMs;
@@ -1922,7 +1981,8 @@ void drawCenteredGraphRow(int16_t y, const char *label, bool hasValue, uint16_t 
   gDisplay.print("----");
 }
 
-void drawCompactCrsfChannelRow(int16_t x, int16_t y, uint8_t channelIndex, bool hasValue, uint16_t value) {
+void drawCompactCrsfChannelRow(int16_t x, int16_t y, uint8_t channelIndex, bool hasValue, uint16_t value,
+                               bool highlight = false) {
   constexpr int16_t kGraphXOffset = 14;
   constexpr int16_t kGraphWidth = 48;
   constexpr int16_t kGraphHeight = 7;
@@ -1930,9 +1990,15 @@ void drawCompactCrsfChannelRow(int16_t x, int16_t y, uint8_t channelIndex, bool 
   const int16_t centerX = graphX + (kGraphWidth / 2);
   const int16_t halfWidth = (kGraphWidth / 2) - 2;
 
-  gDisplay.setTextColor(SSD1306_WHITE);
+  if (highlight) {
+    gDisplay.fillRect(x, y - 1, 13, 9, SSD1306_WHITE);
+    gDisplay.setTextColor(SSD1306_BLACK);
+  } else {
+    gDisplay.setTextColor(SSD1306_WHITE);
+  }
   gDisplay.setCursor(x, y);
   gDisplay.printf("%02u", static_cast<unsigned>(channelIndex + 1));
+  gDisplay.setTextColor(SSD1306_WHITE);
   gDisplay.drawRect(graphX, y, kGraphWidth, kGraphHeight, SSD1306_WHITE);
   gDisplay.drawFastVLine(centerX, y + 1, kGraphHeight - 2, SSD1306_WHITE);
 
@@ -2006,10 +2072,16 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
     }
     drawHeaderBar("CRSF TX12", usbCrsfRouteLabel(usbRoute));
   }
+  // Build bitmask of channels mapped to PWM servo outputs
+  uint16_t pwmMask = 0;
+  for (uint8_t s = 0; s < kServoCount; ++s) {
+    pwmMask |= (1U << gSettings.servoMap[s]);
+  }
   for (uint8_t i = 0; i < 6; ++i) {
     const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
-    drawCompactCrsfChannelRow(0, y, i, hasValue, channels[i]);
-    drawCompactCrsfChannelRow(64, y, static_cast<uint8_t>(i + 6), hasValue, channels[i + 6]);
+    drawCompactCrsfChannelRow(0, y, i, hasValue, channels[i], pwmMask & (1U << i));
+    const uint8_t ri = static_cast<uint8_t>(i + 6);
+    drawCompactCrsfChannelRow(64, y, ri, hasValue, channels[ri], pwmMask & (1U << ri));
   }
 }
 
@@ -2377,6 +2449,14 @@ RuntimeSettings loadSettingsFromNvs() {
     s.btChannelSource[i] = gPrefs.getUChar(key, s.btChannelSource[i]);
   }
   s.btChannelInvert = gPrefs.getUShort("bti", s.btChannelInvert);
+
+  // Auto-clamp fallback values into the pulse range so upgrades from older
+  // schema versions (which lacked per-channel fallback) never trip validation.
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    if (s.servoFallbackUs[i] < s.servoPulseMinUs) s.servoFallbackUs[i] = s.servoPulseMinUs;
+    if (s.servoFallbackUs[i] > s.servoPulseMaxUs) s.servoFallbackUs[i] = s.servoPulseMaxUs;
+  }
+
   String validationError;
   if (!validateSettings(s, validationError)) {
     Serial.printf("WARN: Stored settings invalid (%s). Restoring defaults.\n", validationError.c_str());
@@ -3024,6 +3104,13 @@ void applySettings(const RuntimeSettings &newSettings) {
   gButtonPressStartMs = (gButtonStableState == LOW) ? millis() : 0;
   gButtonLongPressHandled = false;
 
+  // Handle BT enable/disable transitions
+  if (gSettings.btEnabled && !gBtInitialized) {
+    btInit();
+  } else if (!gSettings.btEnabled && gBtInitialized) {
+    btStop();
+  }
+
   if (!gSettings.btEnabled) {
     pinMode(gSettings.ppmInputPin, INPUT_PULLDOWN);
     attachInterrupt(digitalPinToInterrupt(gSettings.ppmInputPin), onPpmRise, RISING);
@@ -3522,6 +3609,9 @@ void handlePostSettings() {
   } else {
     requestedMode = static_cast<OutputMode>(requestedLiveMode);
   }
+  if (candidate.btEnabled && !isDebugOutputMode(requestedMode)) {
+    requestedMode = OutputMode::kCrsfTx12;
+  }
 
   const bool persist = gWeb.hasArg("persist") && (gWeb.arg("persist") == "1");
   bool persisted = false;
@@ -3532,13 +3622,6 @@ void handlePostSettings() {
   setNoCacheHeaders();
   if (persist && !persisted) {
     gWeb.send(500, "text/plain", "Applied live, but failed to save to NVS");
-    return;
-  }
-
-  if (btChanged && persist && persisted) {
-    gWeb.send(200, "text/plain", "Bluetooth mode changed. Saved. Rebooting...");
-    delay(250);
-    ESP.restart();
     return;
   }
 
@@ -3568,6 +3651,9 @@ void handleResetDefaults() {
     defaultDebugPage = 3;
   } else {
     defaultMode = static_cast<OutputMode>(defaults.outputModeDefault);
+  }
+  if (defaults.btEnabled && !isDebugOutputMode(defaultMode)) {
+    defaultMode = OutputMode::kCrsfTx12;
   }
   const bool saved = saveSettingsToNvs(gSettings);
   setNoCacheHeaders();
@@ -3786,6 +3872,10 @@ void setup() {
     } else {
       bootMode = static_cast<OutputMode>(gSettings.outputModeDefault);
     }
+    // BT mode: force 12ch screen unless debug mode is selected
+    if (gSettings.btEnabled && !isDebugOutputMode(bootMode)) {
+      bootMode = OutputMode::kCrsfTx12;
+    }
     setOutputMode(bootMode, "boot", true, bootDebugPage);
   }
   refreshOledStatus(millis());
@@ -3846,10 +3936,13 @@ void loop() {
     const uint32_t crsfRxPacketCounterBefore = gCrsfRxPacketCounter;
     processCrsfRxInput();
     updateCrsfRxRateWindow(nowMs);
-    const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
+    // Re-sample time after input processing so route health checks never see
+    // event timestamps newer than nowMs (unsigned wrap → false stale).
+    const uint32_t routeNowMs = millis();
+    const SourceHealth ppmHealth = ppmSourceHealth(routeNowMs);
     const bool crsfRxUpdated = (gCrsfRxPacketCounter != crsfRxPacketCounterBefore);
-    const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(nowMs);
-    const PwmRoute pwmRoute = updatePwmRoute(nowMs);
+    const UsbCrsfRoute usbRoute = updateUsbCrsfRoute(routeNowMs);
+    const PwmRoute pwmRoute = updatePwmRoute(routeNowMs);
     applyPwmRoute(pwmRoute);
     if (debugScreenActive && frameReady) {
       updatePpmMonitorWindow(nowMs, invalidPulses);
@@ -3863,7 +3956,7 @@ void loop() {
 
     if (gSettings.crsfMergeEnabled) {
       const bool ppmFresh = !isSourceStale(ppmHealth);
-      const bool crsfFresh = !isSourceStale(crsfSourceHealth(nowMs));
+      const bool crsfFresh = !isSourceStale(crsfSourceHealth(routeNowMs));
       if (ppmFresh && crsfFresh) {
         if (frameReady || crsfRxUpdated) {
           uint16_t channels[kCrsfChannelCount] = {0};
