@@ -122,7 +122,7 @@ constexpr uint16_t kBtScanWindowNormal   = 112;   // ~70% duty — leaves headro
 constexpr uint16_t kBtScanIntervalCoex   = 160;   // 100ms
 constexpr uint16_t kBtScanWindowCoex     = 80;    // ~50% duty
 
-constexpr uint16_t kSettingsVersion = 8;
+constexpr uint16_t kSettingsVersion = 9;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -296,6 +296,10 @@ input,select{
 .row.dirty{border-left:3px solid #e8a317;padding-left:6px}
 .row.dirty select,.row.dirty input:not([type=checkbox]){border-color:#e8a317;background:#fffbf0}
 .row-inline{display:flex;align-items:center;gap:8px}
+input[type=range]{-webkit-appearance:auto;padding:6px 0;border:none;background:transparent}
+.range-wrap{display:flex;align-items:center;gap:10px}
+.range-wrap input[type=range]{flex:1}
+.range-val{min-width:44px;text-align:right;font-size:13px;font-weight:600;color:var(--accent)}
 .row-inline select{flex:1}
 .row-inline label.cb{display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;margin:0}
 .row-inline input[type=checkbox]{width:auto;margin:0}
@@ -442,6 +446,11 @@ const sections=[
 {name:'servo_map_3',label:'Servo 3 source channel',type:'select',options:chOpts},
 {name:'servo_pwm_frequency_hz',label:'Servo PWM frequency Hz',type:'select',options:[
 ['50','50 Hz'],['100','100 Hz'],['150','150 Hz'],['200','200 Hz'],['250','250 Hz'],['333','333 Hz'],['400','400 Hz']]}
+]},
+{title:'Servo Fallback', note:'PWM output position when no signal source is active. Each servo can be set independently.', fields:[
+{name:'servo_fallback_1_us',label:'Servo 1 fallback (us)',type:'range',min:500,max:2500,step:10},
+{name:'servo_fallback_2_us',label:'Servo 2 fallback (us)',type:'range',min:500,max:2500,step:10},
+{name:'servo_fallback_3_us',label:'Servo 3 fallback (us)',type:'range',min:500,max:2500,step:10}
 ]},
 {title:'CRSF Channel Merge', note:'Overlays PPM input channels onto the CRSF RX stream at configurable output positions.', fields:[
 {name:'crsf_merge_enabled',label:'CRSF channel merge',type:'select',options:[['0','Off'],['1','On']]},
@@ -601,9 +610,20 @@ function buildForm(){
           i.inputMode='numeric';
           i.step='1';
         }
+        if(field.type==='range'){
+          i.min=field.min||500;
+          i.max=field.max||2500;
+          i.step=field.step||10;
+        }
       }
       row.appendChild(l);
-      if(field.inline){
+      if(field.type==='range'){
+        const wrap=document.createElement('div');wrap.className='range-wrap';
+        const val=document.createElement('span');val.className='range-val';val.textContent=i.value||i.min;
+        i.addEventListener('input',()=>{val.textContent=i.value;markDirty(i)});
+        wrap.appendChild(i);wrap.appendChild(val);
+        row.appendChild(wrap);
+      }else if(field.inline){
         const wrap=document.createElement('div');wrap.className='row-inline';
         wrap.appendChild(i);
         const cb=document.createElement('input');cb.type='checkbox';cb.name=field.inline.name;cb.value='1';
@@ -631,7 +651,7 @@ async function loadSettings(){
   sections.forEach((section)=>{
     section.fields.forEach((field)=>{
       const el=document.querySelector(`[name="${field.name}"]`);
-      if(el && s[field.name]!==undefined) el.value=s[field.name];
+      if(el && s[field.name]!==undefined){el.value=s[field.name];if(el.type==='range'){const rv=el.closest('.range-wrap');if(rv){const sp=rv.querySelector('.range-val');if(sp)sp.textContent=el.value}}}
       if(field.inline){
         const cb=document.querySelector(`[name="${field.inline.name}"]`);
         if(cb && s[field.inline.name]!==undefined) cb.checked=!!parseInt(s[field.inline.name]);
@@ -716,6 +736,7 @@ struct RuntimeSettings {
   uint8_t servoPwmPins[kServoCount];
   uint16_t servoPwmFrequencyHz;
   uint8_t servoMap[kServoCount];
+  uint16_t servoFallbackUs[kServoCount];  // per-channel no-signal fallback pulse
 
   uint16_t ppmMinChannelUs;
   uint16_t ppmMaxChannelUs;
@@ -1421,7 +1442,7 @@ OutputMode gOutputMode = OutputMode::kCrsfTx12;
 OutputMode gLastMainOutputMode = OutputMode::kCrsfTx12;
 uint8_t gDebugPage = 0;
 enum class UsbCrsfRoute : uint8_t { kNone = 0, kPpm = 1, kCrsfRx = 2 };
-enum class PwmRoute : uint8_t { kCenter = 0, kCrsfRx = 1, kPpm = 2 };
+enum class PwmRoute : uint8_t { kFallback = 0, kCrsfRx = 1, kPpm = 2 };
 enum class SourceHealth : uint8_t { kStale = 0, kTentative = 1, kHealthy = 2 };
 enum class DebugServiceState : uint8_t {
   kStopped = 0,
@@ -1436,7 +1457,7 @@ uint8_t gRecentPpmFrameCount = 0;
 uint32_t gRecentCrsfPacketMs[kRouteEventHistorySize] = {0};
 uint8_t gRecentCrsfPacketCount = 0;
 UsbCrsfRoute gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
-PwmRoute gActivePwmRoute = PwmRoute::kCenter;
+PwmRoute gActivePwmRoute = PwmRoute::kFallback;
 uint32_t gLastUsbRouteChangeMs = 0;
 uint32_t gLastPwmRouteChangeMs = 0;
 DebugServiceState gDebugServiceState = DebugServiceState::kStopped;
@@ -1460,6 +1481,9 @@ RuntimeSettings defaultSettings() {
   s.servoMap[0] = 0;
   s.servoMap[1] = 1;
   s.servoMap[2] = 2;
+  s.servoFallbackUs[0] = 1500;
+  s.servoFallbackUs[1] = 1500;
+  s.servoFallbackUs[2] = 1500;
 
   s.ppmMinChannelUs = 800;
   s.ppmMaxChannelUs = 2200;
@@ -1603,7 +1627,7 @@ bool canKeepPwmRoute(PwmRoute route, SourceHealth ppmHealth, SourceHealth crsfHe
       return !isSourceStale(crsfHealth);
     case PwmRoute::kPpm:
       return !isSourceStale(ppmHealth);
-    case PwmRoute::kCenter:
+    case PwmRoute::kFallback:
       return true;
   }
   return false;
@@ -1615,7 +1639,7 @@ bool canAcquirePwmRoute(PwmRoute route, SourceHealth ppmHealth, SourceHealth crs
       return crsfHealth == SourceHealth::kHealthy;
     case PwmRoute::kPpm:
       return ppmHealth == SourceHealth::kHealthy;
-    case PwmRoute::kCenter:
+    case PwmRoute::kFallback:
       return true;
   }
   return false;
@@ -1664,7 +1688,7 @@ PwmRoute selectDesiredPwmRoute(uint32_t nowMs, PwmRoute activeRoute) {
   if (canKeepPwmRoute(activeRoute, ppmHealth, crsfHealth)) {
     return activeRoute;
   }
-  return PwmRoute::kCenter;
+  return PwmRoute::kFallback;
 }
 
 UsbCrsfRoute updateUsbCrsfRoute(uint32_t nowMs) {
@@ -1691,7 +1715,7 @@ PwmRoute updatePwmRoute(uint32_t nowMs) {
   const SourceHealth ppmHealth = ppmSourceHealth(nowMs);
   const SourceHealth crsfHealth = crsfSourceHealth(nowMs);
   const bool activeRouteLostSignal = !canKeepPwmRoute(gActivePwmRoute, ppmHealth, crsfHealth);
-  if (activeRouteLostSignal || gActivePwmRoute == PwmRoute::kCenter ||
+  if (activeRouteLostSignal || gActivePwmRoute == PwmRoute::kFallback ||
       (nowMs - gLastPwmRouteChangeMs) >= kRouteSwitchHoldMs) {
     gActivePwmRoute = desiredRoute;
     gLastPwmRouteChangeMs = nowMs;
@@ -1727,8 +1751,8 @@ const char *usbCrsfRouteLabel(UsbCrsfRoute route) {
 
 const char *pwmRouteLabel(PwmRoute route) {
   switch (route) {
-    case PwmRoute::kCenter:
-      return "CENTER";
+    case PwmRoute::kFallback:
+      return "FALLBACK";
     case PwmRoute::kCrsfRx:
       return "CRSF";
     case PwmRoute::kPpm:
@@ -2244,6 +2268,9 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   ok &= (gPrefs.putUChar("sm1", s.servoMap[0]) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("sm2", s.servoMap[1]) == sizeof(uint8_t));
   ok &= (gPrefs.putUChar("sm3", s.servoMap[2]) == sizeof(uint8_t));
+  ok &= (gPrefs.putUShort("sf1", s.servoFallbackUs[0]) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("sf2", s.servoFallbackUs[1]) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("sf3", s.servoFallbackUs[2]) == sizeof(uint16_t));
 
   ok &= (gPrefs.putUShort("pmin", s.ppmMinChannelUs) == sizeof(uint16_t));
   ok &= (gPrefs.putUShort("pmax", s.ppmMaxChannelUs) == sizeof(uint16_t));
@@ -2290,7 +2317,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -2311,6 +2338,9 @@ RuntimeSettings loadSettingsFromNvs() {
   s.servoMap[0] = gPrefs.getUChar("sm1", s.servoMap[0]);
   s.servoMap[1] = gPrefs.getUChar("sm2", s.servoMap[1]);
   s.servoMap[2] = gPrefs.getUChar("sm3", s.servoMap[2]);
+  s.servoFallbackUs[0] = gPrefs.getUShort("sf1", s.servoFallbackUs[0]);
+  s.servoFallbackUs[1] = gPrefs.getUShort("sf2", s.servoFallbackUs[1]);
+  s.servoFallbackUs[2] = gPrefs.getUShort("sf3", s.servoFallbackUs[2]);
 
   s.ppmMinChannelUs = gPrefs.getUShort("pmin", s.ppmMinChannelUs);
   s.ppmMaxChannelUs = gPrefs.getUShort("pmax", s.ppmMaxChannelUs);
@@ -2423,6 +2453,12 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
   if (!(s.servoPulseMinUs < s.servoPulseCenterUs && s.servoPulseCenterUs < s.servoPulseMaxUs)) {
     error = "servo pulse range must satisfy min < center < max";
     return false;
+  }
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    if (s.servoFallbackUs[i] < s.servoPulseMinUs || s.servoFallbackUs[i] > s.servoPulseMaxUs) {
+      error = "servo fallback must be within servo pulse min/max range";
+      return false;
+    }
   }
   if (s.servoPwmFrequencyHz < 50 || s.servoPwmFrequencyHz > 400) {
     error = "servo_pwm_frequency_hz must be within 50..400";
@@ -2638,15 +2674,15 @@ void setupServoOutputs(const uint8_t oldPins[kServoCount]) {
   for (uint8_t i = 0; i < kServoCount; ++i) {
     ledcSetup(kServoPwmChannels[i], gSettings.servoPwmFrequencyHz, kServoPwmResolutionBits);
     ledcAttachPin(gSettings.servoPwmPins[i], kServoPwmChannels[i]);
-    writeServoPulseUs(i, gSettings.servoPulseCenterUs, true);
+    writeServoPulseUs(i, gSettings.servoFallbackUs[i], true);
     gAttachedServoPins[i] = gSettings.servoPwmPins[i];
   }
 }
 
 void applyPwmRoute(PwmRoute route) {
-  if (route == PwmRoute::kCenter) {
+  if (route == PwmRoute::kFallback) {
     for (uint8_t i = 0; i < kServoCount; ++i) {
-      writeServoPulseUs(i, gSettings.servoPulseCenterUs);
+      writeServoPulseUs(i, gSettings.servoFallbackUs[i]);
     }
     return;
   }
@@ -2661,7 +2697,7 @@ void applyPwmRoute(PwmRoute route) {
     if (sourceCh < gLatestChannelCount) {
       writeServoPulseUs(i, mapPpmToServoUs(gLatestChannels[sourceCh]));
     } else {
-      writeServoPulseUs(i, gSettings.servoPulseCenterUs);
+      writeServoPulseUs(i, gSettings.servoFallbackUs[i]);
     }
   }
 }
@@ -3035,7 +3071,7 @@ void applySettings(const RuntimeSettings &newSettings) {
   gRecentPpmFrameCount = 0;
   gRecentCrsfPacketCount = 0;
   gActiveUsbCrsfRoute = UsbCrsfRoute::kNone;
-  gActivePwmRoute = PwmRoute::kCenter;
+  gActivePwmRoute = PwmRoute::kFallback;
   gLastUsbRouteChangeMs = 0;
   gLastPwmRouteChangeMs = 0;
   gBtLastCrsfOutputMs = 0;
@@ -3087,6 +3123,9 @@ String settingsToJson() {
   json += ",\"servo_map_1\":" + String(gSettings.servoMap[0] + 1);
   json += ",\"servo_map_2\":" + String(gSettings.servoMap[1] + 1);
   json += ",\"servo_map_3\":" + String(gSettings.servoMap[2] + 1);
+  json += ",\"servo_fallback_1_us\":" + String(gSettings.servoFallbackUs[0]);
+  json += ",\"servo_fallback_2_us\":" + String(gSettings.servoFallbackUs[1]);
+  json += ",\"servo_fallback_3_us\":" + String(gSettings.servoFallbackUs[2]);
 
   json += ",\"ppm_min_channel_us\":" + String(gSettings.ppmMinChannelUs);
   json += ",\"ppm_max_channel_us\":" + String(gSettings.ppmMaxChannelUs);
@@ -3355,6 +3394,17 @@ void handlePostSettings() {
     return;
   }
   candidate.servoPulseMaxUs = static_cast<uint16_t>(tmp);
+
+  for (uint8_t i = 0; i < kServoCount; ++i) {
+    char fieldName[24];
+    snprintf(fieldName, sizeof(fieldName), "servo_fallback_%u_us", i + 1);
+    tmp = candidate.servoFallbackUs[i];
+    if (!parseUIntArgOptional(fieldName, 500, 2500, tmp, error)) {
+      gWeb.send(400, "text/plain", error);
+      return;
+    }
+    candidate.servoFallbackUs[i] = static_cast<uint16_t>(tmp);
+  }
 
   tmp = candidate.outputModeDefault;
   if (!parseUIntArgOptional("output_mode_default", 0, 5, tmp, error)) {
@@ -3767,7 +3817,7 @@ void loop() {
       }
     } else {
       for (uint8_t i = 0; i < kServoCount; ++i) {
-        writeServoPulseUs(i, gSettings.servoPulseCenterUs);
+        writeServoPulseUs(i, gSettings.servoFallbackUs[i]);
       }
     }
 
