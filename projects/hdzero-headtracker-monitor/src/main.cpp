@@ -128,7 +128,8 @@ constexpr uint16_t kBtScanWindowNormal   = 112;   // ~70% duty — leaves headro
 constexpr uint16_t kBtScanIntervalCoex   = 160;   // 100ms
 constexpr uint16_t kBtScanWindowCoex     = 80;    // ~50% duty
 
-constexpr uint16_t kSettingsVersion = 9;
+constexpr uint16_t kSettingsVersion = 10;
+constexpr uint8_t kDualColorYellowHeight = 16;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
 constexpr uint8_t kFirstHighSupportedGpio = 20;
@@ -440,6 +441,9 @@ const sections=[
 {name:'output_mode_default',label:'Boot default screen',type:'select',options:modeOpts},
 {name:'crsf_output_target',label:'CRSF output target',type:'select',options:[
 ['0','USB Serial'],['1','HW UART TX'],['2','Both (USB + HW UART)']
+]},
+{name:'oled_dual_color',label:'OLED screen type',type:'select',options:[
+['0','Mono (white)'],['1','Dual-color (yellow/blue)']
 ]}
 ]},
 {title:'Gamepad', bluetooth:true, note:'Enable BLE gamepad input. When enabled, PPM and UART RX inputs are disabled. Requires save + reboot.', fields:[
@@ -788,6 +792,8 @@ struct RuntimeSettings {
   uint8_t btEnabled;
   uint8_t btChannelSource[kMaxChannels];  // source slot (0-11) per CRSF ch
   uint16_t btChannelInvert;  // bitmask: bit N = invert ch N
+
+  uint8_t oledDualColor;  // 0=mono, 1=dual-color (yellow top 16px + blue)
 };
 
 volatile uint16_t gIsrPpmMinChannelUs = 800;
@@ -842,6 +848,10 @@ float gCrsfRxWindowHz = 0.0f;
 bool gHasCrsfRxFrame = false;
 Adafruit_SSD1306 gDisplay(kScreenWidth, kScreenHeight, &Wire, -1);
 bool gOledReady = false;
+uint8_t gHeaderHeight = 10;       // 10 for mono, 16 for dual-color (yellow zone)
+uint8_t gContentStartY = 14;      // first text/graph Y (includes gap from header)
+uint8_t gTextRowSpacing = 10;     // debug text line spacing
+uint8_t gChannelRowSpacing = 9;   // compact channel row spacing
 uint32_t gLastOledRefreshMs = 0;
 
 bool gDebugServicesWanted = false;
@@ -1593,6 +1603,7 @@ RuntimeSettings defaultSettings() {
   s.btChannelSource[10] = 10;  // CH11 -> Button 3
   s.btChannelSource[11] = 11;  // CH12 -> Button 4
   s.btChannelInvert = 0;
+  s.oledDualColor = 0;
   return s;
 }
 
@@ -1931,11 +1942,26 @@ int16_t centeredMarkerOffset(uint16_t value, uint16_t minValue, uint16_t centerV
   return offset;
 }
 
+void applyOledLayout(bool dualColor) {
+  if (dualColor) {
+    gHeaderHeight = kDualColorYellowHeight;
+    gContentStartY = kDualColorYellowHeight + 1;
+    gTextRowSpacing = 9;
+    gChannelRowSpacing = 8;
+  } else {
+    gHeaderHeight = 10;
+    gContentStartY = 14;
+    gTextRowSpacing = 10;
+    gChannelRowSpacing = 9;
+  }
+}
+
 void drawHeaderBar(const char *title, const char *status) {
-  gDisplay.fillRect(0, 0, kScreenWidth, 10, SSD1306_WHITE);
+  gDisplay.fillRect(0, 0, kScreenWidth, gHeaderHeight, SSD1306_WHITE);
   gDisplay.setTextSize(1);
   gDisplay.setTextColor(SSD1306_BLACK);
-  gDisplay.setCursor(2, 1);
+  const int16_t textY = (gHeaderHeight - 8) / 2;  // vertically center 8px font
+  gDisplay.setCursor(2, textY);
   gDisplay.print(title);
   if (status != nullptr) {
     int16_t x1 = 0;
@@ -1943,7 +1969,7 @@ void drawHeaderBar(const char *title, const char *status) {
     uint16_t width = 0;
     uint16_t height = 0;
     gDisplay.getTextBounds(status, 0, 0, &x1, &y1, &width, &height);
-    gDisplay.setCursor(kScreenWidth - static_cast<int16_t>(width) - 2, 1);
+    gDisplay.setCursor(kScreenWidth - static_cast<int16_t>(width) - 2, textY);
     gDisplay.print(status);
   }
 }
@@ -2029,13 +2055,13 @@ void drawHdzeroToCrsfScreen(uint32_t nowMs) {
   if (count <= 3) {
     static const char *labels3[] = {"PAN", "ROL", "TIL"};
     for (uint8_t i = 0; i < 3; ++i) {
-      drawCenteredGraphRow(14 + i * 16, labels3[i], count > i, count > i ? gLatestChannels[i] : 0,
+      drawCenteredGraphRow(gContentStartY + i * 16, labels3[i], count > i, count > i ? gLatestChannels[i] : 0,
                            gSettings.crsfMapMinUs, centerUs, gSettings.crsfMapMaxUs);
     }
   } else {
     const uint8_t rows = (count + 1) / 2;
     for (uint8_t i = 0; i < rows; ++i) {
-      const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
+      const int16_t y = gContentStartY + (static_cast<int16_t>(i) * gChannelRowSpacing);
       const bool hasL = i < count;
       const uint8_t ri = static_cast<uint8_t>(i + rows);
       const bool hasR = ri < count;
@@ -2049,11 +2075,11 @@ void drawHdzeroToCrsfScreen(uint32_t nowMs) {
 
 void drawUartToPwmScreen(uint32_t nowMs) {
   drawHeaderBar("UART>PWM", crsfRxHealthLabel(nowMs));
-  drawCenteredGraphRow(14, "S1", true, gServoPulseUs[0], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+  drawCenteredGraphRow(gContentStartY, "S1", true, gServoPulseUs[0], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                        gSettings.servoPulseMaxUs);
-  drawCenteredGraphRow(30, "S2", true, gServoPulseUs[1], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+  drawCenteredGraphRow(gContentStartY + 16, "S2", true, gServoPulseUs[1], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                        gSettings.servoPulseMaxUs);
-  drawCenteredGraphRow(46, "S3", true, gServoPulseUs[2], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
+  drawCenteredGraphRow(gContentStartY + 32, "S3", true, gServoPulseUs[2], gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                        gSettings.servoPulseMaxUs);
 }
 
@@ -2084,7 +2110,7 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
     pwmMask |= (1U << gSettings.servoMap[s]);
   }
   for (uint8_t i = 0; i < 6; ++i) {
-    const int16_t y = 11 + (static_cast<int16_t>(i) * 9);
+    const int16_t y = gContentStartY + (static_cast<int16_t>(i) * gChannelRowSpacing);
     drawCompactCrsfChannelRow(0, y, i, hasValue, channels[i], pwmMask & (1U << i));
     const uint8_t ri = static_cast<uint8_t>(i + 6);
     drawCompactCrsfChannelRow(64, y, ri, hasValue, channels[ri], pwmMask & (1U << ri));
@@ -2094,13 +2120,14 @@ void drawCrsfTx12Screen(uint32_t nowMs) {
 void drawDebugConfigScreen(uint32_t nowMs) {
   drawHeaderBar("DBG STATUS", debugApStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
-  gDisplay.setCursor(0, 14);
+  const int16_t s = gTextRowSpacing;
+  gDisplay.setCursor(0, gContentStartY);
   if (gSettings.btEnabled) {
     gDisplay.printf("BT %s %3.0fHz", btStateLabel(), static_cast<double>(gBtReportRateHz));
   } else {
     gDisplay.printf("PPM %s %4.1fHz win", ppmHealthLabel(nowMs), static_cast<double>(gLastMeasuredWindowHz));
   }
-  gDisplay.setCursor(0, 24);
+  gDisplay.setCursor(0, gContentStartY + s);
   if (gSettings.btEnabled) {
     if (gBtDeviceName[0]) {
       gDisplay.printf("Dev %s", gBtDeviceName);
@@ -2117,7 +2144,7 @@ void drawDebugConfigScreen(uint32_t nowMs) {
       gDisplay.print("CRSF NONE");
     }
   }
-  gDisplay.setCursor(0, 34);
+  gDisplay.setCursor(0, gContentStartY + s * 2);
   if (gApRunning) {
     gDisplay.printf("AP %u.%u.%u.%u", kApIp[0], kApIp[1], kApIp[2], kApIp[3]);
   } else if (!gDebugServicesWanted) {
@@ -2127,34 +2154,35 @@ void drawDebugConfigScreen(uint32_t nowMs) {
   } else {
     gDisplay.print("AP starting");
   }
-  gDisplay.setCursor(0, 44);
+  gDisplay.setCursor(0, gContentStartY + s * 3);
   if (gSettings.btEnabled) {
     gDisplay.printf("RSSI %d Err %lu", gBtRssi, static_cast<unsigned long>(gBtErrorCounter));
   } else {
     gDisplay.printf("PPM=%u S=%u,%u,%u", gSettings.ppmInputPin, gSettings.servoPwmPins[0], gSettings.servoPwmPins[1],
                     gSettings.servoPwmPins[2]);
   }
-  gDisplay.setCursor(0, 54);
+  gDisplay.setCursor(0, gContentStartY + s * 4);
   gDisplay.print("short >pg  long exit");
 }
 
 void drawDebugRoutesScreen(uint32_t nowMs) {
+  const int16_t s = gTextRowSpacing;
   if (gSettings.btEnabled) {
     drawHeaderBar("DBG BT MAP", btStateLabel());
     gDisplay.setTextColor(SSD1306_WHITE);
-    gDisplay.setCursor(0, 14);
+    gDisplay.setCursor(0, gContentStartY);
     gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
                     gSettings.servoMap[2] + 1);
-    gDisplay.setCursor(0, 24);
+    gDisplay.setCursor(0, gContentStartY + s);
     const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
     gDisplay.printf("CRSF out: %s", outTgt);
-    gDisplay.setCursor(0, 34);
+    gDisplay.setCursor(0, gContentStartY + s * 2);
     gDisplay.printf("Reconn %lu Err %lu",
                     static_cast<unsigned long>(gBtReconnectCounter),
                     static_cast<unsigned long>(gBtErrorCounter));
-    gDisplay.setCursor(0, 44);
+    gDisplay.setCursor(0, gContentStartY + s * 3);
     gDisplay.printf("Reports %lu", static_cast<unsigned long>(gBtReportCounter));
-    gDisplay.setCursor(0, 54);
+    gDisplay.setCursor(0, gContentStartY + s * 4);
     gDisplay.print("short >pg  long exit");
   } else {
     const char *mergeLabel = gSettings.crsfMergeEnabled ? "MRG ON" : "MRG OFF";
@@ -2166,11 +2194,11 @@ void drawDebugRoutesScreen(uint32_t nowMs) {
     const char *ppmHl = (ppmH == SourceHealth::kHealthy) ? "OK" : (ppmH == SourceHealth::kTentative) ? "??" : "--";
     const char *crsfHl = (crsfH == SourceHealth::kHealthy) ? "OK" : (crsfH == SourceHealth::kTentative) ? "??" : "--";
 
-    gDisplay.setCursor(0, 14);
+    gDisplay.setCursor(0, gContentStartY);
     gDisplay.printf("USB:%s src PPM:%s", usbCrsfRouteLabel(gActiveUsbCrsfRoute), ppmHl);
-    gDisplay.setCursor(0, 24);
+    gDisplay.setCursor(0, gContentStartY + s);
     gDisplay.printf("PWM:%s src CRSF:%s", pwmRouteLabel(gActivePwmRoute), crsfHl);
-    gDisplay.setCursor(0, 34);
+    gDisplay.setCursor(0, gContentStartY + s * 2);
     if (gSettings.crsfMergeEnabled) {
       if (gSettings.crsfMergeCount <= 3) {
         gDisplay.printf("Mrg %uch", gSettings.crsfMergeCount);
@@ -2183,10 +2211,10 @@ void drawDebugRoutesScreen(uint32_t nowMs) {
     } else {
       gDisplay.print("Merge OFF");
     }
-    gDisplay.setCursor(0, 44);
+    gDisplay.setCursor(0, gContentStartY + s * 3);
     gDisplay.printf("Map %u>S1 %u>S2 %u>S3", gSettings.servoMap[0] + 1, gSettings.servoMap[1] + 1,
                     gSettings.servoMap[2] + 1);
-    gDisplay.setCursor(0, 54);
+    gDisplay.setCursor(0, gContentStartY + s * 4);
     const char *outTgt = (gSettings.crsfOutputTarget == 2) ? "BOTH" : (gSettings.crsfOutputTarget == 1) ? "UART" : "USB";
     gDisplay.printf("Out:%s short>pg", outTgt);
   }
@@ -2195,7 +2223,8 @@ void drawDebugRoutesScreen(uint32_t nowMs) {
 void drawBluetoothDebugScreen(uint32_t nowMs) {
   drawHeaderBar("DBG BT", btStateLabel());
   gDisplay.setTextColor(SSD1306_WHITE);
-  gDisplay.setCursor(0, 14);
+  const int16_t s = gTextRowSpacing;
+  gDisplay.setCursor(0, gContentStartY);
   if (gBtConnected) {
     gDisplay.print("CONNECTED");
   } else if (gBtState == BtState::kScanning) {
@@ -2205,23 +2234,23 @@ void drawBluetoothDebugScreen(uint32_t nowMs) {
   } else {
     gDisplay.print(gSettings.btEnabled ? "WAITING" : "BT OFF");
   }
-  gDisplay.setCursor(0, 24);
+  gDisplay.setCursor(0, gContentStartY + s);
   if (gBtDeviceName[0]) {
     gDisplay.printf("Dev: %.16s", gBtDeviceName);
   } else {
     gDisplay.print("Dev: --");
   }
-  gDisplay.setCursor(0, 34);
+  gDisplay.setCursor(0, gContentStartY + s * 2);
   if (gBtConnected) {
     gDisplay.printf("RSSI:%d Rate:%.0fHz", gBtRssi,
                     static_cast<double>(gBtReportRateHz));
   } else {
     gDisplay.print("RSSI:-- Rate:--");
   }
-  gDisplay.setCursor(0, 44);
+  gDisplay.setCursor(0, gContentStartY + s * 3);
   gDisplay.printf("Fld:%u Rpts:%lu", gBtHidFieldCount,
                   static_cast<unsigned long>(gBtReportCounter));
-  gDisplay.setCursor(0, 54);
+  gDisplay.setCursor(0, gContentStartY + s * 4);
   gDisplay.printf("Err:%lu Recon:%lu",
                   static_cast<unsigned long>(gBtErrorCounter),
                   static_cast<unsigned long>(gBtReconnectCounter));
@@ -2233,30 +2262,31 @@ void drawDebugRangesScreen(uint32_t nowMs) {
   snprintf(freqBuf, sizeof(freqBuf), "%uHz", gSettings.servoPwmFrequencyHz);
   drawHeaderBar("DBG RANGES", freqBuf);
   gDisplay.setTextColor(SSD1306_WHITE);
+  const int16_t s = gTextRowSpacing;
 
-  gDisplay.setCursor(0, 14);
+  gDisplay.setCursor(0, gContentStartY);
   if (gSettings.btEnabled) {
     gDisplay.print("Mode: BLE Gamepad");
   } else {
     gDisplay.printf("PPM %u-%uus", gSettings.ppmMinChannelUs, gSettings.ppmMaxChannelUs);
   }
-  gDisplay.setCursor(0, 24);
+  gDisplay.setCursor(0, gContentStartY + s);
   if (gSettings.btEnabled) {
     gDisplay.printf("CRSF out baud %lu", static_cast<unsigned long>(gSettings.crsfUartBaud));
   } else {
     gDisplay.printf("CRSF map %u-%uus", gSettings.crsfMapMinUs, gSettings.crsfMapMaxUs);
   }
-  gDisplay.setCursor(0, 34);
+  gDisplay.setCursor(0, gContentStartY + s * 2);
   gDisplay.printf("Srv %u/%u/%uus", gSettings.servoPulseMinUs, gSettings.servoPulseCenterUs,
                   gSettings.servoPulseMaxUs);
-  gDisplay.setCursor(0, 44);
+  gDisplay.setCursor(0, gContentStartY + s * 3);
   if (gSettings.btEnabled) {
     gDisplay.printf("WiFi ch%u", gSettings.wifiChannel);
   } else {
     gDisplay.printf("T/O PPM:%lums CRSF:%lums", static_cast<unsigned long>(gSettings.signalTimeoutMs),
                     static_cast<unsigned long>(gSettings.crsfRxTimeoutMs));
   }
-  gDisplay.setCursor(0, 54);
+  gDisplay.setCursor(0, gContentStartY + s * 4);
   gDisplay.printf("UART %lu  WiFi ch%u", static_cast<unsigned long>(gSettings.crsfUartBaud), gSettings.wifiChannel);
 }
 
@@ -2292,9 +2322,12 @@ void refreshOledStatus(uint32_t nowMs) {
 }
 
 void initOled() {
+  applyOledLayout(gSettings.oledDualColor);
+
   const bool serialOk = (gSettings.crsfOutputTarget != 1);
   if (serialOk) {
-    Serial.printf("OLED I2C: SDA=%u, SCL=%u, addr=0x%02X\n", OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDRESS);
+    Serial.printf("OLED I2C: SDA=%u, SCL=%u, addr=0x%02X, %s\n", OLED_SDA_PIN, OLED_SCL_PIN, OLED_I2C_ADDRESS,
+                  gSettings.oledDualColor ? "dual-color" : "mono");
   }
   Wire.begin(OLED_SDA_PIN, OLED_SCL_PIN);
   Wire.setClock(kI2cClockHz);
@@ -2385,6 +2418,7 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
     ok &= (gPrefs.putUChar(key, s.btChannelSource[i]) == sizeof(uint8_t));
   }
   ok &= (gPrefs.putUShort("bti", s.btChannelInvert) == sizeof(uint16_t));
+  ok &= (gPrefs.putUChar("odc", s.oledDualColor) == sizeof(uint8_t));
   return ok;
 }
 
@@ -2395,7 +2429,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -2455,6 +2489,7 @@ RuntimeSettings loadSettingsFromNvs() {
     s.btChannelSource[i] = gPrefs.getUChar(key, s.btChannelSource[i]);
   }
   s.btChannelInvert = gPrefs.getUShort("bti", s.btChannelInvert);
+  s.oledDualColor = gPrefs.getUChar("odc", s.oledDualColor);
 
   // Auto-clamp fallback values into the pulse range so upgrades from older
   // schema versions (which lacked per-channel fallback) never trip validation.
@@ -2615,6 +2650,10 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
       error = "bt channel source must be 0..11";
       return false;
     }
+  }
+  if (s.oledDualColor > 1) {
+    error = "oled_dual_color must be 0 or 1";
+    return false;
   }
   return true;
 }
@@ -3088,6 +3127,8 @@ void applySettings(const RuntimeSettings &newSettings) {
 
   gSettings = newSettings;
 
+  applyOledLayout(gSettings.oledDualColor);
+
   noInterrupts();
   gIsrPpmMinChannelUs = gSettings.ppmMinChannelUs;
   gIsrPpmMaxChannelUs = gSettings.ppmMaxChannelUs;
@@ -3259,6 +3300,7 @@ String settingsToJson() {
     json += ",\"bt_ch_inv_" + String(i + 1) + "\":" +
             String((gSettings.btChannelInvert & (1U << i)) ? 1 : 0);
   }
+  json += ",\"oled_dual_color\":" + String(gSettings.oledDualColor);
   json += "}";
   return json;
 }
@@ -3580,6 +3622,13 @@ void handlePostSettings() {
       candidate.btChannelInvert &= ~(1U << i);
     }
   }
+
+  tmp = candidate.oledDualColor;
+  if (!parseUIntArgOptional("oled_dual_color", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.oledDualColor = static_cast<uint8_t>(tmp);
 
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   if (gOutputMode == OutputMode::kDebugConfig) {
