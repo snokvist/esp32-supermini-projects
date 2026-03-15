@@ -3223,6 +3223,7 @@ void handleModeButton() {
         (nowMs - gButtonLastReleaseMs) < kButtonDoublePressWindowMs) {
       gButtonDoublePressArmed = false;
       toggleBtEnabled();
+      gButtonLongPressHandled = true;  // after applySettings() resets it
     }
     return;
   }
