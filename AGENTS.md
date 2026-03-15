@@ -11,7 +11,7 @@ Monorepo of ESP32 PlatformIO/Arduino projects. Four active firmware projects und
 | `supermini-smoke` | ESP32-C3 SuperMini | LED blink smoke test |
 | `t-display-s3-screen-demo` | LilyGO T-Display-S3 | GFX library UI demo |
 | `t-display-s3-lvgl-demo` | LilyGO T-Display-S3 | LVGL 8.3.11 tabbed UI |
-| `hdzero-headtracker-monitor` | ESP32-C3 SuperMini | PPM→CRSF bridge, servo PWM, web config, NVS |
+| `waybeam-connect` | ESP32-C3 SuperMini | PPM→CRSF bridge, servo PWM, web config, NVS |
 
 Key paths: `scripts/` (setup, scaffolding), `templates/` (project starter), `docs/` (SETUP.md, WORKFLOW.md).
 

@@ -1,4 +1,4 @@
-# Task Log - hdzero-headtracker-monitor
+# Task Log - waybeam-connect
 
 Use this file as a running implementation log.
 
@@ -41,7 +41,7 @@ Use this file as a running implementation log.
 - Mapped decoded pulse widths to CRSF channel values (`~172..1811`, center `~992`) and filled missing channels with center.
 - Updated project docs for default CRSF behavior, runtime toggle workflow, and `GPIO9` boot/strapping caution.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-19 - Enhanced 5Hz Monitor Diagnostics
 
@@ -58,7 +58,7 @@ Use this file as a running implementation log.
 - Reset monitor-window counters when switching from CRSF mode into monitor mode so first stats line is meaningful.
 - Initialize monitor print timer on mode switch so first `win` rate sample is based on a real ~200ms window.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-19 - CRSF UART1 Mirror Output
 
@@ -76,7 +76,7 @@ Use this file as a running implementation log.
   - monitor mode remains 5Hz human-readable text
 - Updated README and hardware docs with UART wiring and USB-vs-UART behavior note.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
   - `pio run -t upload --upload-port /dev/ttyACM0` successful.
 
 ### 2026-02-20 - UART1 RX/TX Wiring + PWM Pin Plan
@@ -93,7 +93,7 @@ Use this file as a running implementation log.
   - note that RX is currently ignored
   - planned PWM pin assignments
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-20 - CRSF RX To 3x Servo PWM Outputs
 
@@ -113,7 +113,7 @@ Use this file as a running implementation log.
   - live servo pulse outputs
 - Updated README and hardware docs with servo wiring and runtime behavior details.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-20 - AP Web UI + Persistent Runtime Settings
 
@@ -140,7 +140,7 @@ Use this file as a running implementation log.
   - BOOT button mode toggle
   - monitor diagnostics
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
   - `pio run -t upload --upload-port /dev/ttyACM0` successful.
 
 ### 2026-02-20 - Web UI Reset To Defaults Action
@@ -152,7 +152,7 @@ Use this file as a running implementation log.
   - persists defaults to NVS
 - Added confirmation prompt client-side before reset action.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-20 - Web UI Sectioned Layout
 
@@ -165,7 +165,7 @@ Use this file as a running implementation log.
   - Timing / Health
 - Preserved all existing field names and API payload structure so backend behavior is unchanged.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
 
 ### 2026-02-20 - Production Hardening Pass
 
@@ -183,7 +183,7 @@ Use this file as a running implementation log.
   - improved Web UI fetch error handling and reporting
   - added SoftAP startup failure logging
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful.
+  - `pio run` (from `projects/waybeam-connect`) successful.
   - `pio run -t upload --upload-port /dev/ttyACM0` successful.
 
 ### 2026-02-27 - OLED Status Screen + Servo Pin Reassignment
@@ -210,7 +210,7 @@ Use this file as a running implementation log.
   - CRSF/servo/web features continue running
 - Updated README and hardware docs with the new default pin map and OLED verification steps.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -231,7 +231,7 @@ Use this file as a running implementation log.
   - `GPIO4` = SDA
   - `GPIO5` = SCL
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -261,7 +261,7 @@ Use this file as a running implementation log.
   - `output_mode_label`
 - Updated README and hardware docs to describe the new three-screen workflow.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -287,7 +287,7 @@ Use this file as a running implementation log.
   - added a live marker that cuts through the filled bar for faster visual reading
 - Updated README and hardware docs to describe the final button interaction model and simplified PPM reporting.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -305,7 +305,7 @@ Use this file as a running implementation log.
 - Kept serial debug output detailed; this change aligns the OLED debug line with the already-stable serial measurement.
 - Updated README and hardware notes to describe the windowed debug PPM display.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial output after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -322,7 +322,7 @@ Use this file as a running implementation log.
 - Reduced the OLED redraw cap from `20Hz` (`50ms`) to `10Hz` (`100ms`) to make the debug display less visually jumpy.
 - Kept the existing mode-switch redraw behavior instant by preserving the forced refresh on screen changes.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
 
 ### 2026-02-27 - PPM Window Cleanup + Servo Write Reduction
@@ -337,7 +337,7 @@ Use this file as a running implementation log.
   - stale CRSF no longer rewrites centered `1500us` outputs every loop
 - Moved the shared debug monitor sampling into a single helper so OLED, serial, and status reporting stay aligned.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -357,7 +357,7 @@ Use this file as a running implementation log.
   - status JSON PPM-rate fields use the stable windowed measurement
   - debug `age` describes latest frame age at each monitor sample
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -379,7 +379,7 @@ Use this file as a running implementation log.
   - live servo and channel values
 - Updated README and hardware notes to stop describing the removed PPM age field.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -413,7 +413,7 @@ Use this file as a running implementation log.
   - debug serial now reports `route usb=... pwm=...`
   - status JSON includes `usb_route_label` and `pwm_route_label`
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - serial boot confirmation after flash:
     - observed `Boot: hdzero-headtracker-monitor`
@@ -450,7 +450,7 @@ Use this file as a running implementation log.
   - forced the SoftAP to channel `6` instead of the Arduino default channel `1`
   - exposed the configured AP channel in status/logging so channel choice is visible during debug
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
   - live AP association still needs manual confirmation on-device
 
@@ -462,7 +462,7 @@ Use this file as a running implementation log.
 - Follow-up: older saved settings now preserve any explicit user-selected boot screen during the schema migration instead of forcing `CRSF TX12` onto every upgraded board.
 - Updated README and hardware notes to reflect the new boot order and short-press cycle.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
   - observed boot serial `Screen -> CRSF TX12 (boot)`
 
@@ -482,7 +482,7 @@ Use this file as a running implementation log.
   - `route usb=TEXT` now means USB CDC is intentionally reserved for readable debug text in `DEBUG CFG`
   - status JSON uses the same `usb_route_label`
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-27 - Web UI Bench Usability Pass
 
@@ -494,7 +494,7 @@ Use this file as a running implementation log.
   - replaced blocking browser alerts with inline success/error messages
 - Kept the page lightweight and self-contained in the existing PROGMEM HTML blob.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-28 - Window CRSF RX Rate Reporting
 
@@ -510,7 +510,7 @@ Use this file as a running implementation log.
 - Follow-up:
   - clamped the CRSF RX rate window to a minimum of `200ms` so lowering `monitor_print_interval_ms` cannot reintroduce unrealistic high-Hz spikes in the OLED/Web UI
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
 
 ### 2026-02-28 - AP Diagnostics Cleanup
@@ -520,7 +520,7 @@ Use this file as a running implementation log.
   - replaced the raw WiFi TX power enum print with a human-readable dBm label
 - Kept the existing open AP, fixed channel `6`, and `19.5dBm` TX power request unchanged.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
 
 ### 2026-02-28 - Keep USB CRSF Active In DEBUG CFG
@@ -536,7 +536,7 @@ Use this file as a running implementation log.
   - the repeating `No PPM frame detected yet...` message
 - Kept boot-time serial text intact so reset reason and startup pin/OLED state are still visible before runtime CRSF begins.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
 
 ### 2026-02-28 - Non-Blocking DEBUG CFG AP Bring-Up
@@ -551,7 +551,7 @@ Use this file as a running implementation log.
   - exposed AP state explicitly on OLED/status surfaces (`AP WAIT`, `AP RETRY`, `AP ON`)
   - added status JSON fields for retry tracking: `ap_state_label`, `ap_retry_count`, `ap_last_failure_ms`
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`)
+  - `pio run` (from `projects/waybeam-connect`)
   - `pio run -t upload --upload-port /dev/ttyACM0`
 
 ### 2026-02-27 - Smoothed CRSF Rate On Debug Screen
@@ -564,14 +564,14 @@ Use this file as a running implementation log.
 - Kept raw CRSF packet age in status/serial surfaces where it is still useful for deeper debugging.
 - Extended status JSON and Web UI summary with `crsf_rx_rate_hz`.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-27 - Web UI Health Labels
 
 - Updated the Web UI summary cards so PPM and CRSF RX now show `health / rate` instead of rate alone.
 - Added `ppm_health_label` and `crsf_rx_health_label` to the status JSON so the page reuses the same backend health logic as the OLED and debug serial output.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-27 - Clear Stale CRSF Rate Display
 
@@ -582,7 +582,7 @@ Use this file as a running implementation log.
   - `CRSF NONE` before any valid CRSF RC packet has been seen
 - Status JSON and Web UI summary now expose `crsf_rx_rate_hz` as a live-only value, reported as `0` when CRSF is stale or missing.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-27 - Add CRSF TX12 OLED Screen
 
@@ -603,7 +603,7 @@ Use this file as a running implementation log.
   - when USB CRSF output falls back to incoming CRSF RX, `CRSF TX12` shows the decoded CRSF RX channels
 - Extended the Web UI mode dropdowns and mode validation to include the new screen.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
 
 ### 2026-02-28 - CRSF Channel Merge Expansion (3 → 8 Channels)
 
@@ -653,7 +653,7 @@ Use this file as a running implementation log.
 - Removed dead `sendCrsfRxToUsbFrame()` function after inlining CRSF RX fallback routing into the main loop.
 - Updated README, HARDWARE.md, and Web UI to document the new output target options.
 - Validation:
-  - `pio run` (from `projects/hdzero-headtracker-monitor`) successful
+  - `pio run` (from `projects/waybeam-connect`) successful
   - `pio run -t upload --upload-port /dev/ttyACM0` successful
   - confirmed USB CRSF output at `420000` baud
   - confirmed HW UART TX output at `420000` baud on remote device

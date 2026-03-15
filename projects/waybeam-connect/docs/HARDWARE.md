@@ -1,4 +1,4 @@
-# Hardware Notes - hdzero-headtracker-monitor
+# Hardware Notes - waybeam-connect
 
 ## Target Board
 

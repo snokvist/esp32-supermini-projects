@@ -1,4 +1,4 @@
-# HDZero Headtracker Monitor — User Guide
+# waybeam-connect — User Guide
 
 *ESP32-C3 SuperMini firmware for HDZero BoxPro+ head-tracker bridging,
 CRSF output, servo PWM control, BLE gamepad input, and OLED status display.*
@@ -224,7 +224,7 @@ The head-tracker output uses a 2-contact TS (Tip-Sleeve) connection:
 
 ```bash
 # Navigate to the project directory
-cd esp32-supermini-projects/projects/hdzero-headtracker-monitor
+cd esp32-supermini-projects/projects/waybeam-connect
 
 # Build
 pio run
@@ -980,6 +980,6 @@ and may differ from defaults if settings have been changed.*
 
 ---
 
-**Project:** `esp32-supermini-projects/projects/hdzero-headtracker-monitor`
+**Project:** `esp32-supermini-projects/projects/waybeam-connect`
 **License:** Autod Personal Use License
 **Repository:** [waybeam-coordination](https://github.com/snokvist/waybeam-coordination)

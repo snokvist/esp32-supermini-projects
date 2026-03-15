@@ -1,10 +1,10 @@
-# hdzero-headtracker-monitor
+# waybeam-connect
 
 Decode HDZero BoxPro+ head-tracker PPM on an ESP32-C3 SuperMini, bridge it to CRSF/UART and PWM outputs, and present four BOOT-cycled OLED screens on a 0.96" I2C display.
 
 ## Project Summary
 
-- Name: `hdzero-headtracker-monitor`
+- Name: `waybeam-connect`
 - Board: `esp32-c3-devkitm-1`
 - PlatformIO environment: `esp32c3_supermini`
 - Function: decode PPM head-tracker stream, emit CRSF RC channels, parse incoming CRSF on UART1 for PWM servo outputs, and provide four OLED/UI runtime screens
