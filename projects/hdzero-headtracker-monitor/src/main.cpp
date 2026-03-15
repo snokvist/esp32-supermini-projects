@@ -104,6 +104,7 @@ constexpr uint8_t kScreenHeight = 64;
 constexpr uint32_t kI2cClockHz = 400000;
 constexpr uint32_t kOledRefreshIntervalMs = 100;
 constexpr uint32_t kButtonLongPressMs = 3000;
+constexpr uint32_t kButtonDoublePressWindowMs = 400;
 constexpr uint32_t kRouteAcquireWindowMs = 150;
 constexpr uint32_t kRouteSwitchHoldMs = 250;
 constexpr uint32_t kMinCrsfRxRateWindowMs = 200;
@@ -812,7 +813,8 @@ uint16_t gLatestChannels[kMaxChannels] = {0};
 uint8_t gLatestChannelCount = 0;
 uint32_t gLastFrameMs = 0;
 bool gLedState = false;
-uint32_t gLastLedToggleMs = 0;
+uint32_t gLedPatternStartMs = 0;
+uint8_t gLedPatternStep = 0;
 uint32_t gApStartRequestMs = 0;
 uint32_t gApStartedMs = 0;
 uint32_t gApLastStationJoinMs = 0;
@@ -824,6 +826,8 @@ bool gButtonStableState = HIGH;
 uint32_t gLastButtonChangeMs = 0;
 uint32_t gButtonPressStartMs = 0;
 bool gButtonLongPressHandled = false;
+uint32_t gButtonLastReleaseMs = 0;
+bool gButtonDoublePressArmed = false;
 uint32_t gLatestFrameCounter = 0;
 uint32_t gLatestInvalidPulseCounter = 0;
 uint32_t gLastMonitorFrameCounter = 0;
@@ -2356,6 +2360,8 @@ bool validateSettings(const RuntimeSettings &s, String &error);
 void startDebugServices();
 void stopDebugServices();
 void setOutputMode(OutputMode mode, const char *source, bool force = false, uint8_t debugPage = 0);
+void applySettings(const RuntimeSettings &newSettings);
+bool saveSettingsToNvs(const RuntimeSettings &s);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 
 bool saveSettingsToNvs(const RuntimeSettings &s) {
@@ -3036,18 +3042,125 @@ bool updatePpmMonitorWindow(uint32_t nowMs, uint32_t invalidPulses) {
   return true;
 }
 
+// --- LED blink pattern engine ---
+// Each pattern is a sequence of on/off durations (ms) terminated by 0.
+// The engine loops through the sequence, toggling the LED at each step.
+// Patterns are designed to be distinguishable without an OLED attached.
+//
+//   Idle (no input):      ___##_________________________##____   slow pulse
+//   PPM only:             ___####______________________####___   single heartbeat
+//   CRSF RX only:         ___##__##____________________##__##_   double pulse
+//   PPM + CRSF (normal):  ___####__####________________####___   long heartbeat
+//   Debug/Config mode:    _#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_   rapid blink
+//   BLE scanning:         ___##__##__##________________##__##_   triple pulse
+//   BLE connected:        ___####__##__________________####___   long-short
+//   BLE lost/reconnect:   ___##_##_##_##_______________##_##__   fast quad
+
+// Pattern: pairs of {ON_ms, OFF_ms, ...}, terminated by 0.
+// The engine alternates: step 0 = ON for duration[0], step 1 = OFF for duration[1], etc.
+static const uint16_t kLedPatternIdle[]       = { 80, 2500, 0 };
+static const uint16_t kLedPatternPpmOnly[]    = { 150, 2000, 0 };
+static const uint16_t kLedPatternCrsfOnly[]   = { 80, 120, 80, 2000, 0 };
+static const uint16_t kLedPatternBothActive[] = { 200, 1500, 0 };
+static const uint16_t kLedPatternDebug[]      = { 40, 40, 0 };
+static const uint16_t kLedPatternBtScan[]     = { 60, 100, 60, 100, 60, 2000, 0 };
+static const uint16_t kLedPatternBtLinked[]   = { 150, 120, 60, 2000, 0 };
+static const uint16_t kLedPatternBtLost[]     = { 60, 60, 60, 60, 60, 60, 60, 1200, 0 };
+
+enum class LedPattern : uint8_t {
+  kIdle = 0,
+  kPpmOnly,
+  kCrsfOnly,
+  kBothActive,
+  kDebug,
+  kBtScan,
+  kBtLinked,
+  kBtLost
+};
+
+static const uint16_t *ledPatternData(LedPattern p) {
+  switch (p) {
+    case LedPattern::kIdle:       return kLedPatternIdle;
+    case LedPattern::kPpmOnly:    return kLedPatternPpmOnly;
+    case LedPattern::kCrsfOnly:   return kLedPatternCrsfOnly;
+    case LedPattern::kBothActive: return kLedPatternBothActive;
+    case LedPattern::kDebug:      return kLedPatternDebug;
+    case LedPattern::kBtScan:     return kLedPatternBtScan;
+    case LedPattern::kBtLinked:   return kLedPatternBtLinked;
+    case LedPattern::kBtLost:     return kLedPatternBtLost;
+  }
+  return kLedPatternIdle;
+}
+
+static const char *ledPatternLabel(LedPattern p) {
+  switch (p) {
+    case LedPattern::kIdle:       return "idle";
+    case LedPattern::kPpmOnly:    return "ppm";
+    case LedPattern::kCrsfOnly:   return "crsf_rx";
+    case LedPattern::kBothActive: return "ppm+crsf";
+    case LedPattern::kDebug:      return "debug";
+    case LedPattern::kBtScan:     return "bt_scan";
+    case LedPattern::kBtLinked:   return "bt_linked";
+    case LedPattern::kBtLost:     return "bt_lost";
+  }
+  return "unknown";
+}
+
+LedPattern gCurrentLedPattern = LedPattern::kIdle;
+
+static LedPattern classifyLedPattern(uint32_t nowMs) {
+  if (isDebugOutputMode(gOutputMode)) {
+    return LedPattern::kDebug;
+  }
+  if (gSettings.btEnabled) {
+    if (gBtConnected && isBtFresh(nowMs)) {
+      return LedPattern::kBtLinked;
+    }
+    if (gBtState == BtState::kScanning || gBtState == BtState::kConnecting) {
+      return LedPattern::kBtScan;
+    }
+    if (gBtState == BtState::kSubscribed && !gBtConnected) {
+      return LedPattern::kBtLost;
+    }
+    return LedPattern::kIdle;
+  }
+  const bool ppmOk = isPpmFresh(nowMs, gSettings.signalTimeoutMs);
+  const bool crsfOk = gHasCrsfRxFrame && isCrsfFresh(nowMs, gSettings.crsfRxTimeoutMs);
+  if (ppmOk && crsfOk) return LedPattern::kBothActive;
+  if (ppmOk)           return LedPattern::kPpmOnly;
+  if (crsfOk)          return LedPattern::kCrsfOnly;
+  return LedPattern::kIdle;
+}
+
 void updateLed() {
   const uint32_t nowMs = millis();
-  const bool hasSignal = gSettings.btEnabled
-      ? gBtConnected
-      : (nowMs - gLastFrameMs) <= gSettings.signalTimeoutMs;
-  const uint32_t blinkPeriodMs = hasSignal ? 100 : 500;
-  if (nowMs - gLastLedToggleMs < blinkPeriodMs) {
+  const LedPattern desired = classifyLedPattern(nowMs);
+  if (desired != gCurrentLedPattern) {
+    gCurrentLedPattern = desired;
+    gLedPatternStep = 0;
+    gLedPatternStartMs = nowMs;
+    gLedState = true;
+    digitalWrite(gSettings.ledPin, HIGH);
     return;
   }
-  gLastLedToggleMs = nowMs;
-  gLedState = !gLedState;
-  digitalWrite(gSettings.ledPin, gLedState ? HIGH : LOW);
+  const uint16_t *pat = ledPatternData(gCurrentLedPattern);
+  const uint16_t stepDuration = pat[gLedPatternStep];
+  if (stepDuration == 0) {
+    gLedPatternStep = 0;
+    gLedPatternStartMs = nowMs;
+    gLedState = true;
+    digitalWrite(gSettings.ledPin, HIGH);
+    return;
+  }
+  if ((nowMs - gLedPatternStartMs) >= stepDuration) {
+    gLedPatternStartMs = nowMs;
+    gLedPatternStep++;
+    if (pat[gLedPatternStep] == 0) {
+      gLedPatternStep = 0;
+    }
+    gLedState = (gLedPatternStep % 2) == 0;
+    digitalWrite(gSettings.ledPin, gLedState ? HIGH : LOW);
+  }
 }
 
 void toggleOutputMode() {
@@ -3071,6 +3184,13 @@ void toggleOutputMode() {
   setOutputMode(nextMode, "button-short");
 }
 
+void toggleBtEnabled() {
+  RuntimeSettings updated = gSettings;
+  updated.btEnabled = updated.btEnabled ? 0 : 1;
+  applySettings(updated);
+  saveSettingsToNvs(gSettings);
+}
+
 void handleModeButton() {
   const uint32_t nowMs = millis();
   const bool rawState = digitalRead(gSettings.modeButtonPin);
@@ -3083,6 +3203,13 @@ void handleModeButton() {
     return;
   }
 
+  // Fire pending single-press if double-press window expired
+  if (gButtonDoublePressArmed && gButtonStableState == HIGH &&
+      (nowMs - gButtonLastReleaseMs) >= kButtonDoublePressWindowMs) {
+    gButtonDoublePressArmed = false;
+    toggleOutputMode();
+  }
+
   if (gButtonStableState == gButtonRawState) {
     return;
   }
@@ -3091,12 +3218,21 @@ void handleModeButton() {
   if (gButtonStableState == LOW) {
     gButtonPressStartMs = nowMs;
     gButtonLongPressHandled = false;
+    // Second press within window = double-press
+    if (gButtonDoublePressArmed &&
+        (nowMs - gButtonLastReleaseMs) < kButtonDoublePressWindowMs) {
+      gButtonDoublePressArmed = false;
+      toggleBtEnabled();
+    }
     return;
   }
 
+  // Button released
   const uint32_t pressDurationMs = nowMs - gButtonPressStartMs;
   if (!gButtonLongPressHandled && pressDurationMs < kButtonLongPressMs) {
-    toggleOutputMode();
+    // Arm double-press detection instead of firing single-press immediately
+    gButtonLastReleaseMs = nowMs;
+    gButtonDoublePressArmed = true;
   }
 }
 
@@ -3326,6 +3462,7 @@ String statusToJson() {
   json += ",\"bt_state\":\"" + String(gSettings.btEnabled ? btStateLabel() : "OFF") + "\"";
   json += ",\"bt_device\":\"" + String(gBtDeviceName) + "\"";
   json += ",\"bt_report_hz\":" + String(gBtReportRateHz, 1);
+  json += ",\"led_pattern\":\"" + String(ledPatternLabel(gCurrentLedPattern)) + "\"";
   json += "}";
   return json;
 }

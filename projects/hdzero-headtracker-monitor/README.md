@@ -107,11 +107,17 @@ pio device monitor -p /dev/ttyACM0 -b 420000
 ## Expected Behavior
 
 - Default mode sends binary CRSF RC frames only when a decoded PPM frame arrives (no idle spam when no PPM frame is present).
-- BOOT cycles four runtime screens:
+- BOOT button controls:
   - boot starts on `CRSF TX12`
   - short press cycles `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
+  - double press (`<400ms`) toggles BLE gamepad on/off (saved to flash immediately)
   - long press (`>3s`) enters `DEBUG CFG`
-  - short press in `DEBUG CFG` returns to the last graph screen
+  - short press in `DEBUG CFG` cycles debug sub-pages
+  - long press in `DEBUG CFG` returns to the last graph screen
+- LED blink patterns indicate system state (see `docs/USERGUIDE.md` section 7):
+  - idle: slow single pulse, PPM active: heartbeat, CRSF RX: double pulse
+  - debug mode: rapid blink, BLE scanning: triple pulse, BLE connected: long-short
+  - patterns work with or without an OLED attached
 - CRSF output target is selectable via web UI:
   - USB Serial (default): CRSF frames sent over USB CDC on all runtime screens
   - HW UART TX: CRSF frames sent over UART1 `GPIO21` TX instead, USB Serial completely silenced

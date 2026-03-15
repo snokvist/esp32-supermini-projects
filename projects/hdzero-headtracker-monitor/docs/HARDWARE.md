@@ -112,8 +112,11 @@ Bring-up checklist:
 4. Confirm default runtime behavior:
    - default screen is `CRSF TX12`
    - BOOT short press cycles `CRSF TX12` -> `HDZ>CRSF` -> `UART>PWM`
+   - BOOT double press (`<400ms`) toggles BLE gamepad on/off (saved to flash)
    - BOOT long press (`>3s`) enters `DEBUG CFG`
-   - short press in `DEBUG CFG` returns to the last graph screen
+   - short press in `DEBUG CFG` cycles debug sub-pages
+   - long press in `DEBUG CFG` returns to the last graph screen
+   - LED blink pattern reflects current state (idle/PPM/CRSF/debug/BLE)
    - fresh/healthy PPM is emitted on the selected CRSF output target (USB Serial, HW UART TX, or Both)
    - if PPM loses health, output falls back to healthy CRSF RX on the selected target
    - PWM outputs run at `100Hz` on `GPIO0/1/2`, normally from incoming CRSF CH1/CH2/CH3
