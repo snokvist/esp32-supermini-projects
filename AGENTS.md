@@ -123,3 +123,12 @@ When something goes wrong — a build fails unexpectedly, a setting doesn't pers
 3. **Verify the fix** through the full verification loop.
 
 This file is a living document. Update it when workflows, tooling, or conventions change.
+
+## Codex delegation
+
+OpenAI Codex is available via the `codex@openai-codex` Claude Code plugin for
+verification and token offload. Use `/codex:review` or
+`/codex:adversarial-review` for second-opinion passes, and `/codex:rescue`
+(optionally `--background`) to delegate heavy reads, full-repo greps, or
+self-contained investigations. The workflow spec lives in the coordination
+repo at `docs/codex-workflow.md`.
