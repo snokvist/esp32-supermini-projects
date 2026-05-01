@@ -46,7 +46,7 @@ static void DrawHeader(const OledLinkStats &s)
   // Free heap (KB) right-justified on the same line
   uint32_t kb = ESP.getFreeHeap() / 1024;
   char buf[16];
-  snprintf(buf, sizeof(buf), "%uKB", (unsigned)kb);
+  snprintf(buf, sizeof(buf), "%luKB", (unsigned long)kb);
   int16_t x1, y1; uint16_t w, h;
   gDisplay.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
   gDisplay.setCursor(kScreenW - (int16_t)w - 2, textY);

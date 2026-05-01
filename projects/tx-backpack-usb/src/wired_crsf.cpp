@@ -245,7 +245,7 @@ void WiredCrsfPoll()
 bool WiredCrsfTakeStaged(size_t *len, uint8_t *out, size_t out_max)
 {
   if (!gStagePending) return false;
-  if (gStageLen > out_max) { gStagePending = false; return false; }
+  if (gStageLen > out_max) { gStats.rx_oversize_dropped++; gStagePending = false; return false; }
   memcpy(out, gStageBuf, gStageLen);
   *len = gStageLen;
   gStagePending = false;

@@ -221,11 +221,6 @@ static struct {
   {"/mui.js", "text/javascript", (uint8_t *)MUI_JS, sizeof(MUI_JS)},
   {"/scan.js", "text/javascript", (uint8_t *)SCAN_JS, sizeof(SCAN_JS)},
   {"/logo.svg", "image/svg+xml", (uint8_t *)LOGO_SVG, sizeof(LOGO_SVG)},
-#if defined(HAS_HEADTRACKING) || defined(SUPPORT_HEADTRACKING)
-  {"/airplane.obj", "text/plain", (uint8_t *)PLANE_OBJ, sizeof(PLANE_OBJ)},
-  {"/texture.gif", "image/gif", (uint8_t *)TEXTURE_GIF, sizeof(TEXTURE_GIF)},
-  {"/p5.js", "text/javascript", (uint8_t *)P5_JS, sizeof(P5_JS)},
-#endif
 };
 
 #if defined(HAS_HEADTRACKING) || defined(SUPPORT_HEADTRACKING)
@@ -571,7 +566,7 @@ static void WebMAVLinkHandler(AsyncWebServerRequest *request)
 {
   mavlink_stats_t* stats = mavlink.GetMavlinkStats();
   
-  DynamicJsonDocument json(1024);
+  JsonDocument json;
   json["enabled"] = wifiService == WIFI_SERVICE_MAVLINK_TX;
   json["counters"]["packets_down"] = stats->packets_downlink;
   json["counters"]["packets_up"] = stats->packets_uplink;
