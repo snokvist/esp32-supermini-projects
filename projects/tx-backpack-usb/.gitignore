@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+user_defines.txt
+target_name.json
+include/WebContent.h
+__pycache__/
+*.pyc

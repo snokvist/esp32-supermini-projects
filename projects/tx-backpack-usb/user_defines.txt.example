@@ -1,0 +1,16 @@
+# Copy this file to user_defines.txt and edit. user_defines.txt is .gitignored.
+#
+# At minimum set MY_BINDING_PHRASE — it is hashed into the 6-byte UID that
+# pairs this backpack with an ELRS TX module. Pick the same phrase as the TX
+# module is bound with, or leave commented out for the upstream default.
+
+#-DMY_BINDING_PHRASE="my-secret-phrase"
+
+# Optional: WiFi credentials for the OTA update web UI. If unset, the device
+# falls back to AP mode on first boot.
+#-DHOME_WIFI_SSID=""
+#-DHOME_WIFI_PASSWORD=""
+
+# Optional debug logging. The DEBUG_LOG_VERBOSE form is spammy.
+#-DDEBUG_LOG
+#-DDEBUG_LOG_VERBOSE
