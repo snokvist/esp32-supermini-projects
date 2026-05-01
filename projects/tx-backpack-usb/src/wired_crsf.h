@@ -32,6 +32,7 @@ struct WiredCrsfStats
 {
   uint32_t rx_packets;
   uint32_t rx_invalid;
+  uint32_t rx_oversize_dropped;
   uint32_t tx_packets;
   uint32_t tx_dropped;
   uint32_t last_rx_ms;

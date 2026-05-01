@@ -57,9 +57,6 @@ def build_common(env, mainfile):
             build_html("elrs.css", "ELRS_CSS", out, env)
             build_html("mui.css", "MUI_CSS", out, env)
             build_html("logo.svg", "LOGO_SVG", out, env)
-            build_html("p5.js", "P5_JS", out, env)
-            build_html("airplane.obj", "PLANE_OBJ", out, env)
-            build_binary("texture.gif", "TEXTURE_GIF", out, env)
     finally:
         if not os.path.exists("include/WebContent.h") or not filecmp.cmp(path, "include/WebContent.h"):
             shutil.copyfile(path, "include/WebContent.h")
