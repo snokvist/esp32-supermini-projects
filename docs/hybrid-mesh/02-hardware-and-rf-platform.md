@@ -1,131 +1,166 @@
 # 02 — Hardware & RF Platform
 
-The physical reality the architecture must respect. All current figures are
-datasheet-derived and **must be bench-verified** in Phase 0 — they are design
-inputs, not measurements.
+The physical reality the architecture must respect. The first target is the
+**RadioMaster XR2 Nano**, which is **ESP32-C3 + Semtech LR1121** — the exact
+chipset this program assumes — but configured as a **2.4 GHz-only** board. All
+current figures are datasheet-derived and **must be bench-verified** in Phase 0.
 
-## Node block diagram
+## Target device: RadioMaster XR2 Nano
+
+| Spec | Value | Consequence |
+|------|-------|-------------|
+| MCU | ESP32-C3 | matches the repo's whole baseline; WiFi+BLE 2.4 GHz; USB-CDC via the C3 |
+| Radio | Semtech LR1121 | multi-band silicon, but on this board only the 2.4 GHz path is wired |
+| Frequency | 2.400–2.479 GHz **only** | **no sub-GHz** — the long-range plane is 2.4 GHz LoRa |
+| Antenna | integrated 2.4 GHz tower antenna | fixed, tiny → modest range; no external antenna on stock board |
+| Size / weight | 16 × 12 × 6 mm / 0.8 g | genuinely wearable/drone-class |
+| Power | 5 V working voltage (onboard reg) | LiPo node needs a boost to 5 V *or* a tap into the 3.3 V rail |
+| IO | CRSF (TX/RX) + a secondary UART | **very few pins** — GNSS competes with CRSF (see below) |
+| Telemetry power | 10 mW (10 dBm) | the stock 2.4-LoRa TX power; LR1121 can do up to +13 dBm |
+| Firmware | ExpressLRS v3.5.1 preinstalled | **open-source ELRS already drives the LR1121 here** |
+
+### Why the XR2 is a good first target
+
+- **Chipset is exactly right** (ESP32-C3 + LR1121); no custom PCB or wiring to
+  bring up a radio.
+- **ELRS is open source** and runs on this board, so we have a known-good pin
+  map, SPI setup, LR1121 driver, and PA/frequency config to crib from for
+  Phase 0 — a huge head start.
+- **It forces the core research** (two 2.4 GHz radios coexisting) immediately.
+- Tiny, cheap, battery-friendly, and already in hand.
+
+### What the XR2 *cannot* do
+
+- **No sub-GHz** → can't demonstrate the multi-km sub-GHz long-range advantage.
+  That needs a sub-GHz-antenna'd LR1121 board or a BAYCK dual-band "Gemini" RX
+  later.
+- **No clean dual-band concurrency** → both planes share 2.4 GHz; strict
+  time-division is mandatory.
+- **Limited IO** → hard to attach many peripherals; GNSS uses the spare UART.
+
+## Node block diagram (XR2, single-band)
 
 ```
                 +--------------------------------------------------+
-                |                  ESP32-C3 SuperMini              |
+                |              ESP32-C3 (on XR2 Nano)              |
                 |   RISC-V @160 MHz · WiFi+BLE 2.4 GHz · 400 KB SR |
                 |                                                  |
    2.4 GHz <----+ [WiFi/BLE radio] ESP-NOW (local plane) + BLE GW |
-                |                                                  |
-                |   SPI  ----------------+    UART ----------+     |
-                +-------------+----------+--------+----------+-----+
+   (its own     |                                                  |
+    antenna)    |   SPI ----------------+   UART(spare) ----+      |
+                +-------------+---------+---------+---------+------+
                               |                   |
-                       +------v------+     +------v------+
-                       |   LR1121    |     |  GNSS (u-blox|
-                       | LoRa multi- |     |  MAX-M10S)   |
-                       | band radio  |     |  ~25 mA trk  |
-                       +------+------+     +-------------+
+                       +------v------+     +------v-------+
+                       |   LR1121    |     |  GNSS         |
+                       | 2.4 GHz     |     |  (u-blox      |
+                       | LoRa only   |     |   MAX-M10S)   |
+                       +------+------+     +--------------+
                               |
-              sub-GHz 868/915 |  (and optional 2.4 GHz LoRa)
+                  2.4 GHz LoRa | (integrated 2.4 GHz tower antenna)
                               v
-                    long-range plane
+                    long-range plane (2.4 GHz)
 ```
 
-Power: single LiPo (250–2000 mAh) → 3.3 V regulator. Battery sense on an ADC
-pin. Optional load switch on the GNSS rail so it can be fully powered down.
+**Two 2.4 GHz emitters on a 0.8 g board** (C3 WiFi/BLE + LR1121 2.4-LoRa), each
+with its own antenna millimetres apart. This is the defining hardware constraint:
+they desensitize each other if active simultaneously → **time-division only**
+([06](06-rf-coexistence.md)).
 
-## ESP32-C3 SuperMini
+## ESP32-C3 (host + local radio)
 
-- Single-core RISC-V @160 MHz, 400 KB SRAM, integrated 2.4 GHz WiFi (b/g/n) and
-  BLE 5.0. USB-CDC on boot per repo convention
-  (`-DARDUINO_USB_CDC_ON_BOOT=1 -DARDUINO_USB_MODE=1`).
-- **One 2.4 GHz radio, time-shared** between WiFi (ESP-NOW) and BLE. They cannot
-  both be truly simultaneous; the stack coexists by time-slicing. This is a
-  scheduling constraint, not a feature — see [06](06-rf-coexistence.md).
-- Pin budget is tight on the SuperMini. SPI for LR1121 (SCK/MISO/MOSI/NSS) +
-  BUSY + DIO/IRQ + RESET = ~7 pins; GNSS UART = 2 pins; battery ADC = 1; LED.
-  A concrete pin map is a Phase-0 deliverable in `docs/HARDWARE.md`.
+- Single-core RISC-V @160 MHz, 400 KB SRAM, 2.4 GHz WiFi (b/g/n) + BLE 5.0.
+- **One 2.4 GHz WiFi/BLE radio, time-shared** between ESP-NOW and BLE — and now
+  also time-shared (at the schedule level) with the LR1121's 2.4-LoRa to avoid
+  mutual desense.
+- USB-CDC per repo convention (`-DARDUINO_USB_CDC_ON_BOOT=1 -DARDUINO_USB_MODE=1`)
+  — on the XR2, USB is via the C3; serial logging works once reflashed.
 
-### ESP32-C3 current (datasheet-class estimates)
+### ESP32-C3 current (estimates)
 
 | State | Current | Note |
 |-------|---------|------|
-| Deep sleep (RTC only) | ~5 µA | RAM not retained unless configured |
-| Light sleep | ~130 µA | fast (<1 ms) wake, RAM retained |
-| Modem-sleep (CPU on, RF off) | ~20–30 mA | depends on CPU freq |
-| WiFi RX (listening) | ~95–100 mA | **the power villain** |
+| Deep sleep | ~5 µA | |
+| Light sleep (wake on LR1121 IRQ) | ~130 µA | RAM retained, <1 ms wake |
+| Modem-sleep (CPU on, RF off) | ~20–30 mA | |
+| WiFi RX (ESP-NOW window) | ~95–100 mA | **the power villain** |
 | WiFi TX | ~180–240 mA peak | brief bursts |
-| BLE TX/RX | ~tens of mA | advertising can be duty-cycled cheaply |
+| BLE TX/RX | ~tens of mA | advertising duty-cycles cheaply |
 
-Takeaway: **keeping the WiFi radio in RX is the dominant drain.** ESP-NOW must
-be used in scheduled bursts, never continuous listen, on a battery node.
+## LR1121 (long-range radio, 2.4 GHz on this board)
 
-## LR1121 long-range radio
+- Semtech 3rd-gen ultra-low-power LoRa transceiver. Silicon supports 150–960 MHz,
+  2.4 GHz, S/L-band — **but the XR2 only wires 2.4 GHz**.
+- **2.4 GHz LoRa**: SF5–SF12, bandwidths 203 / 406 / 812 / 1625 kHz (range vs
+  airtime knob). Also supports (G)FSK and **FLRC** (fast, ELRS uses it) — FLRC is
+  a possible medium-range/high-rate option but ESP-NOW already covers fast local.
+- 2.4 GHz PA: up to **+13 dBm** (XR2 ships at 10 dBm telemetry).
+- **No GNSS/WiFi scanner** (unlike LR1110/LR1120) → dedicated GNSS module needed.
+- Interface: SPI + BUSY + IRQ/DIO + NRESET; respect BUSY handshaking. ELRS's
+  LR1121 driver on this board is the reference.
 
-Semtech 3rd-gen ultra-low-power LoRa transceiver.
-
-- **Bands:** 150–960 MHz (sub-GHz), 2.4 GHz, plus S-band (~2 GHz) and L-band
-  (1.55 GHz) for satellite. This program uses **sub-GHz (868/915) as the primary
-  long-range plane**; 2.4 GHz LoRa is an *optional* medium-range mode that
-  contends with ESP-NOW/BLE (see coexistence).
-- **Modulations:** LoRa, (G)FSK, **LR-FHSS** (LR-FHSS is **TX-only** on this
-  part — useful for robust uplink digests, not for symmetric links).
-- **PA paths:** sub-GHz +22 dBm (HP) / +15 dBm (LP); 2.4 GHz +13 dBm (HF).
-- **No GNSS or WiFi passive scanning.** The LR1110/LR1120 can sniff GNSS/WiFi
-  for cloud geolocation; the LR1121 trades that for S/L-band. **Consequence: we
-  need a dedicated GNSS receiver for position.** Don't design around LR1121
-  geolocation — it isn't there.
-- Interface: SPI + BUSY + IRQ/DIO + NRESET. Has its own command/state machine;
-  the host must respect BUSY handshaking.
-
-### LR1121 current (datasheet-class estimates)
+### LR1121 current at 2.4 GHz (estimates)
 
 | State | Current | Note |
 |-------|---------|------|
-| Sleep (retention) | ~1.4 µA | config retained |
-| Sleep (no retention) | ~0.4 µA | cold |
+| Sleep (retention) | ~1.4 µA | |
 | Standby RC / XOSC | ~1.8 / ~1.9 µA | |
-| RX sub-GHz | ~5.9 mA | **cheap to listen** |
-| RX 2.4 GHz | ~6.1 mA | |
-| TX +10 dBm (sub-GHz) | ~25 mA | |
-| TX +14 dBm (sub-GHz) | ~40 mA | |
-| TX +22 dBm (sub-GHz) | ~90 mA | regulatory-limited duty cycle |
-| TX +13 dBm (2.4 GHz) | ~50 mA | |
+| **RX 2.4 GHz** | **~6.1 mA** | **cheap to listen — the key fact** |
+| TX +10 dBm (2.4 GHz) | ~30–40 mA | XR2 stock telemetry power |
+| TX +13 dBm (2.4 GHz) | ~50 mA | LR1121 2.4 GHz max |
 
-Takeaway: **LoRa RX (~6 mA) is ~16× cheaper than WiFi RX (~95 mA).** This single
-fact drives the whole architecture: LoRa is the always-listening plane.
+Takeaway: **LoRa 2.4 RX (~6 mA) is ~16× cheaper than WiFi RX (~95 mA)** even on
+one band. LoRa stays the always-listening plane; ESP-NOW stays the burst plane.
 
-## GNSS
+## GNSS (kept in the early phases, on the spare UART)
 
-- Reference: u-blox MAX-M10S class. Acquisition/tracking ~25–30 mA continuous;
-  power-save / on-off duty cycling brings the average down dramatically.
-- For a *mobile tracker*, a fix every N seconds with the receiver asleep between
-  is the right model; cold-start TTFF is the cost to budget.
-- Put the GNSS rail behind a load switch so a sleeping node draws ~0 from it.
-- Position is shared as compact deltas, not full NMEA — see [05](05-protocol.md).
+- Reference: u-blox MAX-M10S class, ~25–30 mA tracking; duty-cycle it
+  (fix-then-sleep) and gate fix rate by motion.
+- **Wiring on the XR2:** the GNSS connects to the **secondary UART pad**. With
+  only CRSF + one spare UART exposed, **using the UART for GNSS typically means
+  giving up the CRSF interface** — acceptable for a standalone mesh node (we're
+  not flying it on a flight controller during these POCs).
+- Put the GNSS rail behind a load switch (GPIO-controlled) so a sleeping node
+  draws ~0 from it — IO permitting on the tiny board; otherwise power-save mode
+  via UBX commands.
+- Position is shared as compact deltas, not raw NMEA — see [05](05-protocol.md).
 
-## RF front-end & antennas
+## RF front-end & antennas (the hard part now)
 
-- **Sub-GHz (868/915) and 2.4 GHz are naturally band-isolated** — this is the
-  cleanest split and the reason sub-GHz is the long-range plane. Cross-band
-  coupling is mostly via supply noise, shared ground, and antenna proximity.
-- **Two 2.4 GHz emitters on one tiny board** (C3 WiFi/BLE + optional LR1121
-  2.4 GHz LoRa) is the hard case: a +13 dBm 2.4 GHz LoRa TX next to a WiFi RX
-  front-end will desensitize/block it. If 2.4 GHz LoRa is used at all, it must
-  be **time-division multiplexed** with WiFi/BLE — never concurrent.
-- Antenna strategy: separate antennas for sub-GHz vs 2.4 GHz; maximize physical
-  separation and consider orthogonal orientation. Quantify isolation in
-  [06](06-rf-coexistence.md).
+- **Both radios are in 2.4 GHz**, each on its own antenna a few mm apart. A
+  +13 dBm (or even +10 dBm) 2.4-LoRa TX next to the WiFi RX front-end will
+  desensitize/block it; the same the other way. Channel offset does **not** fix
+  near-field front-end overload. → **strict time-division** ([06](06-rf-coexistence.md)).
+- The integrated 2.4 GHz tower antenna is fixed and small → expect modest range;
+  optimize via SF/BW choice rather than antenna gain.
+- ELRS already lives with "WiFi mode vs RF mode are never simultaneous" on this
+  exact hardware — that precedent is our coexistence baseline.
 
-## Battery & power tree
+## Powering the XR2 as a standalone battery node
 
-- LiPo cell 250 / 500 / 1000 / 2000 mAh covering wearable → vehicle.
-- Runtime is **RX-dominated**; see the full model and tables in
-  [07](07-power-and-runtime.md).
-- Battery voltage on an ADC for low-power graceful degradation (slow beacons,
-  shed optional traffic as voltage drops).
+- Stock "working voltage: 5 V" with an onboard 3.3 V regulator. Options for a
+  battery node:
+  1. **1S LiPo (3.7–4.2 V) → 5 V boost → XR2 5 V in.** Simple, small boost loss.
+  2. **Tap the 3.3 V rail directly** from a LiPo via an LDO/buck — fewer
+     conversion losses but bypasses the onboard reg; verify the rail can take it.
+- Battery voltage sense on an ADC pin for graceful low-power degradation — IO is
+  tight; may need to share/repurpose a pad.
+- Phase 0 must measure brownout behavior: a +13 dBm LoRa burst or a 240 mA WiFi
+  TX peak on a tiny cell can sag the rail.
 
 ## What hardware constrains in the architecture
 
-1. **WiFi RX is expensive → ESP-NOW is burst-only, scheduled.**
-2. **LoRa RX is cheap → LoRa is the always-on wake/control plane.**
-3. **One 2.4 GHz radio on the C3 → WiFi and BLE are mutually time-sliced.**
-4. **No LR1121 geolocation → dedicated GNSS, duty-cycled behind a load switch.**
-5. **Sub-GHz/2.4 GHz are clean to coexist; 2.4-LoRa/WiFi are not.**
-6. **LR-FHSS is TX-only → it's an uplink-robustness tool, not a link mode.**
+1. **One 2.4 GHz band, two radios → mandatory time-division (super-frame).**
+2. **WiFi RX is expensive (~95 mA) → ESP-NOW is burst-only, scheduled.**
+3. **LoRa 2.4 RX is cheap (~6 mA) → LoRa is the always-on wake/control plane.**
+4. **No sub-GHz on the XR2 → "long-range" = high-SF 2.4-LoRa, modest range.**
+5. **No LR1121 geolocation → dedicated GNSS on the spare UART (costs CRSF).**
+6. **Very limited IO and 5 V powering → real integration constraints to solve in
+   Phase 0.**
+7. **ELRS open-source on this board → reuse its LR1121 driver and pin map.**
+
+## Sources
+
+- [RadioMaster XR2 Nano product page](https://radiomasterrc.com/products/xr2-nano-2-4ghz-expresslrs-receiver)
+- [Oscar Liang — RadioMaster XR1/XR2/XR3/XR4 ELRS (LR1121) receivers review](https://oscarliang.com/radiomaster-xr1-xr2-xr3-xr4-elrs-receivers/)
+- [LR1121 datasheet (rev 2.0, PDF)](https://files.waveshare.com/wiki/Core1121/LR1121_H2_DS_v2_0.pdf)
+- [ESP32-C3 datasheet](https://documentation.espressif.com/esp32-c3_datasheet_en.html)

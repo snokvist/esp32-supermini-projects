@@ -65,9 +65,9 @@ LRP header (8 bytes):
 ```
 
 Size for N members: `8 (hdr) + 9 (ref+count) + 7N`.
-- N=8 → **73 bytes**, ~430 ms at SF9/BW125.
-- 8 separate single-node position frames (~20 B each, ~185 ms) → **~1480 ms**.
-- **≈3.4× airtime saving from aggregation alone**, before suppression/dedup.
+- N=8 → **73 bytes**, ~240 ms at SF10/BW406 (2.4 GHz LoRa).
+- 8 separate single-node position frames (~20 B each, ~114 ms) → **~912 ms**.
+- **≈3.8× airtime saving from aggregation alone**, before suppression/dedup.
 
 ### TEXT payload
 
@@ -76,8 +76,8 @@ Size for N members: `8 (hdr) + 9 (ref+count) + 7N`.
  byte 1..: UTF-8 bytes (cap ~48 B on LRP; longer text discouraged — airtime)
 ```
 
-A 48 B text at SF9/BW125 ≈ ~320 ms; at SF12 ≈ ~2.3 s. Length is an airtime
-decision, surfaced to the user/UX, not unlimited.
+A 48 B text at SF10/BW406 ≈ ~177 ms; at SF12/BW406 ≈ ~607 ms (2.4 GHz LoRa).
+Length is an airtime decision, surfaced to the user/UX, not unlimited.
 
 ### DTN (store-and-forward) frames
 
@@ -115,29 +115,35 @@ PRESENCE/ROLE beacon payload (intra-cluster, full fidelity):
 The Head builds the LRP digest by collecting these LP beacons over a period and
 collapsing the positions into the delta-encoded digest above.
 
-## LoRa airtime reference (BW 125 kHz, CR 4/5, explicit header, CRC on)
+## 2.4 GHz LoRa airtime reference (CR 4/5, explicit header, CRC on)
 
-Time-on-air for representative payloads. Use this to size beacon rates and the
-duty budget.
+Time-on-air for representative payloads on the LR1121 2.4 GHz LoRa. Unlike
+sub-GHz (BW125), 2.4 GHz LoRa offers wide bandwidths (203/406/812/1625 kHz), so
+airtime is much shorter — at the cost of sensitivity/range. BW is the
+range-vs-airtime knob.
 
-| Payload | SF7 | SF9 | SF10 | SF12 |
-|--------:|----:|----:|-----:|-----:|
-| 20 B  | ~57 ms  | ~185 ms | ~371 ms | ~1.32 s |
-| 50 B  | ~103 ms | ~329 ms | ~657 ms | ~2.30 s |
-| 73 B (N=8 digest) | ~133 ms | ~430 ms | ~860 ms | ~3.1 s |
+| Payload | SF8 / BW812 (fast) | SF10 / BW406 (mid) | SF12 / BW406 (range) |
+|--------:|----:|----:|-----:|
+| 20 B  | ~16 ms  | ~114 ms | ~406 ms |
+| 73 B (N=8 digest) | ~36 ms | ~240 ms | ~860 ms |
 
 Symbol time `Tsym = 2^SF / BW`; `ToA = (8 + 4.25 + n_payload)·Tsym` with the
 standard Semtech payload-symbol formula. Lower BW / higher SF = more range,
-exponentially more airtime.
+much more airtime. Pick per link/role; measure the range curves in Phase 3/7.
 
-### Regulatory duty cycle (the hard ceiling)
+### The airtime ceiling on 2.4 GHz (no EU868 duty cap)
 
-EU868 typical sub-band limit is **1 %** (≈36 s of TX per hour per sub-band;
-some sub-bands 0.1 %). At SF9 a 73 B digest (~430 ms) → **~83 digests/hour**
-within a 1 % budget *per node*. At SF12 (~3.1 s) → **~11/hour**. This is *why*
-only Heads transmit, *why* we aggregate, and *why* store-and-forward exists.
-(US915 uses dwell-time/channel rules instead; the same airtime discipline
-applies.) **Confirm the exact regional rules before any field test.**
+2.4 GHz ISM has **no EU868-style 1 % duty cycle**; ETSI EN 300 328 / FCC 15.247
+impose power limits and (EN 300 328) adaptivity/medium-utilization expectations
+instead. So the binding limit is **self-coexistence**, not regulation:
+- The LoRa TX shares the super-frame slot budget with ESP-NOW and BLE
+  ([06](06-rf-coexistence.md)); LoRa airtime is bounded by *how much of the frame
+  it can take without starving the local plane*, not by a legal duty cap.
+- The crowded external 2.4 GHz band (WiFi/BLE/FPV/other ELRS) is the other limit.
+
+This is *why* only Heads transmit, *why* we aggregate, and *why* store-and-forward
+exists — to keep the shared 2.4 GHz medium usable, not to obey a duty rule.
+**Confirm regional power/EIRP limits before any field test.**
 
 ## Suppression & dedup state (per node)
 
@@ -148,8 +154,8 @@ applies.) **Confirm the exact regional rules before any field test.**
   the best-placed relay transmits first and suppresses the rest (Meshtastic-
   proven; we re-measure the constants).
 - **Hop limit:** decremented per relay; 0 = stop.
-- **Per-hour duty budget:** local accounting so a node never exceeds its airtime
-  share even before regulatory limits.
+- **Airtime budget:** local accounting so a node never exceeds its share of the
+  super-frame's LoRa TX slots (self-coexistence, not a regulatory cap on 2.4 GHz).
 
 ## Open protocol questions (for the POCs)
 

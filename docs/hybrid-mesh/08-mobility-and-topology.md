@@ -21,18 +21,20 @@ the architecture is built for.
 Approximate time two nodes stay linked while crossing each other's range:
 `t_link ≈ 2·range / v_rel`.
 
-| Plane | Range | Rel. speed | t_link |
+| Plane | Range (2.4 GHz, XR2 integrated antenna) | Rel. speed | t_link |
 |-------|-------|-----------|--------|
 | ESP-NOW (local) | ~150 m | 2 m/s (walk) | ~150 s |
 | ESP-NOW (local) | ~150 m | 20 m/s (drone) | **~15 s** |
-| LoRa sub-GHz | ~1 km | 10 m/s (convoy) | ~200 s |
-| LoRa sub-GHz | ~3 km | 20 m/s | ~300 s |
+| 2.4-LoRa (high SF) | ~500 m | 10 m/s (convoy) | ~100 s |
+| 2.4-LoRa (high SF) | ~1 km | 20 m/s | ~100 s |
 
 **Finding (to verify):** fast local movement shreds ESP-NOW links (~15 s for
-drones), while the longer-range plane stays connected far longer. So **under
-high mobility, lean more on the LRP**; the LP is best when the group is
-genuinely co-located and slow-moving. The system should shift the plane split
-with measured speed.
+drones), while the longer-range 2.4-LoRa plane stays connected several times
+longer. So **under high mobility, lean more on the LRP**; the LP is best when the
+group is genuinely co-located and slow-moving. The margin is smaller than sub-GHz
+would give (2.4-LoRa with a 0.8 g integrated antenna reaches hundreds of metres
+to ~km, not multi-km), so the plane-split shift with speed matters more, not
+less. Ranges are estimates — measure in Phase 3.
 
 ## Topology dynamics the system must survive
 
@@ -63,30 +65,33 @@ beats flat flood).
 
 ## Scalability: the airtime argument (why hierarchy is non-optional)
 
-Long-range airtime is the hard ceiling (1 % duty in EU868 ≈ 36 s/hour/node).
-Compare a Meshtastic-style flat flood vs the hybrid for **N = 40 nodes**,
-position every 30 s, managed-flood redundancy R ≈ 3, SF9/BW125:
+On 2.4 GHz there's no EU868 1 % legal cap, but the long-range plane shares the
+super-frame (and the crowded band) with ESP-NOW/BLE, so **medium occupancy is the
+hard ceiling** — every second the LoRa plane talks is a second the local plane
+can't. Compare a Meshtastic-style flat flood vs the hybrid for **N = 40 nodes**,
+position every 30 s, managed-flood redundancy R ≈ 3, 2.4-LoRa SF10/BW406:
 
 **Flat flood (every node's position floods on LoRa):**
 ```
-airtime/30s = N · ToA(20B) · R = 40 · 0.185 s · 3 ≈ 22.2 s   (out of 30 s!)
+airtime/30s = N · ToA(20B) · R = 40 · 0.114 s · 3 ≈ 13.7 s   (out of 30 s!)
 ```
-→ ~74 % channel occupancy — **infeasible**, blows the 1 % duty cap by ~74×.
-This is exactly why pure LoRa-mesh collapses with density.
+→ ~46 % medium occupancy — **infeasible**: it starves ESP-NOW, leaves no room in
+the super-frame, and saturates an already-busy 2.4 GHz band. This is why pure
+LoRa-flood collapses with density even without a duty-cycle law.
 
 **Hybrid (aggregate per cluster of 8 → 5 Heads bridge digests):**
 ```
-airtime/30s = C · ToA(73B digest) · R = 5 · 0.43 s · 3 ≈ 6.45 s
+airtime/30s = C · ToA(73B digest) · R = 5 · 0.24 s · 3 ≈ 3.6 s
 ```
-→ ~21 % — still high, but **~3.4× better**, and further reduced by:
-- **Suppression** drives R from ~3 toward ~1.5 → ~3.2 s (~11 %).
-- **Lower digest rate** off-motion (60 s) → ~1.6 s (~5 %).
-- **Lower SF where range allows** (SF7 digest ~133 ms) → well within budget.
+→ ~12 % — still significant, but **~3.8× better**, and further reduced by:
+- **Suppression** drives R from ~3 toward ~1.5 → ~1.8 s (~6 %).
+- **Lower digest rate** off-motion (60 s) → ~0.9 s (~3 %).
+- **Lower SF/wider BW where range allows** (SF8/BW812 digest ~36 ms) → tiny.
 
 **Conclusion:** flat flooding is `O(N)` airtime and hits the wall fast;
 aggregation makes LRP airtime `O(clusters)`, and suppression + rate adaptation
-bring it under the regulatory cap. **Hierarchy is what makes the system scale**,
-which is the central architectural claim to validate.
+keep the shared 2.4 GHz medium usable for both planes. **Hierarchy is what makes
+the system scale**, which is the central architectural claim to validate.
 
 ## Relay suppression toolbox (and what we'll measure)
 

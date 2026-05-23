@@ -46,8 +46,9 @@ long-range fabric, under mobility and tight power.
    *ephemeral* gateway, not a tether.
 7. **Real-world usefulness** — continuously re-validate against concrete
    scenarios (below).
-8. **RF coexistence understanding** — empirical behavior of 2.4 GHz (WiFi/BLE/
-   2.4-LoRa) vs sub-GHz. *Test:* quantified desense and a working schedule.
+8. **RF coexistence understanding** — empirical behavior of two co-located
+   2.4 GHz radios (WiFi/BLE + 2.4-LoRa) sharing one band. *Test:* quantified
+   self-desense and a working time-division schedule.
 9. **Incremental POCs** — small milestones, each answering "does this help?"
 10. **Architecture over features** — resist feature creep.
 
@@ -88,8 +89,9 @@ The program succeeds if we can demonstrate, with measurements:
   while still being discoverable and reachable (target: ≥3 days).
 - **Resilience:** useful delivery (defined per scenario) survives node churn and
   partitions that would break a static assumption.
-- **Coexistence:** a documented, repeatable schedule lets the 2.4 GHz and
-  sub-GHz radios operate without crippling desense.
+- **Coexistence:** a documented, repeatable time-division schedule lets the two
+  co-located 2.4 GHz radios (WiFi/BLE + 2.4-LoRa) share one band without crippling
+  self-desense.
 - **Decision clarity:** for each of flooding / routing / hierarchy, we can state
   the regime where it wins, backed by data.
 

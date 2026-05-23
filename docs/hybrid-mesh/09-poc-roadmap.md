@@ -7,7 +7,13 @@ built, becomes a project under `projects/` following repo conventions
 and must pass the repo verification loop (build → flash → observe → report).
 
 The gate question for every phase: **"Does this provide a measurable real-world
-advantage over plain LoRa-mesh *and* plain ESP-NOW?"** If no, narrow scope or stop.
+advantage over plain 2.4-LoRa-flood *and* plain ESP-NOW?"** If no, narrow scope
+or stop.
+
+Hardware target: **RadioMaster XR2 Nano** (ESP32-C3 + LR1121, 2.4 GHz-only). All
+firmware reflashes the C3 and reuses ExpressLRS's open-source LR1121 driver / pin
+map as the Phase-0 reference. GNSS is included from the early phases via the XR2's
+spare UART (costs the CRSF interface — fine for a standalone node).
 
 Suggested first firmware project name: `projects/waymesh-node` (incremental;
 later phases extend the same project rather than spawning many).
@@ -16,18 +22,21 @@ later phases extend the same project rather than spawning many).
 
 ## Phase 0 — Bench bring-up & baseline (foundation)
 
-- **Outcome:** one node where LR1121 (SPI), GNSS (UART), LED, USB-CDC serial all
-  work; two nodes do a raw LoRa TX/RX loopback; baseline currents measured.
-- **Validates:** the hardware is real and the datasheet numbers in
-  [07](07-power-and-runtime.md) hold.
-- **Experiments:** SPI bring-up + BUSY handshake; LR1121 ping-pong between 2
-  nodes at SF7/SF9/SF12; GNSS cold/hot TTFF; current draw per state with a meter.
+- **Outcome:** reflash the XR2's C3; LR1121 (SPI) 2.4-LoRa, GNSS (spare UART),
+  LED, USB-CDC serial all work; two XR2 nodes do a raw 2.4-LoRa TX/RX loopback;
+  baseline currents measured.
+- **Validates:** the hardware is real, reflashing/powering works, and the
+  datasheet numbers in [07](07-power-and-runtime.md) hold.
+- **Experiments:** confirm the ELRS LR1121 pin map/SPI on the XR2; SPI bring-up +
+  BUSY handshake; 2.4-LoRa ping-pong between 2 nodes at SF8/SF10/SF12 across
+  BW 406/812; GNSS cold/hot TTFF on the spare UART; current draw per state with a
+  meter; 5 V-boost vs 3.3 V-tap powering.
 - **Metrics:** loopback PDR at 1 m; TTFF; measured mA for sleep / LoRa-RX /
-  LoRa-TX(+14/+22) / WiFi-RX / GNSS.
+  LoRa-TX(+10/+13) / WiFi-RX / GNSS; brownout threshold per cell.
 - **Go/No-Go:** loopback works; measured currents within ~30 % of estimates
   (else revise the power model before proceeding).
-- **Deliverable:** `docs/HARDWARE.md` pin map; a "measured vs estimated" current
-  table feeding back into [07](07-power-and-runtime.md).
+- **Deliverable:** `docs/HARDWARE.md` XR2 pin map + flashing/powering notes; a
+  "measured vs estimated" current table feeding back into [07](07-power-and-runtime.md).
 
 ## Phase 1 — Local discovery (the local plane)
 
@@ -54,15 +63,16 @@ later phases extend the same project rather than spawning many).
 
 ## Phase 3 — Long-range beacon (the long-range plane)
 
-- **Outcome:** two *isolated* nodes (no local plane) exchange presence/GPS over
-  sub-GHz LoRa; first real range test.
-- **Validates:** LRP link, real airtime, real range/PDR vs SF, regulatory duty.
-- **Experiments:** open-field range walk at SF7/SF9/SF12, +14/+22 dBm; measure
-  ToA on a scope vs the [05](05-protocol.md) table; confirm duty-cycle accounting.
-- **Metrics:** PDR vs distance per SF; measured ToA; achieved range; energy per
+- **Outcome:** two *isolated* XR2 nodes (no local plane) exchange presence/GPS
+  over **2.4 GHz LoRa**; first real range test with the integrated antenna.
+- **Validates:** LRP link, real airtime, real range/PDR vs SF/BW, medium occupancy.
+- **Experiments:** open-field range walk at SF8/SF10/SF12 across BW 406/812,
+  +10/+13 dBm; measure ToA on a scope vs the [05](05-protocol.md) table; record
+  the range-vs-airtime-vs-SF/BW tradeoff curves.
+- **Metrics:** PDR vs distance per SF/BW; measured ToA; achieved range; energy per
   delivered beacon.
-- **Go/No-Go:** usable range (target ≥1 km LOS at SF9) and ToA within ~20 % of
-  predicted.
+- **Go/No-Go:** usable range (target ≥500 m LOS at high SF on the integrated
+  antenna) and ToA within ~20 % of predicted.
 
 ## Phase 4 — Cluster head election + aggregation (the core claim)
 
@@ -159,5 +169,7 @@ once P0 hardware is stable. P9 needs P4/P5 plus enough of P6/P7 to run in the fi
 
 - Security/crypto hardening (own track, after P4 proves the architecture).
 - Polished mobile app (Phase-4 gateway is a debug inspector, not a product).
-- 2.4-LoRa mode (only if Phase 7 shows it's worth the coexistence cost).
-- LR-FHSS uplink (evaluate after P3/P4 if digest robustness needs it).
+- Sub-GHz dual-band (needs different hardware; the XR2 is 2.4-only — revisit on a
+  sub-GHz LR1121 board or BAYCK dual-band RX once the architecture is proven).
+- FLRC / LR-FHSS modes (evaluate after P3/P4 if 2.4-LoRa range or digest
+  robustness needs them; ESP-NOW already covers fast local).

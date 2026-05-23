@@ -50,7 +50,7 @@ Always report **mean + spread** over **N≥5 runs**; single runs are anecdotes.
 ## Configuration matrix (sweep, don't guess)
 
 Vary one axis at a time, hold the rest:
-- **SF:** 7 / 9 / 12 · **BW:** 125 (others later) · **TX power:** +10 / +14 / +22 dBm
+- **SF:** 8 / 10 / 12 · **BW:** 406 / 812 kHz (2.4-LoRa) · **TX power:** +10 / +13 dBm
 - **Beacon/digest rate:** fast / nominal / slow
 - **Cluster size:** 1 / 4 / 8 · **Node count N:** 2 / 5 / 20 / 40 (sim for large N)
 - **Suppression mechanisms:** each on/off (for the R-vs-PDR curves)
@@ -59,8 +59,8 @@ Vary one axis at a time, hold the rest:
 ## Baselines for honest comparison
 
 Every "the hybrid wins" claim is measured **against**:
-1. **Flat LoRa flood baseline** (Meshtastic-style: every node, everything on
-   sub-GHz with managed flood) — same scenario, same hardware.
+1. **Flat 2.4-LoRa flood baseline** (Meshtastic-style discipline, but on the XR2's
+   2.4-LoRa: every node, everything floods on LoRa) — same scenario, same hardware.
 2. **Pure ESP-NOW baseline** (no long-range plane) — shows what local-only loses.
 
 A finding is only valid if the hybrid beats *both* on the metric that matters
@@ -89,8 +89,8 @@ ts_ms, nodeId, role, event, plane, msgId, srcId, dstId, seq, hop, rssi, snr, bat
 
 - Inline current meter (e.g., shunt + INA-class sensor, or a Nordic PPK-class
   tool) on the battery rail; log average and capture TX peaks.
-- Scope the 3.3 V rail during +22 dBm sub-GHz and WiFi-TX bursts to catch sag /
-  brownout (especially 250 mAh cells).
+- Scope the 3.3 V rail during +13 dBm 2.4-LoRa and WiFi-TX bursts to catch sag /
+  brownout (especially 250 mAh cells; note the XR2's 5 V input / regulator).
 - Report: per-state mA (replaces estimates in [07](07-power-and-runtime.md)),
   per-profile average mA, and extrapolated runtime per battery size.
 - Long-run validation: discharge a real cell on a fixed profile; compare actual

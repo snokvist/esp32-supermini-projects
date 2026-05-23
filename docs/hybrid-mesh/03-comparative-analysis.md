@@ -16,7 +16,7 @@ systems already win.
 | **Classic MANET** (AODV/OLSR/Babel) | assumes IP links | proactive/reactive routing | link-dependent | link-dependent | assumes capable nodes | designed for it, but heavy | richer radios than LoRa |
 | **DTN / Bundle** | overlay (any) | store-carry-forward | unbounded in time | n/a | tolerant | excellent for partitions | sparse, intermittent |
 | **Swarm telemetry** (custom) | varies | flat broadcast | short–med | high | varies | excellent | tight local coordination |
-| **Waymesh (this)** | LoRa sub-GHz + ESP-NOW 2.4 | clusters + bridged flood + DTN | km bridge over local clusters | hybrid | RX-asymmetric (LoRa cheap, WiFi burst) | designed for it | **mobile mix of dense + sparse** |
+| **Waymesh (this)** | 2.4-LoRa + ESP-NOW (one band, time-shared) | clusters + bridged flood + DTN | 100s m–~km bridge over local clusters | hybrid | RX-asymmetric (LoRa cheap, WiFi burst) | designed for it | **mobile mix of dense + sparse** |
 
 ## System-by-system
 
@@ -36,9 +36,11 @@ systems already win.
 - **Model:** tightly scheduled point-to-point control link; FHSS, telemetry
   ratios, dynamic power, very low latency. Star, not mesh.
 - **What we borrow:** disciplined airtime scheduling, FHSS robustness ideas,
-  dynamic TX power, and the engineering culture of measuring RF reality. The
-  LR1121 dual-band experience from the ELRS world directly informs our radio
-  bring-up.
+  dynamic TX power, and the engineering culture of measuring RF reality. We also
+  borrow the *hardware*: the XR2 target **is** an ELRS receiver (ESP32-C3 +
+  LR1121), and ELRS's open-source LR1121 driver / pin map is our Phase-0 radio
+  reference. ELRS's "WiFi mode and RF link never run at once" is our coexistence
+  precedent.
 - **Not applicable:** no mesh, no store-and-forward, single-link focus.
 
 ### ESP-NOW — our local plane
