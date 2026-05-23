@@ -1,10 +1,13 @@
-# 11 — Mobile Gateway: Meshtastic BLE Client Compatibility
+# 11 — Mobile/PC Gateway: Meshtastic Client Compatibility (BLE + Serial)
 
-A design proposal (no firmware yet). Goal: a connected phone sees a Waymesh node
-as a **Meshtastic device**, so we reuse the polished Meshtastic apps
-(Android / iOS / web / desktop) as our mobile UI instead of building one. This
-serves the "lightweight mobile interaction" requirement ([01](01-vision-and-requirements.md))
-at near-zero UI cost.
+A design proposal (no firmware yet). Goal: a connected client sees a Waymesh node
+as a **Meshtastic device** — a **phone over BLE** *and* a **PC over USB serial**
+(and optionally TCP) — so we reuse the polished Meshtastic apps / CLI
+(Android / iOS / web / desktop / `meshtastic` Python CLI) as our UI instead of
+building one. This serves the "lightweight mobile interaction" requirement
+([01](01-vision-and-requirements.md)) at near-zero UI cost. The Meshtastic
+client protocol is **transport-agnostic** (same protobufs over BLE, Serial, and
+TCP), so once the protobuf layer exists, every transport is nearly free.
 
 ## Scope: client compatibility only (not over-the-air)
 
@@ -50,8 +53,36 @@ Implementation notes:
 - **Bonding/PIN:** Meshtastic bonds with a PIN. Our node has no screen → use a
   fixed PIN (configurable), documented per-node.
 - **Framing:** on BLE, each ToRadio write / FromRadio read carries **one**
-  protobuf message — no stream framing. (The `0x94 0xC3 LEN_MSB LEN_LSB` framing
-  is only for the serial/TCP *stream* transports, not BLE.)
+  protobuf message — no stream framing. (Serial/TCP add stream framing — below.)
+
+## Transports: BLE, Serial (USB), TCP
+
+The same `FromRadio`/`ToRadio` protobufs ride every Meshtastic transport; only
+the wrapping differs. Supporting **Serial** alongside BLE means the node also
+appears as a Meshtastic device when plugged into a PC (`meshtastic --info`, the
+web/desktop client over serial) — high value, low marginal cost.
+
+| Transport | Wrapping | Use |
+|-----------|----------|-----|
+| **BLE** | one protobuf per GATT read/write; FromNum notifies | phone app |
+| **Serial (USB-CDC)** | stream framing `0x94 0xC3 <len_hi> <len_lo> <protobuf>` @115200 | PC CLI / web client |
+| **TCP** (optional) | same stream framing on port 4403 | LAN client; needs WiFi (power) |
+
+### Serial framing & coexisting debug logs
+
+- Each packet on the wire is `0x94 0xC3` + 16-bit big-endian length + protobuf
+  (max ~512 B). The client scans the byte stream for the `0x94 0xC3` magic.
+- **Human-readable debug logs can share the same UART**: any bytes *not* inside a
+  `0x94 0xC3` frame are treated by Meshtastic clients as **debug/log text** (this
+  is how real Meshtastic devices behave). So our structured logs and the protobuf
+  frames interleave on one port without a separate channel.
+- Cleaner option: emit logs as `LogRecord` protobufs (the `LogRadio`
+  characteristic on BLE) instead of raw text, gated by a build flag.
+- **Relationship to Phase 0:** the `waymesh-node` bring-up firmware currently
+  prints **CSV metrics** ([10](10-experiments-and-metrics.md)) over USB — the
+  right tool for bench measurement. The Meshtastic serial framing is a gateway
+  (Phase 4) feature; when added, CSV logs simply become non-framed debug bytes,
+  or move behind a `--meshtastic-serial` build flag. Phase 0 is unaffected.
 
 ## Protocol: protobufs over the characteristics
 
@@ -171,8 +202,8 @@ incrementally once the core architecture is proven:
 - How to surface Waymesh-specific concepts (cluster, role, plane) without
   confusing the app — `long_name` tag vs a custom telemetry field vs nothing.
 - nanopb flash/RAM cost measured on the XR2 alongside the radio stack.
-- Whether to also expose the Serial/TCP client transports (same protobufs) for a
-  laptop, essentially free once the protobuf layer exists.
+- Whether to keep CSV debug logs interleaved on the Meshtastic serial stream
+  (non-framed bytes) or move them to `LogRecord`/`LogRadio` behind a build flag.
 
 ## Sources
 

@@ -41,9 +41,11 @@ long-range fabric, under mobility and tight power.
 5. **Battery-friendly operation** — duty-cycled radios, event-driven comms,
    graceful low-power degradation. *Test:* days of runtime on a 1000 mAh cell
    in a realistic duty cycle.
-6. **Lightweight mobile interaction** — phone can view nodes/positions/messages
-   and change config without being always-on or RF-hostile. *Test:* phone is an
-   *ephemeral* gateway, not a tether.
+6. **Lightweight mobile interaction** — view nodes/positions/messages and change
+   config without being always-on or RF-hostile, by **reusing the Meshtastic
+   client** (phone over BLE, PC over USB serial). *Test:* an unmodified
+   Meshtastic app/CLI connects and the node behaves as an *ephemeral* gateway,
+   not a tether.
 7. **Real-world usefulness** — continuously re-validate against concrete
    scenarios (below).
 8. **RF coexistence understanding** — empirical behavior of two co-located
@@ -94,6 +96,11 @@ The program succeeds if we can demonstrate, with measurements:
   self-desense.
 - **Decision clarity:** for each of flooding / routing / hierarchy, we can state
   the regime where it wins, backed by data.
+- **Mobile reuse (zero custom UI):** an *unmodified* Meshtastic client connects
+  and sees the node as a Meshtastic device — over **BLE** (phone app) *and* over
+  **USB serial** (PC CLI / web client) — listing neighbors, positions, and
+  messages. We reuse the Meshtastic apps instead of building our own
+  ([11](11-mobile-gateway-meshtastic-compat.md)).
 
 ## Design principles
 

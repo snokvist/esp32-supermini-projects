@@ -206,10 +206,11 @@ sequenceDiagram
     Note over GW: reverts to Member; resumes the super-frame
 ```
 
-The gateway speaks the **Meshtastic BLE client protocol**, so an unmodified
-Meshtastic phone app can connect and see the node as a Meshtastic device — we
-reuse their app as our UI instead of building one. This is a compatibility shim
-at the gateway only; our planes stay ours. Full design: [11 — Mobile Gateway](11-mobile-gateway-meshtastic-compat.md).
+The gateway speaks the **Meshtastic client protocol** over both **BLE** (phone
+app) and **USB serial** (PC CLI / web client), so an unmodified Meshtastic client
+sees the node as a Meshtastic device — we reuse their apps as our UI instead of
+building one. This is a compatibility shim at the gateway only; our planes stay
+ours. Full design: [11 — Mobile/PC Gateway](11-mobile-gateway-meshtastic-compat.md).
 
 ## What we explicitly avoid
 
