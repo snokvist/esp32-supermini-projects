@@ -206,6 +206,11 @@ sequenceDiagram
     Note over GW: reverts to Member; resumes the super-frame
 ```
 
+The gateway speaks the **Meshtastic BLE client protocol**, so an unmodified
+Meshtastic phone app can connect and see the node as a Meshtastic device — we
+reuse their app as our UI instead of building one. This is a compatibility shim
+at the gateway only; our planes stay ours. Full design: [11 — Mobile Gateway](11-mobile-gateway-meshtastic-compat.md).
+
 ## What we explicitly avoid
 
 - No proactive/link-state routing on the LRP.

@@ -78,7 +78,10 @@ later phases extend the same project rather than spawning many).
 
 - **Outcome:** a local cluster elects a Head; the Head aggregates member
   positions into one LoRa digest; a second cluster's Head de-aggregates into its
-  LP. Ephemeral BLE phone gateway for inspection.
+  LP. Ephemeral BLE phone gateway for inspection — implemented as a
+  **Meshtastic BLE client-compatibility shim** so the stock Meshtastic app is our
+  UI ([11](11-mobile-gateway-meshtastic-compat.md)); start **read-only** (node DB
+  + positions + text RX), add TX and channels/config-write in later increments.
 - **Validates:** the **aggregate-then-bridge** thesis and the airtime win from
   [08](08-mobility-and-topology.md).
 - **Experiments:** 2 clusters of 3–4; measure LRP airtime with aggregation

@@ -74,6 +74,7 @@ What the XR2 can and can't prove:
 | 08 | [Mobility & Topology](08-mobility-and-topology.md) | Mobility models, flooding-vs-routing, suppression, leadership, scalability, simulation plan |
 | 09 | [POC Roadmap](09-poc-roadmap.md) | Phased milestones on the XR2 with go/no-go gates |
 | 10 | [Experiments & Metrics](10-experiments-and-metrics.md) | Measurement methodology, metrics, rigs, logging schema |
+| 11 | [Mobile Gateway: Meshtastic BLE Compat](11-mobile-gateway-meshtastic-compat.md) | Make a phone see the node as a Meshtastic device (reuse the Meshtastic app as our UI) — BLE client-compatibility design |
 
 ## Current status
 
