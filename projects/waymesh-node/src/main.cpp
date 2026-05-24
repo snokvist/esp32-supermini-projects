@@ -115,6 +115,13 @@ static void sendBeacon() {
     logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
   }
   // transmit() leaves the radio in standby; re-arm RX.
+  // The shared DIO1 ISR also fires on TxDone, so it just set gRxFlag for our
+  // own transmit. Clear it before re-arming, otherwise loop() treats the TxDone
+  // as a phantom RX: handleRx() readData()s an empty FIFO, logs a bogus rx_err,
+  // and inflates badcrc/PDR (the Phase 0 metric this firmware exists to collect).
+  // Cleared *before* startRx() so a genuine packet arriving after re-arm still
+  // sets the flag — the radio is in standby until startRx(), so no RX is lost.
+  gRxFlag = false;
   startRx();
 }
 
@@ -127,9 +134,13 @@ static void handleRx() {
     float snr = gRadio.getSNR();
     if (gHaveLastRxSeq) {
       uint16_t expected = (uint16_t)(gLastRxSeq + 1);
-      if (b.seq != expected) {
-        uint16_t gap = (uint16_t)(b.seq - expected);
-        gRxSeqGaps += gap;  // approximate; assumes a single peer
+      // Signed modular delta: >0 is a forward gap (missed beacons); <=0 is a
+      // duplicate / reordered / post-restart frame and must NOT count as loss.
+      // (The old unsigned subtraction wrapped to ~65535 on any dup and exploded
+      // the PDR estimate.) Assumes a single peer.
+      int16_t delta = (int16_t)(b.seq - expected);
+      if (delta > 0) {
+        gRxSeqGaps += (uint16_t)delta;
       }
     }
     gLastRxSeq = b.seq;
