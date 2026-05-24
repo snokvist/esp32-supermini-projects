@@ -22,6 +22,9 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 #define WAYMESH_ROLE       0u    // Config.DeviceConfig.Role.CLIENT
 #define MESH_LOC_INTERNAL  2u    // Position.LocSource.LOC_INTERNAL
 
+static_assert(sizeof(WAYMESH_FW_VERSION) <= 24,
+              "WAYMESH_FW_VERSION must fit DeviceMetadata.firmware_version[24]");
+
 static NimBLECharacteristic *gFromRadio = nullptr;
 static NimBLECharacteristic *gFromNum = nullptr;
 
@@ -60,20 +63,24 @@ static bool qPush(const uint8_t *d, size_t n) {
     f.len = (uint16_t)n;
     gQTail = (gQTail + 1) % kQDepth;
     gQCount++;
+    gFromNumDirty = true;  // set under the lock so the consumer can't lose it
     ok = true;
   }
   portEXIT_CRITICAL(&gQMux);
   return ok;
 }
 
-// Returns frame length copied into out (>=0), or -1 if the queue is empty.
-static int qPop(uint8_t *out) {
+// Copies the next frame into out (capacity cap), returns its length (>=0), or
+// -1 if empty. Clamps to cap so the copy is bounded at the copy site, not only
+// by qPush's push-time check.
+static int qPop(uint8_t *out, size_t cap) {
   int n = -1;
   portENTER_CRITICAL(&gQMux);
   if (gQCount > 0) {
     FrameQ &f = gQ[gQHead];
-    memcpy(out, f.buf, f.len);
-    n = f.len;
+    size_t len = f.len < cap ? f.len : cap;
+    memcpy(out, f.buf, len);
+    n = (int)len;
     gQHead = (gQHead + 1) % kQDepth;
     gQCount--;
   }
@@ -81,6 +88,10 @@ static int qPop(uint8_t *out) {
   return n;
 }
 
+// Frame production (queueConfigSequence -> enqueueFromRadio) currently runs only
+// on the NimBLE host task (the ToRadio onWrite callback), so gFrameIdSeq is
+// single-producer. When a main-loop producer is added (1b: LoRa-peer NodeInfo),
+// guard the id increment under gQMux.
 static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
   fr->id = ++gFrameIdSeq;
   uint8_t tmp[kFrameMax];
@@ -89,11 +100,10 @@ static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
     Serial.printf("# BLE FromRadio encode failed: %s\n", PB_GET_ERROR(&os));
     return false;
   }
-  if (!qPush(tmp, os.bytes_written)) {
+  if (!qPush(tmp, os.bytes_written)) {  // qPush sets gFromNumDirty under the lock
     Serial.println("# BLE FromRadio queue full — frame dropped");
     return false;
   }
-  gFromNumDirty = true;
   return true;
 }
 
@@ -112,7 +122,8 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   fr = meshtastic_FromRadio_init_zero;
   fr.which_payload_variant = meshtastic_FromRadio_metadata_tag;
   meshtastic_DeviceMetadata &md = fr.payload_variant.metadata;
-  strncpy(md.firmware_version, WAYMESH_FW_VERSION, sizeof(md.firmware_version) - 1);
+  snprintf(md.firmware_version, sizeof(md.firmware_version), "%s",
+           WAYMESH_FW_VERSION);
   md.device_state_version = 22;
   md.hasBluetooth = true;
   md.role = WAYMESH_ROLE;
@@ -169,6 +180,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     // Drop any half-drained handshake so the next client starts clean.
     portENTER_CRITICAL(&gQMux);
     gQHead = gQTail = gQCount = 0;
+    gFromNumDirty = false;
     portEXIT_CRITICAL(&gQMux);
     Serial.println("# BLE disconnect; re-advertising");
     NimBLEDevice::startAdvertising();
@@ -212,11 +224,11 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
 
 class FromRadioCallbacks : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic *c) override {
-    static uint8_t out[kFrameMax];
-    int n = qPop(out);
+    uint8_t out[kFrameMax];
+    int n = qPop(out, sizeof(out));
     if (n >= 0) {
       c->setValue(out, n);
-      Serial.printf("# BLE FromRadio-> %d B (q=%d)\n", n, gQCount);
+      Serial.printf("# BLE FromRadio-> %d B\n", n);
     } else {
       c->setValue(out, 0);  // empty: client has caught up
     }
@@ -261,13 +273,18 @@ void bleGattBegin(uint32_t nodeId) {
 
 void bleGattLoop() {
   if (!gBleConnected || !gFromNum) return;
-  if (!gFromNumDirty) return;
+  bool dirty;
+  int qn;
+  portENTER_CRITICAL(&gQMux);
+  dirty = gFromNumDirty;
   gFromNumDirty = false;
-  gFromNumVal++;  // monotonic "new data available" counter
+  qn = gQCount;
+  portEXIT_CRITICAL(&gQMux);
+  if (!dirty) return;
+  gFromNumVal++;  // monotonic "new data available" counter (main task only)
   gFromNum->setValue(gFromNumVal);
   gFromNum->notify();
-  Serial.printf("# BLE FromNum notify=%u (q=%d)\n", (unsigned)gFromNumVal,
-                gQCount);
+  Serial.printf("# BLE FromNum notify=%u (q=%d)\n", (unsigned)gFromNumVal, qn);
 }
 
 void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
