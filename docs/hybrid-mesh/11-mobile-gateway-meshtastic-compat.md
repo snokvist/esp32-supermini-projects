@@ -201,7 +201,13 @@ incrementally:
 
 1. **Read-only** — handshake + node DB + positions + text RX over the flat LoRa
    mesh. Instant value, low risk: open the Meshtastic app and watch our mesh
-   appear on the map.
+   appear on the map. **Increment 1a device-verified on the XR2 (2026-05-24):**
+   the `want_config_id` handshake (MyNodeInfo + DeviceMetadata + self NodeInfo
+   with live GPS Position + config_complete_id) renders in the unmodified
+   `meshtastic --ble --info` CLI — node `!b17506dc` / `Waymesh_06DC`,
+   `PRIVATE_HW`, position. nanopb vendored in `lib/nanopb/`; the trimmed proto is
+   wire-compatible with upstream. Still to do here: LoRa-peer NodeInfo (other
+   nodes) + text RX.
 2. **TX** — phone sends text → decrypt with advertised PSK → flood onto the LoRa
    mesh.
 3. **Channels / config-write** — multiple channels, accept-and-reflect config.

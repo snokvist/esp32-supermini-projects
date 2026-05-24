@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package meshtastic;
+
+// Trimmed, import-free subset of the Meshtastic client protocol — field-number
+// compatible with meshtastic/protobufs (mesh.proto @ master, verified
+// 2026-05-24). Enum-typed fields are declared here as uint32/scalars; on the
+// wire protobuf enums are varints, so a *full* Meshtastic client decodes them
+// correctly. Only the messages/fields the waymesh-node gateway emits or
+// consumes are present — a full client tolerates the absent fields/messages
+// (unknown fields are skipped on decode). This keeps the generated nanopb code
+// tiny and dependency-free on the ESP32-C3.
+//
+// Regenerate with proto/README.md after editing. Keep field numbers in lockstep
+// with upstream mesh.proto. See docs/hybrid-mesh/11-mobile-gateway-meshtastic-compat.md.
+
+// --- leaf messages -----------------------------------------------------------
+
+message Position {
+  sfixed32 latitude_i      = 1;   // degrees * 1e7 (identical to our LP encoding)
+  sfixed32 longitude_i     = 2;   // degrees * 1e7
+  int32    altitude        = 3;   // meters
+  fixed32  time            = 4;   // epoch seconds
+  uint32   location_source = 5;   // Position.LocSource (LOC_INTERNAL = 2)
+  uint32   sats_in_view    = 19;
+}
+
+message User {
+  string id         = 1;          // "!aabbccdd"
+  string long_name  = 2;
+  string short_name = 3;
+  uint32 hw_model   = 5;          // HardwareModel (PRIVATE_HW = 255)
+  uint32 role       = 7;          // Config.DeviceConfig.Role (CLIENT = 0)
+}
+
+message Data {
+  uint32 portnum = 1;             // PortNum: TEXT=1, POSITION=3, NODEINFO=4
+  bytes  payload = 2;
+}
+
+message MeshPacket {
+  fixed32 from    = 1;
+  fixed32 to      = 2;
+  uint32  channel = 3;
+  oneof payload_variant {
+    Data  decoded   = 4;
+    bytes encrypted = 5;
+  }
+  fixed32 id        = 6;
+  fixed32 rx_time   = 7;
+  float   rx_snr    = 8;
+  uint32  hop_limit = 9;
+  bool    want_ack  = 10;
+  int32   rx_rssi   = 12;
+  uint32  hop_start = 15;
+}
+
+// --- handshake / node-db messages -------------------------------------------
+
+message MyNodeInfo {
+  uint32 my_node_num     = 1;
+  uint32 reboot_count    = 8;
+  uint32 min_app_version = 11;
+}
+
+message NodeInfo {
+  uint32   num        = 1;
+  User     user       = 2;
+  Position position   = 3;
+  float    snr        = 4;
+  fixed32  last_heard = 5;
+  uint32   channel    = 7;
+}
+
+message DeviceMetadata {
+  string firmware_version     = 1;
+  uint32 device_state_version = 2;
+  bool   canShutdown          = 3;
+  bool   hasWifi              = 4;
+  bool   hasBluetooth         = 5;
+  bool   hasEthernet          = 6;
+  uint32 role                 = 7;   // Config.DeviceConfig.Role
+  uint32 position_flags       = 8;
+  uint32 hw_model             = 9;   // HardwareModel
+  bool   hasRemoteHardware    = 10;
+}
+
+// --- top-level transport messages -------------------------------------------
+
+message ToRadio {
+  oneof payload_variant {
+    MeshPacket packet         = 1;
+    uint32     want_config_id = 3;
+    bool       disconnect     = 4;
+  }
+}
+
+message FromRadio {
+  uint32 id = 1;
+  oneof payload_variant {
+    MeshPacket     packet             = 2;
+    MyNodeInfo     my_info            = 3;
+    NodeInfo       node_info          = 4;
+    uint32         config_complete_id = 7;
+    bool           rebooted           = 8;
+    DeviceMetadata metadata           = 13;
+  }
+}

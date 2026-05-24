@@ -1,0 +1,10 @@
+# nanopb field options — make variable-length fields fixed-size so the generated
+# structs are plain C (no encode/decode callbacks). Sizes cover Meshtastic's
+# real limits with headroom; payload/encrypted bounded well under MAXPACKET.
+
+meshtastic.User.id                          max_size:16
+meshtastic.User.long_name                   max_size:40
+meshtastic.User.short_name                  max_size:8
+meshtastic.Data.payload                     max_size:256
+meshtastic.MeshPacket.encrypted             max_size:256
+meshtastic.DeviceMetadata.firmware_version  max_size:24
