@@ -1,0 +1,89 @@
+#pragma once
+// =============================================================================
+// Board configuration — ESP8285 + Semtech SX1280, "BayckRC 7PWM" class
+// (ExpressLRS hardware target "Generic 2400 PWMP7"). Waymesh Tier 2/3, PoC #0.
+//
+// Pin map derived from the ExpressLRS targets repo, RX/"Generic 2400 PWMP7.json"
+// (no dedicated BayckRC target exists upstream; the 7-PWM ESP8285/SX1280 RX
+// builds against this generic layout). SPI pins are the ESP8266 fixed HW-SPI
+// pins, which the PWMP7 layout matches exactly.
+// =============================================================================
+
+#include <RadioLib.h>  // for RADIOLIB_NC
+
+// ---- SX1280 SPI + control pins ---------------------------------------------
+// ESP8266/ESP8285 hardware SPI is on FIXED pins: SCK=GPIO14, MISO=GPIO12,
+// MOSI=GPIO13, HW-CS=GPIO15. SPI.begin() takes no pin args. PWMP7 puts
+// radio_sck/miso/mosi/nss on exactly those pins, so no remap is needed.
+//   (GPIO15 is a boot strap that must be LOW at reset; SPI CS idles HIGH after
+//    boot — standard for ELRS 8285 SX1280 boards, the board has the strap R.)
+#ifndef PIN_LORA_NSS
+#define PIN_LORA_NSS 15   // radio_nss (hardware CS)
+#endif
+#ifndef PIN_LORA_DIO1
+#define PIN_LORA_DIO1 4   // radio_dio1 (IRQ)
+#endif
+
+// BUSY / RST: the PWMP7 generic target SACRIFICES these GPIOs to free a 6th/7th
+// PWM output, so it declares no MCU BUSY/RST. PoC #0 uses NO PWM, so we instead
+// wire them to the SX1280 using the PWMP5/PWMP6 canonical assignment (busy=5,
+// rst=2) — this gives RadioLib a real BUSY line, which is the reliable path.
+//
+// EMPIRICAL: if begin() returns a timeout (-707 / SPI_CMD_TIMEOUT), the physical
+// board likely follows the PWMP7 "no BUSY/RST" wiring (GPIO5/GPIO2 routed to
+// servo headers, not the radio). In that case set both to RADIOLIB_NC and
+// rebuild — RadioLib SX128x falls back to timed waits without a BUSY pin.
+//   (GPIO2 is a boot strap that must be HIGH at reset; SX1280 RST idles HIGH, OK.)
+#ifndef PIN_LORA_BUSY
+#define PIN_LORA_BUSY 5   // radio_busy   (set to RADIOLIB_NC if PWMP7 wiring)
+#endif
+#ifndef PIN_LORA_RST
+#define PIN_LORA_RST 2    // radio_rst    (set to RADIOLIB_NC if PWMP7 wiring)
+#endif
+
+// ---- Status LED (PWMP7 led=16) ----------------------------------------------
+#ifndef PIN_LED
+#define PIN_LED 16
+#endif
+#ifndef LED_ACTIVE_LOW
+#define LED_ACTIVE_LOW 0  // polarity unconfirmed on this board; flip if dark
+#endif
+
+// ---- SX1280 2.4 GHz LoRa radio configuration --------------------------------
+// THESE MUST MATCH THE XR2 (waymesh-node board_config.h) FOR INTEROP (PoC #0):
+//   freq 2450 MHz, BW 812.5 kHz, SF9, CR 4/5, preamble 8, sync PRIVATE.
+#ifndef LORA_FREQ_MHZ
+#define LORA_FREQ_MHZ 2450.0f
+#endif
+#ifndef LORA_BW_KHZ
+#define LORA_BW_KHZ 812.5f      // SX1280 BW set: 203.125 / 406.25 / 812.5 / 1625
+#endif
+#ifndef LORA_SF
+#define LORA_SF 9               // SF5..SF12
+#endif
+#ifndef LORA_CR
+#define LORA_CR 5               // 4/5..4/8 -> 5..8. STANDARD interleave only:
+                                // the LR1121 lacks the SX1280 long-interleave CR
+                                // variants, so we force longInterleave=false.
+#endif
+#ifndef LORA_POWER_DBM
+#define LORA_POWER_DBM 10       // match XR2 stock telemetry power
+#endif
+#ifndef LORA_PREAMBLE
+#define LORA_PREAMBLE 8
+#endif
+// Sync word: LR1121 used RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE (0x12). SX128x
+// begin() takes NO sync-word arg, so we set it explicitly. Whether 0x12 produces
+// the SAME on-air sync across the two chip families is THE interop question PoC
+// #0 answers — keep this tunable and sweep on-air if no frames are heard.
+#ifndef LORA_SYNC_WORD
+#define LORA_SYNC_WORD 0x12
+#endif
+
+// ---- Behavior (match XR2 cadence) -------------------------------------------
+#ifndef BEACON_PERIOD_MS
+#define BEACON_PERIOD_MS 2000
+#endif
+#ifndef STATUS_PERIOD_MS
+#define STATUS_PERIOD_MS 5000
+#endif

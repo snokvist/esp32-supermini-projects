@@ -99,12 +99,18 @@ are **ESP8285 + SX1280** ([02](02-hardware-and-rf-platform.md)). New firmware
 target under `projects/` (espressif8266 platform, RadioLib SX1280); flashed via
 UART pads + GPIO0 (esptool).
 
-- **PoC #0 — LR1121 ↔ SX1280 LoRa interop (the gate for the whole mesh).**
-  *Outcome:* an SX1280 8285 node receives the XR2's v1 beacon (and vice-versa) on
-  matched params (2450 MHz, BW 812.5, SF9, CR4/5, sync word, preamble).
-  *Validates:* the cross-chip 2.4-LoRa air interface. *Metric:* PDR both ways.
-  *Go/No-Go:* reliable cross-chip RX — **without this the heterogeneous mesh does
-  not exist.**
+- **PoC #0 — LR1121 ↔ SX1280 LoRa interop (the gate for the whole mesh) —
+  DONE & device-verified (2026-05-24).** A BayckRC 7PWM (ESP8285 + SX1280,
+  `projects/waymesh-8285`) and the XR2 (LR1121) exchange the byte-identical v1
+  beacon on matched params (2450 MHz, BW 812.5, SF9, CR4/5 **standard
+  interleave**, **sync word 0x12 PRIVATE**, preamble 8): **PDR 100% both ways,
+  badcrc=0, RSSI ~−19 dBm / SNR ~12 dB** at bench range. The 8285 node then
+  surfaces as a peer (`!006d2929` / Waymesh_2929) in a stock Meshtastic app via
+  the XR2 BLE gateway — the full Tier-2→Tier-1→app chain. Cross-chip interop
+  needed **no parameter tuning** (sync word `0x12` matched across families on the
+  first flash). BUSY=GPIO5/RST=GPIO2 confirmed wired to the SX1280 on the BayckRC
+  (not the PWMP7 "no-BUSY" layout). **Gate passed — the heterogeneous mesh is
+  real.**
 - **Tier 2 — mid node (7PWM): GPS-over-remapped-PWM-UART + beacon + relay.**
   *Outcome:* the 8285 reads GNSS on a SoftwareSerial mapped to a PWM-output GPIO
   and beacons its v1 position; appears as a peer in the gateway. *Validates:* the
