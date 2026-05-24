@@ -87,3 +87,40 @@
 #ifndef STATUS_PERIOD_MS
 #define STATUS_PERIOD_MS 5000
 #endif
+
+// ---- Managed-flood relay (Tier 2/3) -----------------------------------------
+// Compiled ONLY when WAYMESH_RELAY is set in the env build_flags. Re-floods
+// unseen beacons VERBATIM (same srcId/seq, so the gateway still attributes
+// presence to the true originator) with: a seen-set for dedup, an
+// SNR-proportional rebroadcast delay (weaker-SNR receivers wait longer so the
+// best-placed relay goes first), and overhear suppression (cancel a pending
+// rebroadcast if the same MessageID is heard again). See
+// docs/hybrid-mesh/05-protocol.md §"Suppression & dedup state".
+//
+// NO hop-limit: the as-built beacon (v0/v1) carries no hop field, so the
+// seen-set alone bounds the flood — each node relays each MessageID = (srcId,
+// seq) at most once, and a node ignores its own srcId, so the flood terminates.
+// A real decrementing hop-limit arrives with the LRP-header migration (05 §LRP).
+#if WAYMESH_RELAY
+#ifndef RELAY_SEEN_SET_SIZE
+#define RELAY_SEEN_SET_SIZE 32      // recent MessageIDs remembered (ring buffer)
+#endif
+#ifndef RELAY_PENDING_SLOTS
+#define RELAY_PENDING_SLOTS 4       // rebroadcasts that can be in flight at once
+#endif
+#ifndef RELAY_DELAY_BASE_MS
+#define RELAY_DELAY_BASE_MS 20      // floor wait before a rebroadcast
+#endif
+#ifndef RELAY_DELAY_PER_DB_MS
+#define RELAY_DELAY_PER_DB_MS 12    // extra wait per dB below the SNR reference
+#endif
+#ifndef RELAY_SNR_REF_DB
+#define RELAY_SNR_REF_DB 12.0f      // SNR at/above which delay == base
+#endif
+#ifndef RELAY_DELAY_MAX_MS
+#define RELAY_DELAY_MAX_MS 250      // cap (also the suppression listen window)
+#endif
+#ifndef RELAY_DELAY_JITTER_MS
+#define RELAY_DELAY_JITTER_MS 15    // tie-break jitter added to each delay
+#endif
+#endif  // WAYMESH_RELAY
