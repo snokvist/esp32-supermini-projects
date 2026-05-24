@@ -206,8 +206,11 @@ incrementally:
    with live GPS Position + config_complete_id) renders in the unmodified
    `meshtastic --ble --info` CLI — node `!b17506dc` / `Waymesh_06DC`,
    `PRIVATE_HW`, position. nanopb vendored in `lib/nanopb/`; the trimmed proto is
-   wire-compatible with upstream. Still to do here: LoRa-peer NodeInfo (other
-   nodes) + text RX.
+   wire-compatible with upstream. **Increment 1b adds the peer node DB:** each
+   LoRa beacon (v1, with position — [05](05-protocol.md)) is upserted and emitted
+   as a `NodeInfo`/`Position` in the handshake *and* live (rate-limited FromNum
+   bump), so other nodes appear/update in the app. The peers are Tier-2/3 ESP8285
+   nodes ([02](02-hardware-and-rf-platform.md)). Still to do here: **text RX**.
 2. **TX** — phone sends text → decrypt with advertised PSK → flood onto the LoRa
    mesh.
 3. **Channels / config-write** — multiple channels, accept-and-reflect config.

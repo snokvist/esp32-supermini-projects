@@ -38,15 +38,25 @@ static TinyGPSPlus gGps;
 static HardwareSerial gGnssSerial(1);
 
 // ---- Loopback beacon packet -------------------------------------------------
+// v1 adds GPS position so peers can be mapped (Phase G 1b). Backward-compatible:
+// a v0 (8-byte) beacon is still parsed for srcId/seq; the position tail is read
+// only when present (len >= sizeof(Beacon)) and BEACON_FLAG_POS is set.
 static const uint8_t WM_MAGIC = 0x57;  // 'W'
-static const uint8_t WM_VERSION = 0;
+static const uint8_t WM_VERSION = 1;
+static const uint8_t BEACON_FLAG_POS = 0x01;  // lat_i/lon_i valid
 
 struct __attribute__((packed)) Beacon {
   uint8_t magic;
   uint8_t version;
   uint32_t srcId;
   uint16_t seq;
+  // v1 tail:
+  int32_t lat_i;   // degrees * 1e7
+  int32_t lon_i;   // degrees * 1e7
+  uint8_t sats;
+  uint8_t flags;   // BEACON_FLAG_*
 };
+static const size_t BEACON_V0_SIZE = 8;  // magic+version+srcId+seq
 
 // ---- State ------------------------------------------------------------------
 static uint32_t gNodeId = 0;
@@ -104,10 +114,17 @@ static void startRx() {
 
 static void sendBeacon() {
   Beacon b;
+  memset(&b, 0, sizeof(b));
   b.magic = WM_MAGIC;
   b.version = WM_VERSION;
   b.srcId = gNodeId;
   b.seq = gTxSeq;
+  if (gGps.location.isValid()) {
+    b.lat_i = (int32_t)lround(gGps.location.lat() * 1e7);
+    b.lon_i = (int32_t)lround(gGps.location.lng() * 1e7);
+    b.sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
+    b.flags |= BEACON_FLAG_POS;
+  }
 
   int16_t st = gRadio.transmit((uint8_t *)&b, sizeof(b));
   if (st == RADIOLIB_ERR_NONE) {
@@ -130,9 +147,20 @@ static void sendBeacon() {
 }
 
 static void handleRx() {
+  // Read exactly the received length so a v0 (8-byte) beacon and a v1 (with
+  // position tail) beacon both parse; the position tail is read only if present.
+  uint8_t raw[sizeof(Beacon)];
+  memset(raw, 0, sizeof(raw));
+  size_t plen = gRadio.getPacketLength();
+  if (plen > sizeof(raw)) plen = sizeof(raw);
+  int16_t st = gRadio.readData(raw, plen);
+
   Beacon b;
-  int16_t st = gRadio.readData((uint8_t *)&b, sizeof(b));
-  if (st == RADIOLIB_ERR_NONE && b.magic == WM_MAGIC && b.srcId != gNodeId) {
+  memset(&b, 0, sizeof(b));
+  if (plen >= BEACON_V0_SIZE) memcpy(&b, raw, plen);
+
+  if (st == RADIOLIB_ERR_NONE && plen >= BEACON_V0_SIZE && b.magic == WM_MAGIC &&
+      b.srcId != gNodeId) {
     gRxCount++;
     float rssi = gRadio.getRSSI();
     float snr = gRadio.getSNR();
@@ -141,7 +169,7 @@ static void handleRx() {
       // Signed modular delta: >0 is a forward gap (missed beacons); <=0 is a
       // duplicate / reordered / post-restart frame and must NOT count as loss.
       // (The old unsigned subtraction wrapped to ~65535 on any dup and exploded
-      // the PDR estimate.) Assumes a single peer.
+      // the PDR estimate.) Assumes a single peer (Phase 0 PDR metric).
       int16_t delta = (int16_t)(b.seq - expected);
       if (delta > 0) {
         gRxSeqGaps += (uint16_t)delta;
@@ -150,6 +178,12 @@ static void handleRx() {
     gLastRxSeq = b.seq;
     gHaveLastRxSeq = true;
     logEvent("rx", "lrp", b.srcId, b.seq, rssi, snr, "beacon");
+
+    // Feed the BLE gateway's peer node DB (Phase G 1b). Position only when the
+    // v1 tail is present and flagged.
+    bool posValid = b.version >= 1 && plen >= sizeof(Beacon) &&
+                    (b.flags & BEACON_FLAG_POS);
+    bleGattOnPeer(b.srcId, b.lat_i, b.lon_i, b.sats, posValid, snr);
   } else if (st != RADIOLIB_ERR_NONE) {
     gRxBadCount++;
     char buf[20];
@@ -171,6 +205,42 @@ static void printStatus() {
            (unsigned long)(gGps.satellites.isValid() ? gGps.satellites.value() : 0));
   logEvent("status", "node", 0, -1, NAN, NAN, extra);
 }
+
+// UTC epoch seconds from the GNSS date/time, or 0 if no valid time fix.
+// (Howard Hinnant's days_from_civil.) Used for Meshtastic NodeInfo.last_heard.
+static uint32_t gpsEpoch() {
+  if (!gGps.date.isValid() || !gGps.time.isValid() || gGps.date.year() < 2024) {
+    return 0;
+  }
+  int y = (int)gGps.date.year();
+  unsigned m = gGps.date.month();
+  unsigned d = gGps.date.day();
+  y -= (m <= 2);
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  const long days = (long)era * 146097 + (long)doe - 719468;
+  return (uint32_t)(days * 86400L + gGps.time.hour() * 3600L +
+                    gGps.time.minute() * 60L + gGps.time.second());
+}
+
+#if WAYMESH_TEST_PEER
+// Inject a synthetic LoRa peer (no RF) to validate the gateway node-DB ->
+// NodeInfo -> Meshtastic path on a single node. Build env esp32c3_xr2_testpeer
+// only; never compiled into the production env. The peer drifts each tick so
+// live position updates are exercised too.
+static void injectTestPeer() {
+  static unsigned long last = 0;
+  static int step = 0;
+  const unsigned long now = millis();
+  if (now - last < 2000) return;
+  last = now;
+  bleGattOnPeer(0xCAFE1234, 587530000 + step * 300L, 168600000 + step * 300L,
+                7, true, -8.5f);
+  step = (step + 1) % 60;
+}
+#endif
 
 // ---- Setup / loop -----------------------------------------------------------
 void setup() {
@@ -225,11 +295,13 @@ void loop() {
     if (gGps.encode(gGnssSerial.read()) && gGps.location.isUpdated() &&
         gGps.location.isValid()) {
       logEvent("gps_fix", "node", 0, -1, NAN, NAN, "");
-      // Feed the fix to the BLE gateway's self NodeInfo (degrees * 1e7).
+      // Feed the fix to the BLE gateway's self NodeInfo (degrees * 1e7) + the
+      // current epoch (for NodeInfo.last_heard on self and peers).
       bleGattSetPosition(
           (int32_t)lround(gGps.location.lat() * 1e7),
           (int32_t)lround(gGps.location.lng() * 1e7),
           gGps.satellites.isValid() ? gGps.satellites.value() : 0, true);
+      bleGattSetTime(gpsEpoch());
     }
   }
 
@@ -249,6 +321,10 @@ void loop() {
       sendBeacon();
     }
   }
+
+#if WAYMESH_TEST_PEER
+  injectTestPeer();
+#endif
 
   bleGattLoop();
 

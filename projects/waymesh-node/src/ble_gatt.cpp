@@ -31,18 +31,53 @@ static NimBLECharacteristic *gFromNum = nullptr;
 static volatile bool gBleConnected = false;
 static uint32_t gFromNumVal = 0;
 
-// --- self identity / latest GPS fix (fed from main.cpp) ----------------------
+// --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
 static uint32_t gNodeId = 0;
-static portMUX_TYPE gPosMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE gPosMux = portMUX_INITIALIZER_UNLOCKED;  // guards the below
 static int32_t gLatI = 0, gLonI = 0;
 static uint32_t gSats = 0;
 static bool gPosValid = false;
+static uint32_t gEpoch = 0;  // current UTC epoch seconds (0 = unknown)
+
+// --- peer node DB (Phase G 1b) ----------------------------------------------
+// Peers heard over LoRa, projected to Meshtastic NodeInfo. Written from the main
+// loop task (bleGattOnPeer/handleRx), read from the BLE host task (handshake).
+static const int kMaxPeers = 16;
+static const unsigned long kPeerEmitMinMs = 3000;  // min gap between live emits
+struct Peer {
+  uint32_t nodeId;
+  int32_t latI, lonI;
+  uint32_t sats;
+  bool posValid;
+  float snr;
+  uint32_t lastHeardEpoch;
+  unsigned long lastEmitMs;  // 0 = not yet emitted this connection
+  bool used;
+};
+static Peer gPeers[kMaxPeers];
+static portMUX_TYPE gDbMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Find a peer slot by id, else a free slot, else evict the stalest. Caller holds
+// gDbMux. Never returns null (eviction guarantees a slot).
+static Peer *peerSlot(uint32_t nodeId) {
+  Peer *freeSlot = nullptr;
+  Peer *stalest = &gPeers[0];
+  for (int i = 0; i < kMaxPeers; i++) {
+    if (gPeers[i].used && gPeers[i].nodeId == nodeId) return &gPeers[i];
+    if (!gPeers[i].used && !freeSlot) freeSlot = &gPeers[i];
+    if (gPeers[i].lastHeardEpoch < stalest->lastHeardEpoch) stalest = &gPeers[i];
+  }
+  return freeSlot ? freeSlot : stalest;
+}
 
 // --- FromRadio frame queue ---------------------------------------------------
 // Each Meshtastic client read pops one serialized FromRadio frame; the client
 // reads until it gets an empty frame, then waits for the next FromNum notify.
 static const size_t kFrameMax = 384;  // > meshtastic_FromRadio_size (333)
-static const int kQDepth = 12;
+// The whole handshake (my_info + metadata + self + every peer + complete) is
+// enqueued atomically on the BLE task before the first read, so the ring must
+// hold kMaxPeers + ~4 overhead frames at once.
+static const int kQDepth = 24;
 struct FrameQ {
   uint8_t buf[kFrameMax];
   uint16_t len;
@@ -88,12 +123,14 @@ static int qPop(uint8_t *out, size_t cap) {
   return n;
 }
 
-// Frame production (queueConfigSequence -> enqueueFromRadio) currently runs only
-// on the NimBLE host task (the ToRadio onWrite callback), so gFrameIdSeq is
-// single-producer. When a main-loop producer is added (1b: LoRa-peer NodeInfo),
-// guard the id increment under gQMux.
+// Frame production now has two producer tasks: the NimBLE host task (handshake
+// in the ToRadio onWrite callback) and the main loop task (live peer NodeInfo
+// via bleGattOnPeer/handleRx). gFrameIdSeq is incremented under gQMux to stay
+// safe across both.
 static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
+  portENTER_CRITICAL(&gQMux);
   fr->id = ++gFrameIdSeq;
+  portEXIT_CRITICAL(&gQMux);
   uint8_t tmp[kFrameMax];
   pb_ostream_t os = pb_ostream_from_buffer(tmp, sizeof(tmp));
   if (!pb_encode(&os, meshtastic_FromRadio_fields, fr)) {
@@ -105,6 +142,34 @@ static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
     return false;
   }
   return true;
+}
+
+// Fill a FromRadio{node_info} for one node (self or peer). snr 0 for self.
+static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
+                               bool posValid, int32_t latI, int32_t lonI,
+                               uint32_t sats, float snr, uint32_t lastHeard) {
+  *fr = meshtastic_FromRadio_init_zero;
+  fr->which_payload_variant = meshtastic_FromRadio_node_info_tag;
+  meshtastic_NodeInfo &ni = fr->payload_variant.node_info;
+  ni.num = nodeId;
+  ni.has_user = true;
+  snprintf(ni.user.id, sizeof(ni.user.id), "!%08x", (unsigned)nodeId);
+  snprintf(ni.user.long_name, sizeof(ni.user.long_name), "Waymesh_%04X",
+           (unsigned)(nodeId & 0xFFFF));
+  snprintf(ni.user.short_name, sizeof(ni.user.short_name), "%04X",
+           (unsigned)(nodeId & 0xFFFF));
+  ni.user.hw_model = WAYMESH_HW_MODEL;
+  ni.user.role = WAYMESH_ROLE;
+  ni.snr = snr;
+  ni.last_heard = lastHeard;
+  if (posValid) {
+    ni.has_position = true;
+    ni.position.latitude_i = latI;
+    ni.position.longitude_i = lonI;
+    ni.position.location_source = MESH_LOC_INTERNAL;
+    ni.position.sats_in_view = sats;
+    ni.position.time = lastHeard;
+  }
 }
 
 // Build + queue the connect handshake in response to ToRadio{want_config_id}.
@@ -132,41 +197,40 @@ static void queueConfigSequence(uint32_t wantConfigId) {
 
   // 3) Self NodeInfo (with the live GPS position, if we have a fix).
   int32_t latI, lonI;
-  uint32_t sats;
+  uint32_t sats, epoch;
   bool posValid;
   portENTER_CRITICAL(&gPosMux);
-  latI = gLatI; lonI = gLonI; sats = gSats; posValid = gPosValid;
+  latI = gLatI; lonI = gLonI; sats = gSats; posValid = gPosValid; epoch = gEpoch;
   portEXIT_CRITICAL(&gPosMux);
-
-  fr = meshtastic_FromRadio_init_zero;
-  fr.which_payload_variant = meshtastic_FromRadio_node_info_tag;
-  meshtastic_NodeInfo &ni = fr.payload_variant.node_info;
-  ni.num = gNodeId;
-  ni.has_user = true;
-  snprintf(ni.user.id, sizeof(ni.user.id), "!%08x", (unsigned)gNodeId);
-  snprintf(ni.user.long_name, sizeof(ni.user.long_name), "Waymesh_%04X",
-           (unsigned)(gNodeId & 0xFFFF));
-  snprintf(ni.user.short_name, sizeof(ni.user.short_name), "%04X",
-           (unsigned)(gNodeId & 0xFFFF));
-  ni.user.hw_model = WAYMESH_HW_MODEL;
-  ni.user.role = WAYMESH_ROLE;
-  if (posValid) {
-    ni.has_position = true;
-    ni.position.latitude_i = latI;
-    ni.position.longitude_i = lonI;
-    ni.position.location_source = MESH_LOC_INTERNAL;
-    ni.position.sats_in_view = sats;
-  }
+  buildNodeInfoFrame(&fr, gNodeId, posValid, latI, lonI, sats, 0.0f, epoch);
   enqueueFromRadio(&fr);
 
-  // 4) config_complete_id — echoes the nonce; the client treats this as "done".
+  // 4) One NodeInfo per peer heard over LoRa (snapshot each under the DB lock,
+  //    then build/encode outside it).
+  int peers = 0;
+  for (int i = 0; i < kMaxPeers; i++) {
+    Peer p{};
+    bool used;
+    portENTER_CRITICAL(&gDbMux);
+    used = gPeers[i].used;
+    if (used) p = gPeers[i];
+    portEXIT_CRITICAL(&gDbMux);
+    if (!used) continue;
+    buildNodeInfoFrame(&fr, p.nodeId, p.posValid, p.latI, p.lonI, p.sats, p.snr,
+                       p.lastHeardEpoch);
+    enqueueFromRadio(&fr);
+    peers++;
+  }
+
+  // 5) config_complete_id — echoes the nonce; the client treats this as "done".
   fr = meshtastic_FromRadio_init_zero;
   fr.which_payload_variant = meshtastic_FromRadio_config_complete_id_tag;
   fr.payload_variant.config_complete_id = wantConfigId;
   enqueueFromRadio(&fr);
 
-  Serial.printf("# BLE handshake queued (4 frames) for want_config_id=%u\n",
-                (unsigned)wantConfigId);
+  Serial.printf("# BLE handshake queued (self + %d peer(s)) for "
+                "want_config_id=%u\n",
+                peers, (unsigned)wantConfigId);
 }
 
 // --- GATT callbacks ----------------------------------------------------------
@@ -295,4 +359,52 @@ void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
   gSats = sats_in_view;
   gPosValid = valid;
   portEXIT_CRITICAL(&gPosMux);
+}
+
+void bleGattSetTime(uint32_t epoch) {
+  portENTER_CRITICAL(&gPosMux);
+  gEpoch = epoch;
+  portEXIT_CRITICAL(&gPosMux);
+}
+
+void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
+                   uint32_t sats_in_view, bool pos_valid, float snr) {
+  uint32_t epoch;
+  portENTER_CRITICAL(&gPosMux);
+  epoch = gEpoch;
+  portEXIT_CRITICAL(&gPosMux);
+
+  // Upsert the peer, then decide (rate-limited) whether to emit a live NodeInfo.
+  bool emit = false;
+  Peer snap{};
+  portENTER_CRITICAL(&gDbMux);
+  Peer *p = peerSlot(node_id);
+  if (p->nodeId != node_id || !p->used) {  // (re)claimed slot — reset emit gate
+    *p = Peer{};
+    p->nodeId = node_id;
+    p->used = true;
+  }
+  if (pos_valid) {
+    p->latI = lat_i;
+    p->lonI = lon_i;
+    p->sats = sats_in_view;
+    p->posValid = true;
+  }
+  p->snr = snr;
+  p->lastHeardEpoch = epoch;
+  unsigned long now = millis();
+  if (gBleConnected && (p->lastEmitMs == 0 || now - p->lastEmitMs >= kPeerEmitMinMs)) {
+    p->lastEmitMs = now;
+    snap = *p;
+    emit = true;
+  }
+  portEXIT_CRITICAL(&gDbMux);
+
+  if (emit) {
+    meshtastic_FromRadio fr;
+    buildNodeInfoFrame(&fr, snap.nodeId, snap.posValid, snap.latI, snap.lonI,
+                       snap.sats, snap.snr, snap.lastHeardEpoch);
+    enqueueFromRadio(&fr);
+    Serial.printf("# BLE peer %08X -> NodeInfo (live)\n", (unsigned)node_id);
+  }
 }
