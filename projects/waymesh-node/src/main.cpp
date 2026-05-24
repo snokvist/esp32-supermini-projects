@@ -27,6 +27,7 @@
 #include <TinyGPSPlus.h>
 
 #include "board_config.h"
+#include "ble_gatt.h"
 
 // ---- Radio ------------------------------------------------------------------
 // LR11x0 Module pin order: (NSS/CS, IRQ/DIO1, RESET, BUSY)
@@ -212,6 +213,10 @@ void setup() {
     gRadioOk = true;
     logEvent("boot", "node", gNodeId, -1, NAN, NAN, "radio_ok");
   }
+
+  // Meshtastic BLE GATT transport (Phase G, increment 1 — stub). Comes up even if
+  // the radio failed, so the BLE path can be brought up/tested independently.
+  bleGattBegin(gNodeId);
 }
 
 void loop() {
@@ -239,6 +244,8 @@ void loop() {
       sendBeacon();
     }
   }
+
+  bleGattLoop();
 
   const unsigned long nowStatus = millis();
   if (nowStatus - gLastStatusMs >= STATUS_PERIOD_MS) {
