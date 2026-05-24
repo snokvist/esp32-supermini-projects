@@ -324,12 +324,14 @@ void loop() {
         gGps.location.isValid()) {
       logEvent("gps_fix", "node", 0, -1, NAN, NAN, "");
       // Feed the fix to the BLE gateway's self NodeInfo (degrees * 1e7) + the
-      // current epoch (for NodeInfo.last_heard on self and peers).
+      // current epoch (for NodeInfo.last_heard on self and peers). SetTime FIRST:
+      // bleGattSetPosition now also live-emits the self NodeInfo and stamps it
+      // with the current epoch, so the epoch must be fresh before that emit.
+      bleGattSetTime(gpsEpoch());
       bleGattSetPosition(
           (int32_t)lround(gGps.location.lat() * 1e7),
           (int32_t)lround(gGps.location.lng() * 1e7),
           gGps.satellites.isValid() ? gGps.satellites.value() : 0, true);
-      bleGattSetTime(gpsEpoch());
     }
   }
 
