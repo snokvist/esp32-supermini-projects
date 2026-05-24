@@ -29,3 +29,14 @@ void bleGattLoop();
 // handshake. lat_i/lon_i are degrees * 1e7 (the Meshtastic Position encoding).
 void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
                         bool valid);
+
+// Feed the current UTC epoch (seconds) from GNSS, 0 if unknown. Used for
+// NodeInfo.last_heard on self and peers.
+void bleGattSetTime(uint32_t epoch);
+
+// Record a peer heard over LoRa (Phase G 1b). Upserts the gateway node DB; while
+// a client is connected it also enqueues a live NodeInfo (rate-limited) so the
+// peer appears/updates in the Meshtastic app. Called from the main loop task
+// (handleRx). lat_i/lon_i are degrees * 1e7; pos_valid gates the Position.
+void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
+                   uint32_t sats_in_view, bool pos_valid, float snr);

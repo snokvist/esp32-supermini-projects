@@ -31,6 +31,12 @@ Phases keep their original research-plan numbers (so the deferred set in
 [12](12-end-goal-full-hybrid-mesh.md) stays consistent); the active order is the
 list above, not the numeric order.
 
+**Heterogeneous tiers (new strand):** the real P3/P5 peers are not all XR2s —
+Tier-2 (Bayck 7PWM) and Tier-3 (BetaFPV Nano) are **ESP8285 + SX1280**
+([02](02-hardware-and-rf-platform.md)). That work is **Phase H** below, gated by
+**PoC #0** (LR1121↔SX1280 LoRa interop). The gateway (Phase G) is tier-agnostic —
+it renders any received beacon as a peer regardless of the sender's silicon.
+
 The gate question for every phase: **"Does this provide a measurable real-world
 advantage over plain 2.4-LoRa-flood?"** If no, narrow scope or stop.
 
@@ -70,7 +76,11 @@ advantage over plain 2.4-LoRa-flood?"** If no, narrow scope or stop.
   our UI.
 - **Increments (ship in order):**
   1. **Read-only** — NimBLE GATT server + `want_config_id` handshake + node DB +
-     positions + text RX. Open the Meshtastic app and watch the P3 mesh appear.
+     positions + text RX. **1a + 1b DONE & device-verified (2026-05-24):** the
+     handshake (MyNodeInfo / DeviceMetadata / self + peer NodeInfo /
+     config_complete) and the peer node DB (LoRa beacon → NodeInfo, live FromNum
+     updates) render in the stock `meshtastic --ble --info`. Text RX is the
+     remaining piece of increment 1.
   2. **TX** — phone sends text → decrypt with the advertised channel PSK → flood
      onto the 2.4-LoRa mesh.
   3. **Channels / config-write** — multiple channels, accept-and-reflect config.
@@ -81,6 +91,32 @@ advantage over plain 2.4-LoRa-flood?"** If no, narrow scope or stop.
   throughput; LoRa PDR with BLE idle vs advertising vs connected.
 - **Go/No-Go:** an unmodified Meshtastic client reliably lists nodes/positions and
   round-trips text over our LoRa mesh, with quantified BLE↔LoRa coexistence cost.
+
+## Phase H — Heterogeneous tiers (ESP8285 + SX1280) — **ACTIVE (new strand)**
+
+The P3/P5 peers aren't all XR2s: Tier-2 (Bayck 7PWM) and Tier-3 (BetaFPV Nano)
+are **ESP8285 + SX1280** ([02](02-hardware-and-rf-platform.md)). New firmware
+target under `projects/` (espressif8266 platform, RadioLib SX1280); flashed via
+UART pads + GPIO0 (esptool).
+
+- **PoC #0 — LR1121 ↔ SX1280 LoRa interop (the gate for the whole mesh).**
+  *Outcome:* an SX1280 8285 node receives the XR2's v1 beacon (and vice-versa) on
+  matched params (2450 MHz, BW 812.5, SF9, CR4/5, sync word, preamble).
+  *Validates:* the cross-chip 2.4-LoRa air interface. *Metric:* PDR both ways.
+  *Go/No-Go:* reliable cross-chip RX — **without this the heterogeneous mesh does
+  not exist.**
+- **Tier 2 — mid node (7PWM): GPS-over-remapped-PWM-UART + beacon + relay.**
+  *Outcome:* the 8285 reads GNSS on a SoftwareSerial mapped to a PWM-output GPIO
+  and beacons its v1 position; appears as a peer in the gateway. *Validates:* the
+  PWM-pin-as-UART PoC + a non-C3 GPS beacon. *Metric:* GPS fix over SoftSerial;
+  beacon PDR to the gateway.
+- **Tier 3 — dumb relay (Nano): forward-only + suppression + low-mem dedup.**
+  *Outcome:* re-floods unseen beacons with hop-limit, overhear suppression, and a
+  small fixed-size seen-set (RAM-frugal dedup) — no GPS/BLE. *Validates:* managed
+  flood on the cheapest tier (P5's discipline on Tier-3 silicon). *Metric:*
+  redundancy factor R, RAM footprint, no-storm under load.
+- **Go/No-Go (strand):** a mixed C3 + 8285 mesh delivers presence/GPS/text with
+  the dumb relays extending range — the heterogeneous thesis vs all-C3.
 
 ## Phase 5 — Managed-flood relay (flat multi-hop) — **ACTIVE (as the mesh grows)**
 

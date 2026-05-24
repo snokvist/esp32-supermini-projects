@@ -5,6 +5,54 @@ The physical reality the architecture must respect. The first target is the
 chipset this program assumes — but configured as a **2.4 GHz-only** board. All
 current figures are datasheet-derived and **must be bench-verified** in Phase 0.
 
+## Node hardware tiers (heterogeneous)
+
+The program deliberately mixes capability tiers — the *cheapest silicon that can
+do each job* — rather than full smart nodes everywhere. Thesis: a few smart
+gateways + many cheap GPS beacons + sparse dumb relays scales, powers, and
+deploys better than an all-C3 mesh ([01](01-vision-and-requirements.md),
+[03](03-comparative-analysis.md)).
+
+| Tier | Example board | MCU | LoRa radio | Local / aux | Role |
+|------|---------------|-----|------------|-------------|------|
+| **1 — smart** | RadioMaster XR2 Nano | ESP32-C3 | **LR1121** 2.4 GHz | WiFi/BLE, ESP-NOW, GNSS | gateway, aggregation, mobility, BLE/phone |
+| **2 — mid** | Bayck 7PWM RX | ESP8285 | **SX1280** 2.4 GHz | GNSS via remapped PWM-pin UART | GPS beacon + packet relay, battery tracker |
+| **3 — dumb relay** | BetaFPV Nano RX | ESP8285 | **SX1280** 2.4 GHz | none | forward-only repeater, low-power always-on |
+
+All three are ELRS-class boards already in hand (ELRS is the known-good driver
+reference for each radio). They share exactly **one** thing on the wire: the
+2.4 GHz LoRa long-range plane. The rest of this doc details Tier 1 (the XR2, our
+first target); Tier 2/3 hardware notes follow the interop section.
+
+### The interop crux: LR1121 (Tier 1) ↔ SX1280 (Tier 2/3)
+
+Tier 1 runs a **Semtech LR1121**; Tiers 2/3 run a **Semtech SX1280** (the ELRS
+2.4 GHz radio). These are *different chips* — the heterogeneous mesh only works
+if they share the air. They can: the **LR1121's 2.4 GHz LoRa mode is designed to
+be SX1280-compatible**, so with *exactly matched* PHY parameters a frame TX'd by
+one is RX'd by the other. This is unproven in our setup and is the first thing to
+validate — **PoC #0** ([09](09-poc-roadmap.md)):
+
+- **Sync word** encoding differs between the families; the on-air value must
+  match (Tier-1 default is LoRa "private").
+- **Coding rate:** the SX1280 offers "long-interleave" (LI) CR variants the
+  LR1121 lacks — use the *standard* CR modes on both.
+- Tier-1 config to match: 2450 MHz, BW 812.5 kHz, SF9, CR4/5, preamble — all
+  valid SX1280 values, so the SX1280 side is configured to these.
+
+Until PoC #0 passes, the heterogeneous mesh is unproven.
+
+### ESP8285 (Tier 2/3) at a glance
+
+- Tensilica L106 @80 MHz, ~80 KB usable RAM, 1 MB flash — **no BLE**, WiFi only.
+- UARTs: UART0 (flash/log) + UART1 (TX-only, GPIO2). GNSS RX therefore rides a
+  **SoftwareSerial on a remapped PWM-output GPIO** (the 7PWM's servo pins) — a
+  Tier-2 PoC in itself ([09](09-poc-roadmap.md)).
+- Flashed via UART pads + GPIO0-low (esptool/FTDI); ELRS is the SX1280 driver
+  reference.
+- Tight RAM → dumb relays use **low-memory dedup** (small seen-set), not a full
+  node DB.
+
 ## Target device: RadioMaster XR2 Nano
 
 | Spec | Value | Consequence |

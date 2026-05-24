@@ -66,6 +66,25 @@ but are unused near-term.)
 Meshtastic's** `Position.latitude_i/longitude_i`, so the gateway mapping
 ([11](11-mobile-gateway-meshtastic-compat.md)) is a direct copy.
 
+### As-built beacon (firmware today: Phase 0 / Phase G 1b)
+
+The current `waymesh-node` firmware ships a **simpler fixed beacon** than the LRP
+header above (that richer header is the target as the protocol grows). It is what
+Tier-1 sends and what the gateway maps to Meshtastic NodeInfo/Position; Tier-2
+8285 nodes emit the same so they appear as peers.
+
+```
+v0 (8 B) : magic=0x57 | version | srcNodeID(u32) | seq(u16)
+v1 (18 B): v0 + lat_i(i32,1e-7deg) | lon_i(i32,1e-7deg) | sats(u8) | flags(u8)
+           flags bit0 (0x01) = position valid
+```
+
+v1 is **backward-compatible**: a receiver reads the position tail only when the
+received length includes it *and* `version >= 1`, so v0 and v1 nodes interoperate.
+`magic` gates RX (non-Waymesh 2.4-LoRa traffic is ignored). `(srcNodeID, seq)` is
+the dedup `MessageID`. This same beacon is the substrate for the LR1121↔SX1280
+interop check ([02](02-hardware-and-rf-platform.md), PoC #0).
+
 ### TEXT payload
 
 ```
