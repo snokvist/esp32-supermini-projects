@@ -30,17 +30,24 @@ Tier 1 runs a **Semtech LR1121**; Tiers 2/3 run a **Semtech SX1280** (the ELRS
 2.4 GHz radio). These are *different chips* — the heterogeneous mesh only works
 if they share the air. They can: the **LR1121's 2.4 GHz LoRa mode is designed to
 be SX1280-compatible**, so with *exactly matched* PHY parameters a frame TX'd by
-one is RX'd by the other. This is unproven in our setup and is the first thing to
-validate — **PoC #0** ([09](09-poc-roadmap.md)):
+one is RX'd by the other. **PROVEN (2026-05-24, PoC #0** —
+[09](09-poc-roadmap.md)): a BayckRC 7PWM (SX1280) and the XR2 (LR1121) exchanged
+the v1 beacon at **100% PDR both ways, badcrc=0**, and the 8285 node appeared as a
+peer in a stock Meshtastic app via the XR2 gateway.
 
-- **Sync word** encoding differs between the families; the on-air value must
-  match (Tier-1 default is LoRa "private").
-- **Coding rate:** the SX1280 offers "long-interleave" (LI) CR variants the
-  LR1121 lacks — use the *standard* CR modes on both.
-- Tier-1 config to match: 2450 MHz, BW 812.5 kHz, SF9, CR4/5, preamble — all
-  valid SX1280 values, so the SX1280 side is configured to these.
+The matched config that works (RadioLib both sides):
 
-Until PoC #0 passes, the heterogeneous mesh is unproven.
+- **Sync word `0x12` (LoRa "private")** — set explicitly on the SX1280 (its
+  `begin()` takes no sync-word arg); `0x12` produced the **same on-air sync** as
+  the LR1121's `RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE`, so **no sweep was
+  needed** despite the family encoding differences.
+- **Coding rate:** standard interleave on both (`setCodingRate(5, false)` on the
+  SX1280) — the SX1280's "long-interleave" CR variants are unreadable by the
+  LR1121.
+- **PHY:** 2450 MHz, BW 812.5 kHz, SF9, CR4/5, preamble 8 — all valid SX1280
+  values; CRC + explicit header at RadioLib defaults match across families.
+
+The heterogeneous air interface is no longer a risk; Tier 2/3 build on it.
 
 ### ESP8285 (Tier 2/3) at a glance
 
