@@ -88,6 +88,35 @@
 #define STATUS_PERIOD_MS 5000
 #endif
 
+// ---- GPS (Tier 2, -DWAYMESH_GPS=1) ------------------------------------------
+// The ESP8285 has no spare UART (UART1 is TX-only and its pin is the SX1280 RST;
+// Serial.swap()'s alternate pins are the SX1280 SPI), so UART0 (GPIO1 TX /
+// GPIO3 RX) is TIME-SHARED: it boots as the debug console for GPS_GRACE_MS, then
+// listens GPS_PROBE_MS for valid NMEA. If a GPS is talking it locks GPS mode
+// (and, in the production build, goes silent — the line is the GPS's); otherwise
+// it reverts to the debug console. The firmware is VENDOR-NEUTRAL: it parses
+// standard NMEA (TinyGPSPlus) from any module and emits NO config bytes. u-blox
+// modules are tuned once, out-of-band, via tools/gps_provision.py (which itself
+// confirms the model before writing). GPS_BAUD defaults to the debug baud so the
+// switch is software-only (no Serial.begin() baud change).
+#if WAYMESH_GPS
+#ifndef GPS_GRACE_MS
+#define GPS_GRACE_MS 25000      // debug-console window before GPS auto-detect
+#endif
+#ifndef GPS_PROBE_MS
+#define GPS_PROBE_MS 4000       // listen window for valid NMEA after the grace
+#endif
+#ifndef GPS_BAUD
+#define GPS_BAUD 115200         // == debug baud -> software-only switch
+#endif
+#ifndef GPS_PROBE_MIN_SENTENCES
+#define GPS_PROBE_MIN_SENTENCES 2  // checksum-valid NMEA sentences => GPS present
+#endif
+#ifndef GPS_FIX_MAX_AGE_MS
+#define GPS_FIX_MAX_AGE_MS 5000 // beacon a position only if the fix is fresher
+#endif
+#endif  // WAYMESH_GPS
+
 // ---- Managed-flood relay (Tier 2/3) -----------------------------------------
 // Compiled ONLY when WAYMESH_RELAY is set in the env build_flags. Re-floods
 // unseen beacons VERBATIM (same srcId/seq, so the gateway still attributes
