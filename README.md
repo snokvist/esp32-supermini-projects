@@ -71,6 +71,13 @@ Arguments:
 - `board` (optional, default: `esp32-c3-devkitm-1`)
 - `env-name` (optional, default: `esp32c3_supermini`)
 
+## Research & design
+
+- [`docs/hybrid-mesh/`](docs/hybrid-mesh/README.md) — Hybrid long-range +
+  local mesh communication platform (codename **Waymesh**): architecture,
+  protocol, RF coexistence, power/runtime model, mobility analysis, and a
+  phased POC roadmap targeting ESP32-C3 SuperMini + LR1121.
+
 ## Notes
 
 - Default template targets `ESP32-C3 SuperMini`-compatible board config.
