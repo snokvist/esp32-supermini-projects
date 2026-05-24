@@ -183,8 +183,8 @@ void setup() {
   Serial.printf("# nodeId=%08X freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d pwr=%ddBm\n",
                 gNodeId, (double)LORA_FREQ_MHZ, (double)LORA_BW_KHZ, LORA_SF,
                 LORA_CR, LORA_POWER_DBM);
-  Serial.println("# WARNING: pins/RF-switch in board_config.h are PLACEHOLDERS "
-                 "- verify against the ELRS XR2 target before trusting RF.");
+  Serial.println("# pins verified vs ELRS XR2 target; LR1121 RF-switch/DCDC at "
+                 "RadioLib defaults - confirm TX/RX routing before trusting range.");
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
   // GNSS on the spare UART.
