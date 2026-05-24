@@ -1,23 +1,31 @@
 #pragma once
 #include <stdint.h>
 
-// Meshtastic-compatible BLE GATT server — Phase G, increment 1 (transport bring-up).
+// Meshtastic-compatible BLE GATT server — Phase G.
 // See docs/hybrid-mesh/11-mobile-gateway-meshtastic-compat.md.
 //
-// LAYER 1 ONLY: stands up the Meshtastic client service + its three core
-// characteristics (FromRadio/read, ToRadio/write, FromNum/read+notify) with
-// STUB payloads, so the BLE path (C3 radio, XR2 antenna, host link, MTU) can be
-// validated from a host (bluetoothctl / bleak) before the protobuf handshake
-// (Layer 2) is layered on top. No protobufs, no bonding yet.
+// LAYER 2: real Meshtastic protobufs over the three core characteristics
+// (FromRadio/read, ToRadio/write, FromNum/read+notify). On a ToRadio
+// want_config_id the node answers the connect handshake — MyNodeInfo,
+// DeviceMetadata, the self NodeInfo (with the live GPS position), then
+// config_complete_id — so an unmodified Meshtastic client (`meshtastic --ble
+// --info`, phone app) sees this node as a Meshtastic device. FromRadio is a
+// drained queue: each read pops the next frame, empty when caught up; FromNum
+// notifies when new frames are queued. nanopb runtime + generated code are
+// vendored in lib/nanopb/ (regen: proto/README.md). No bonding yet.
 //
-// Device-verified on the RadioMaster XR2 (2026-05-24): advertises Waymesh_XXXX,
-// host connects (ATT MTU negotiated to 517), service + 3 chars discovered,
-// FromRadio stub read returns DE AD BE EF, FromNum notifies a rising counter,
-// ToRadio write echoes to serial — all while the Phase 0 LoRa beacon loop keeps
-// running on the shared 2.4 GHz radio (badcrc=0). Harness: tools/ble_gatt_test.py.
+// Layer 1 (bare transport, stub payloads) was device-verified on the XR2
+// 2026-05-24 (advertise/connect/read/notify/write, ATT MTU 517, LoRa
+// coexistence). TX (phone->mesh) and channel/config-write are later increments.
 
-// Bring up the GATT server + advertising. nodeId names the device (Waymesh_XXXX).
+// Bring up the GATT server + advertising. nodeId names the device (Waymesh_XXXX)
+// and is the Meshtastic node number reported to the client.
 void bleGattBegin(uint32_t nodeId);
 
-// Periodic service: bumps + notifies FromNum while a client is connected.
+// Periodic service: flushes a pending FromNum notify to a connected client.
 void bleGattLoop();
+
+// Feed the latest GPS fix for the self NodeInfo/Position reported in the
+// handshake. lat_i/lon_i are degrees * 1e7 (the Meshtastic Position encoding).
+void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
+                        bool valid);
