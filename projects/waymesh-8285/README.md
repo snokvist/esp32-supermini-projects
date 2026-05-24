@@ -54,8 +54,56 @@ esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
   write_flash 0x0 .pio/build/bayck_7pwm/firmware.bin
 ```
 
-Serial logs are CSV on UART0 @115200 (same schema as `waymesh-node`):
+Serial logs are CSV on UART0 @115200 (same schema as `waybeam-node`):
 `ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra` (role `poc0`).
+
+## GPS (Tier 2, `-DWAYMESH_GPS=1`)
+
+The ESP8285 has **no spare UART** — UART1 is TX-only and its pin is the SX1280
+`RST`, and `Serial.swap()`'s alternate pins are the SX1280 SPI. So **UART0
+(GPIO1 TX / GPIO3 RX) is time-shared** between the debug console and the GPS:
+
+```
+boot ─► DEBUG @115200 (CSV console, RX ignored)
+        └─ after GPS_GRACE_MS (25 s) ─► PROBE: listen GPS_PROBE_MS (4 s) for valid NMEA
+              ├─ NMEA seen  ─► GPS: parse, fill the v1 beacon position, go silent*
+              └─ silence    ─► back to DEBUG (stays a console on a GPS-less board)
+```
+
+\*The production `bayck_7pwm` build goes silent on UART0 once locked (the line is
+the GPS's). The **`bayck_gpstest`** build keeps the CSV plus a 1 Hz
+`gps,...,sats=,chars=,lat=,lon=` line so you can verify wiring/lock on the bench
+**without a sky fix**:
+
+```bash
+pio run -e bayck_gpstest          # bring-up (observable in GPS mode)
+pio run -e bayck_7pwm             # production (silent once GPS-locked)
+```
+
+The grace window is the maintenance window: power on → ~25 s of readable logs →
+it decides. Once locked, power-cycle back into the grace window to debug again
+(with auto-detect, just unplug the GPS first).
+
+**Vendor-neutral by design.** The firmware parses standard NMEA (TinyGPSPlus,
+`$GP/$GN/$GA/$GB/$GL` `RMC`/`GGA`) from *any* module and **emits no config
+bytes** — so wiring an arbitrary GPS can't trigger the wrong vendor's commands.
+u-blox modules are tuned once, out-of-band, with `tools/gps_provision.py`
+(1 Hz + RMC/GGA-only, ~7× less UART traffic); it polls UBX `MON-VER` first and
+**skips anything that isn't u-blox**. The config persists in the module's flash.
+
+**Wiring & flashing caveats:**
+
+- GPS **TX → GPIO3 (8285 RX)** is all the firmware needs (it only reads). GND +
+  VCC (3.3–5 V) as usual. (Wire GPS RX ← GPIO1 only if you want to re-provision
+  in place; not required.)
+- **Flash with the GPS unplugged.** A GPS streaming NMEA into GPIO3 at power-on
+  can jam the ROM downloader and floods the debug input.
+- **GPS owns GPIO1/3 — PWM channels 2 & 3** in the 7-PWM list. Fine for a GPS
+  tracker; it can't also drive all 7 servos.
+
+Tunables (`board_config.h`): `GPS_GRACE_MS`, `GPS_PROBE_MS`, `GPS_BAUD` (default
+115200 = debug baud, so the switch is software-only), `GPS_PROBE_MIN_SENTENCES`,
+`GPS_FIX_MAX_AGE_MS`.
 
 ## Pin map (ELRS "Generic 2400 PWMP7")
 

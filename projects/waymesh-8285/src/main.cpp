@@ -28,6 +28,10 @@
 
 #include "board_config.h"
 
+#if WAYMESH_GPS
+#include <TinyGPSPlus.h>  // vendor-neutral NMEA parser (fed from UART0)
+#endif
+
 // ---- Radio ------------------------------------------------------------------
 // SX128x Module pin order: (NSS/CS, IRQ/DIO1, RESET, BUSY) — same order as the
 // LR11x0 on the XR2, just a different RadioLib class.
@@ -70,6 +74,18 @@ static bool gLedOn = false;
 static volatile bool gRxFlag = false;
 static bool gRadioOk = false;
 
+// ---- GPS / UART0 time-share -------------------------------------------------
+#if WAYMESH_GPS
+static TinyGPSPlus gGps;
+enum GpsSerMode { GPS_SER_DEBUG, GPS_SER_PROBE, GPS_SER_GPS };
+static GpsSerMode gSerMode = GPS_SER_DEBUG;
+static unsigned long gProbeStartMs = 0;
+static uint32_t gProbeBaseline = 0;  // gGps.passedChecksum() when probing began
+#if WAYMESH_GPS_DEBUG
+static unsigned long gLastGpsDbgMs = 0;
+#endif
+#endif
+
 // ISR: a packet arrived (or TX finished) on DIO1. ESP8266 ISRs must be in IRAM.
 IRAM_ATTR static void onDio1() { gRxFlag = true; }
 
@@ -87,6 +103,11 @@ static void ledWrite(bool on) {
 // ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra
 static void logEvent(const char *event, const char *plane, uint32_t srcId,
                      long seq, float rssi, float snr, const char *extra) {
+#if WAYMESH_GPS && !WAYMESH_GPS_DEBUG
+  // Once locked to GPS, UART0 belongs to the GPS — stay off the wire. (The
+  // _DEBUG build keeps logging so bring-up is observable without a sky fix.)
+  if (gSerMode == GPS_SER_GPS) return;
+#endif
   Serial.printf("%lu,%08X,poc0,%s,%s,", millis(), gNodeId, event, plane);
   if (srcId)        Serial.printf("%08X,", srcId); else Serial.print(",");
   if (seq >= 0)     Serial.printf("%ld,", seq);    else Serial.print(",");
@@ -112,7 +133,16 @@ static void sendBeacon() {
   b.version = WM_VERSION;
   b.srcId = gNodeId;
   b.seq = gTxSeq;
-  // No GPS on PoC #0 -> flags stays 0 (no position). Tier 2 fills the v1 tail.
+  // v1 tail: flags=0 (no position) unless GPS has a fresh fix. The XR2 gateway
+  // maps lat_i/lon_i to a Meshtastic Position when BEACON_FLAG_POS is set.
+#if WAYMESH_GPS
+  if (gGps.location.isValid() && gGps.location.age() < GPS_FIX_MAX_AGE_MS) {
+    b.lat_i = (int32_t)lround(gGps.location.lat() * 1e7);
+    b.lon_i = (int32_t)lround(gGps.location.lng() * 1e7);
+    b.sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
+    b.flags |= BEACON_FLAG_POS;
+  }
+#endif
 
   int16_t st = gRadio.transmit((uint8_t *)&b, sizeof(b));
   if (st == RADIOLIB_ERR_NONE) {
@@ -173,6 +203,47 @@ static void printStatus() {
   logEvent("status", "node", 0, -1, NAN, NAN, extra);
 }
 
+#if WAYMESH_GPS
+// Drain UART0 RX into the NMEA parser.
+static void gpsFeed() {
+  while (Serial.available()) gGps.encode((char)Serial.read());
+}
+
+// UART0 time-share state machine. DEBUG (console) -> PROBE (listen for NMEA after
+// the grace window) -> GPS (lock + parse) or back to DEBUG if nothing is heard.
+static void gpsService() {
+  const unsigned long now = millis();
+  switch (gSerMode) {
+    case GPS_SER_DEBUG:
+      if (now >= GPS_GRACE_MS) {
+        gSerMode = GPS_SER_PROBE;
+        gProbeStartMs = now;
+        gProbeBaseline = gGps.passedChecksum();
+        logEvent("gps_probe", "node", 0, -1, NAN, NAN, "listening for NMEA");
+      }
+      break;
+    case GPS_SER_PROBE:
+      gpsFeed();
+      if (gGps.passedChecksum() - gProbeBaseline >= GPS_PROBE_MIN_SENTENCES) {
+        // Last CSV line on UART0 in the production build (then it goes silent).
+        logEvent("gps_lock", "node", 0, -1, NAN, NAN, "NMEA detected -> GPS mode");
+        gSerMode = GPS_SER_GPS;
+#if GPS_BAUD != 115200
+        Serial.flush();
+        Serial.begin(GPS_BAUD);  // only if the GPS baud differs from debug
+#endif
+      } else if (now - gProbeStartMs >= GPS_PROBE_MS) {
+        gSerMode = GPS_SER_DEBUG;
+        logEvent("gps_none", "node", 0, -1, NAN, NAN, "no GPS -> debug console");
+      }
+      break;
+    case GPS_SER_GPS:
+      gpsFeed();
+      break;
+  }
+}
+#endif  // WAYMESH_GPS
+
 // ---- Setup / loop -----------------------------------------------------------
 void setup() {
   Serial.begin(115200);
@@ -191,6 +262,14 @@ void setup() {
                 gNodeId, (double)LORA_FREQ_MHZ, (double)LORA_BW_KHZ, LORA_SF,
                 LORA_CR, LORA_POWER_DBM, (unsigned)LORA_SYNC_WORD);
   Serial.println("# MUST match the XR2 LR1121 config for interop (Phase H PoC #0).");
+#if WAYMESH_GPS
+  Serial.printf("# GPS: UART0 is the debug console for %lus, then auto-detects NMEA "
+                "@%d baud (vendor-neutral; provision u-blox via tools/gps_provision.py).\n",
+                (unsigned long)(GPS_GRACE_MS / 1000), (int)GPS_BAUD);
+#if WAYMESH_GPS_DEBUG
+  Serial.println("# GPS_DEBUG build: CSV + a 1 Hz gps line keep printing even in GPS mode.");
+#endif
+#endif
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
   // ESP8266 hardware SPI is on fixed pins (SCK14/MISO12/MOSI13) — no args.
@@ -237,6 +316,30 @@ void loop() {
       sendBeacon();
     }
   }
+
+#if WAYMESH_GPS
+  gpsService();  // independent of the radio (runs even if begin() failed)
+#if WAYMESH_GPS_DEBUG
+  // Bring-up aid: once past the grace window, report parse state @1 Hz so GPS
+  // wiring/lock can be verified on the bench without needing a sky fix.
+  if (gSerMode != GPS_SER_DEBUG) {
+    const unsigned long nowG = millis();
+    if (nowG - gLastGpsDbgMs >= 1000) {
+      gLastGpsDbgMs = nowG;
+      double la = gGps.location.isValid() ? gGps.location.lat() : 0.0;
+      double lo = gGps.location.isValid() ? gGps.location.lng() : 0.0;
+      char gb[100];
+      snprintf(gb, sizeof(gb),
+               "mode=%d fix=%d sats=%lu chars=%lu sent=%lu lat=%.6f lon=%.6f",
+               (int)gSerMode, gGps.location.isValid() ? 1 : 0,
+               (unsigned long)(gGps.satellites.isValid() ? gGps.satellites.value() : 0),
+               (unsigned long)gGps.charsProcessed(),
+               (unsigned long)gGps.passedChecksum(), la, lo);
+      logEvent("gps", "node", 0, -1, NAN, NAN, gb);
+    }
+  }
+#endif
+#endif
 
   const unsigned long nowStatus = millis();
   if (nowStatus - gLastStatusMs >= STATUS_PERIOD_MS) {
