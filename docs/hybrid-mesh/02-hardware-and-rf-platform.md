@@ -64,7 +64,8 @@ current figures are datasheet-derived and **must be bench-verified** in Phase 0.
 **Two 2.4 GHz emitters on a 0.8 g board** (C3 WiFi/BLE + LR1121 2.4-LoRa), each
 with its own antenna millimetres apart. This is the defining hardware constraint:
 they desensitize each other if active simultaneously → **time-division only**
-([06](06-rf-coexistence.md)).
+([12 §3](12-end-goal-full-hybrid-mesh.md#3--rf-coexistence-the-three-radio-problem);
+near-term it's BLE vs 2.4-LoRa, [04](04-architecture.md)).
 
 ## ESP32-C3 (host + local radio)
 
@@ -129,7 +130,7 @@ one band. LoRa stays the always-listening plane; ESP-NOW stays the burst plane.
 - **Both radios are in 2.4 GHz**, each on its own antenna a few mm apart. A
   +13 dBm (or even +10 dBm) 2.4-LoRa TX next to the WiFi RX front-end will
   desensitize/block it; the same the other way. Channel offset does **not** fix
-  near-field front-end overload. → **strict time-division** ([06](06-rf-coexistence.md)).
+  near-field front-end overload. → **strict time-division** ([12 §3](12-end-goal-full-hybrid-mesh.md#3--rf-coexistence-the-three-radio-problem)).
 - The integrated 2.4 GHz tower antenna is fixed and small → expect modest range;
   optimize via SF/BW choice rather than antenna gain.
 - ELRS already lives with "WiFi mode vs RF mode are never simultaneous" on this

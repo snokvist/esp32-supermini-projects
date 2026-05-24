@@ -26,6 +26,15 @@ We are *not* trying to be the best LoRa mesh or the best local protocol. We are
 trying to be the best **stitch** between a dense local cluster and a sparse
 long-range fabric, under mobility and tight power.
 
+> **Near-term scope (May 2026).** Execution **leads with the 2.4-LoRa link + a
+> Meshtastic-compatible BLE-GATT client** (goal 6 below) and **defers the ESP-NOW
+> local plane / cluster aggregation** (the goal-2 "layered" win and the goal-8
+> three-radio coexistence). The vision here is unchanged — the layered two-plane
+> system is still the aim; we're sequencing the simpler, app-visible LoRa node
+> first. Active build: [04](04-architecture.md) · [09](09-poc-roadmap.md) ·
+> [11](11-mobile-gateway-meshtastic-compat.md). Full deferred design:
+> [12 — End Goal](12-end-goal-full-hybrid-mesh.md).
+
 ## Primary goals (restated as testable intents)
 
 1. **Tiny self-contained mobile node** — wearable/vehicle/drone/robot footprint,

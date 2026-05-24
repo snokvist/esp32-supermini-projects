@@ -1,223 +1,102 @@
-# 04 — Architecture (single-band 2.4 GHz)
+# 04 — Architecture (near-term: flat 2.4-LoRa + Meshtastic BLE-GATT)
 
-The proposal, re-centered on **one 2.4 GHz band, two radios, time-shared**.
-Every choice ties to a constraint from [02](02-hardware-and-rf-platform.md) and
-is re-examined empirically in the POCs.
+> **Scope.** This describes **what we're building now**: a single-radio node that
+> runs a **flat 2.4 GHz LoRa mesh** and is inspected/controlled by the **stock
+> Meshtastic app over BLE-GATT** ([11](11-mobile-gateway-meshtastic-compat.md)).
+> No ESP-NOW, no clusters, no aggregation, no super-frame yet. The full hybrid
+> two-plane mesh those add up to — and the power/airtime thesis that justifies a
+> second radio — is the **end goal**, kept in
+> [12](12-end-goal-full-hybrid-mesh.md).
 
-## The two planes (same band, different radios)
+## The radio we use now: LR1121 2.4 GHz LoRa
 
-```
-            ┌────────────── LONG-RANGE PLANE (LR1121, 2.4 GHz LoRa) ──────────────┐
-            │  cheap to listen (~6 mA) · costs ~50 mA to talk · low rate · 100s m–~km │
-            │  carries: presence/GPS digests, text, relay traffic, store-and-forward  │
-            │  discipline: managed flood + hop limit + suppression + airtime budget   │
-            └───────▲───────────────────────▲───────────────────────▲───────────────┘
-                    │ bridge                 │ bridge                 │ bridge
-            ┌───────┴────────┐      ┌────────┴───────┐      ┌─────────┴──────┐
-            │   CLUSTER A    │      │   CLUSTER B    │      │   CLUSTER C    │
-            │  ESP-NOW 2.4   │      │  ESP-NOW 2.4   │      │  ESP-NOW 2.4   │
-            │  fast burst    │      │  fast burst    │      │  fast burst    │
-            │  M M M (Head)  │      │  M (Head) M    │      │  M M (Head)    │
-            └────────────────┘      └────────────────┘      └────────────────┘
-              LOCAL PLANE             LOCAL PLANE              LOCAL PLANE
+The XR2's LR1121 ([02](02-hardware-and-rf-platform.md)) runs **2.4 GHz LoRa** as
+the one and only mesh link near-term:
 
-  *** Both planes are 2.4 GHz on the same board → they NEVER transmit at once. ***
-  *** Time-division (the super-frame) is mandatory, not optional. ***
-```
+- **Cheap to listen (~6 mA RX)**, modest to talk (~30–50 mA TX at +10/+13 dBm), so
+  a node stays in RX continuously and is always reachable.
+- **Range is the SF/BW knob:** high SF + narrow BW = more range, more airtime; low
+  SF + wide BW = less range, short airtime. Measured in P3 ([09](09-poc-roadmap.md)).
 
-- **Local plane (LP):** ESP-NOW over the C3's WiFi radio (2.4 GHz). Connectionless,
-  ≤250 B frames (v1), ~1 Mbps. Used inside a cluster for discovery, fast state
-  sync, intra-cluster messaging, and *aggregation*. Used in **scheduled bursts**
-  (WiFi RX is power-expensive).
-- **Long-range plane (LRP):** LR1121 **2.4 GHz LoRa**. Cheap to keep in RX
-  (~6 mA), modest to TX (~50 mA at +13 dBm). Range is set by SF/BW (hundreds of
-  metres to ~km with the integrated antenna). Used **between** clusters and to
-  sparse/lone nodes; only **cluster heads/relays** transmit.
+The C3's own 2.4 GHz radio is used near-term **only for BLE** (the Meshtastic
+gateway). Its WiFi/ESP-NOW capability is deferred — the power asymmetry that makes
+ESP-NOW worth adding as a second plane is documented in
+[12 §1](12-end-goal-full-hybrid-mesh.md#1--the-two-plane-architecture).
 
-The defining rule is unchanged from the dual-band concept: **chatter stays
-local; only digests and selected traffic cross the long-range plane.** What
-changes is that the two planes now compete for the *same band*, so the schedule
-is king.
+## The flat mesh
 
-## Why this split still works on one band (the power asymmetry)
-
-| | LR1121 2.4 LoRa RX | C3 WiFi RX |
-|---|---|---|
-| Current | ~6 mA | ~95 mA |
-| Implication | listen ~continuously for days | must be bursted |
-
-So LoRa-2.4 is the **always-on control/wake plane** and ESP-NOW is the
-**on-demand burst plane**. A node sits in LoRa RX sipping ~6 mA, hears a "sync
-window opening" cue, briefly wakes WiFi for a fast ESP-NOW exchange, then drops
-WiFi. The asymmetry that justified the architecture is a property of the
-*radios*, not the *bands*, so it survives single-band.
-
-## The super-frame (now the heart of the design)
-
-With both planes in 2.4 GHz, time is the scarce resource. A repeating super-frame
-guarantees the two radios never transmit simultaneously and bounds each plane's
-airtime.
+Every node beacons its own **presence + GPS** on the LoRa channel and relays
+**text** by **managed flood** — the Meshtastic-style discipline, minus the
+clustering:
 
 ```
-|<------------------------------ super-frame (e.g. 250 ms – 2 s) ----------------------------->|
-LR1121 2.4 LoRa RX : ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░████████  (listen when WiFi is OFF)
-2.4 GHz medium     : [ LoRa RX ][ ESP-NOW window ][ sleep ][ LoRa TX slot ][ BLE GW? ] ........
-                       ^cheap     ^WiFi ON, ~95 mA  ^idle    ^Head/Relay     ^only if phone
+        node A ──beacon(presence/GPS)──>  (broadcast, hop-limited)
+        node B ──beacon──>  ... every node carries its own position ...
+        text   ──flood──>  dedup by MessageID · hop limit · SNR-delay · overhear-suppress
 ```
 
-Rules enforced by the schedule:
-- **Exactly one radio uses the 2.4 GHz medium at a time.** LoRa RX, ESP-NOW
-  window, LoRa TX, and BLE-gateway slots are mutually exclusive.
-- **LoRa RX fills the gaps** (it's the cheap default state) so a node is reachable
-  on the LRP whenever it isn't doing an ESP-NOW burst or a LoRa TX.
-- **ESP-NOW windows are short and aligned** to the Head's beacon so members wake
-  WiFi together, briefly.
-- **LoRa TX is Head/Relay-only**, scheduled, and airtime-budgeted.
-- **Guard intervals** absorb clock drift between nodes (sized in Phase 7).
+- **No aggregation:** each node's position is its own frame (~20 B). Digest
+  aggregation (`O(clusters)` airtime) is the end-goal win → [12 §2](12-end-goal-full-hybrid-mesh.md#2--protocol-extensions-for-aggregation--dtn).
+- **Managed flood for multi-hop** (P5): seen-set dedup, per-class hop limit,
+  SNR-proportional rebroadcast delay, overhear suppression — so text reaches
+  beyond direct range without retransmission storms. Frame formats:
+  [05](05-protocol.md).
 
-This is a tighter constraint than the original dual-band plan, where sub-GHz RX
-could run in parallel with 2.4 GHz WiFi. Here, *every* radio action is a slot.
-Coexistence rationale and measurements: [06](06-rf-coexistence.md).
+## Addressing & identity (near-term subset)
 
-## Node roles (soft, negotiated, hysteresis-damped)
+- **NodeID:** 32-bit, from the C3 MAC (`!aabbccdd` in Meshtastic terms).
+- **MessageID:** `(NodeID:32, seq:16)` → the dedup key everywhere.
+- **GroupID (optional):** a shared 16-bit tag so co-located groups ignore each
+  other's traffic on the shared band.
 
-Roles are not fixed hardware classes; any node can take any role and they rotate.
-Hysteresis prevents election thrash under mobility.
+`ShortAddr` / `ClusterID` are cluster concepts — deferred with the local plane
+([12 §1](12-end-goal-full-hybrid-mesh.md#addressing-extensions-beyond-the-near-term-nodeidmessageid)).
+No IP, no routing tables; identity is flat.
 
-| Role | Does | Power posture |
-|------|------|---------------|
-| **Member (M)** | participates in LP; listens on LRP; no LRP TX | lowest; LoRa RX + bursty WiFi |
-| **Cluster Head (H)** | elected per cluster; owns the LRP airtime budget; aggregates cluster state → LoRa digest; de-aggregates inbound LoRa → LP | higher (LRP TX); rotates |
-| **Relay (R)** | forwards LRP traffic between clusters under suppression rules | higher; only when topology needs it |
-| **Gateway (GW)** | *ephemeral*: a node a phone connects to (BLE) to read/inject | transient; any node, briefly |
+## The UI: Meshtastic BLE-GATT gateway
 
-Election inputs (computed locally, advertised in beacons):
-`score = w1·battery + w2·local_centrality + w3·link_quality + w4·role_stability`.
-Highest score in a cluster becomes Head; ties broken by NodeID. Hysteresis: a
-challenger must beat the incumbent by a margin for K consecutive windows.
+The node exposes the **Meshtastic client GATT service** so an unmodified
+Meshtastic app (phone/BLE) or CLI (PC/USB-serial) sees it as a Meshtastic device —
+we reuse their apps as our UI instead of building one. Because the mesh is flat,
+the gateway maps each node's LoRa beacon **directly** to a Meshtastic `NodeInfo`
+/ `Position` (no digest de-aggregation yet). Full design, UUIDs, and the protobuf
+handshake: [11 — Meshtastic Client Compatibility](11-mobile-gateway-meshtastic-compat.md).
 
-## Addressing & identity
-
-- **NodeID:** 32-bit, from the C3 MAC / a provisioned key.
-- **ShortAddr:** low 16 bits, used within a cluster (collisions resolved at join).
-- **ClusterID:** 16-bit, derived from the current Head's NodeID (changes on
-  re-election; members learn it from beacons).
-- **MessageID:** `(originator NodeID, 16-bit seq)` → the dedup key everywhere.
-- **GroupID (optional):** a shared 16-bit tag so multiple logical groups share
-  spectrum without merging traffic.
-
-No IP, no routing tables on the LRP. Identity is flat; structure (clusters) is
-emergent and soft.
-
-## The crux: what crosses the long-range plane
-
-The whole value proposition. A Head deciding whether to spend LRP airtime:
-
-```
-on local update U from the cluster:
-  if U is purely intra-cluster (e.g. fine-grained position to a neighbor):
-      -> stay local, never bridge
-  else classify U:
-      presence/GPS  -> AGGREGATE into the periodic cluster digest (don't send now)
-      text/event    -> bridge now, but DEDUP and rate-limit per originator
-      telemetry     -> SAMPLE/decimate to the configured rate, then aggregate
-  before any LRP TX:
-      if this super-frame's LoRa TX slot is taken / budget spent -> queue (S&F)
-      if already overheard from another Head/Relay -> SUPPRESS
-      apply hop limit; apply SNR-proportional rebroadcast delay
-```
-
-Three levers do the heavy lifting:
-1. **Aggregate** — N members' positions → one digest frame (airtime ∝ clusters,
-   not ∝ nodes). The scalability win; quantified in [08](08-mobility-and-topology.md).
-2. **Suppress** — overhear-based: don't repeat what's already been relayed.
-3. **Ration** — a per-node airtime budget *and* the super-frame's single LoRa TX
-   slot, with store-and-forward for overflow.
-
-## Mesh strategy per plane
-
-- **Local plane:** small diameter, high churn → **flooding with dedup + overhear
-  suppression**, no routing tables.
-- **Long-range plane:** **managed flood** over *aggregated* traffic only: hop
-  limit, dedup, SNR-proportional rebroadcast delay, relay election. No proactive
-  routing — link state is too costly on a slow, churny LoRa channel.
-- **Across partitions:** **DTN bundle-lite** — hold-and-forward with summary-
-  vector dedup; a mobile node carries bundles between islands.
-
-## Communication flows
-
-### Flow 1 — local discovery & sync (intra-cluster, ESP-NOW window)
+### Flow — ephemeral phone gateway
 
 ```mermaid
 sequenceDiagram
-    participant M1 as Member 1
-    participant M2 as Member 2
-    participant H as Head
-    Note over M1,H: scheduled ESP-NOW window opens (WiFi ON, LoRa paused)
-    M1->>H: presence + GPS delta (ESP-NOW broadcast)
-    M2->>H: presence + GPS delta
-    H-->>M1: cluster state digest
-    H-->>M2: cluster state digest
-    Note over M1,H: window closes, WiFi OFF, nodes return to LoRa RX
-```
-
-### Flow 2 — bridge a cluster to the world (aggregate → 2.4-LoRa)
-
-```mermaid
-sequenceDiagram
-    participant H as Head (Cluster A)
-    participant R as Relay
-    participant H2 as Head (Cluster B)
-    Note over H: collected member updates this period
-    H->>H: aggregate N positions into 1 digest
-    Note over H: wait for own LoRa TX slot (WiFi must be OFF)
-    H->>R: 2.4-LoRa digest (hop limit, msgID)
-    R->>R: dedup + SNR-delay + suppression check
-    R->>H2: rebroadcast (if not already overheard)
-    H2->>H2: de-aggregate -> inject into Cluster B local plane
-```
-
-### Flow 3 — store-and-forward across a partition (mule)
-
-```mermaid
-sequenceDiagram
-    participant A as Island A node
-    participant Mule as Moving node
-    participant B as Island B node
-    A->>Mule: bundle (text, msgID) over 2.4-LoRa when in range
-    Note over Mule: out of range of everyone; holds bundle
-    Mule->>B: later, in range of B: offer summary vector
-    B-->>Mule: request missing msgIDs
-    Mule->>B: deliver bundle
-```
-
-### Flow 4 — ephemeral phone gateway
-
-```mermaid
-sequenceDiagram
-    participant Phone
-    participant GW as Node (becomes Gateway)
-    Phone->>GW: BLE connect (on user action / button)
-    Note over GW: BLE takes the 2.4 GHz medium; LoRa + ESP-NOW paused
-    GW-->>Phone: snapshot: neighbors, positions, recent messages
-    Phone->>GW: inject message / config change
-    GW->>GW: schedule onto local + (if needed) long-range plane
+    participant Phone as Meshtastic app
+    participant GW as Node (Gateway)
+    Phone->>GW: BLE connect + bond (PIN)
+    Note over GW: BLE takes the 2.4 GHz medium; LoRa RX pauses in the BLE slot
+    GW-->>Phone: handshake: MyNodeInfo, NodeInfo per known node, positions, text
+    Phone->>GW: ToRadio{ text } → decrypt (channel PSK) → flood onto LoRa
     Phone->>GW: BLE disconnect
-    Note over GW: reverts to Member; resumes the super-frame
+    Note over GW: resume LoRa RX
 ```
 
-The gateway speaks the **Meshtastic client protocol** over both **BLE** (phone
-app) and **USB serial** (PC CLI / web client), so an unmodified Meshtastic client
-sees the node as a Meshtastic device — we reuse their apps as our UI instead of
-building one. This is a compatibility shim at the gateway only; our planes stay
-ours. Full design: [11 — Mobile/PC Gateway](11-mobile-gateway-meshtastic-compat.md).
+## Near-term RF coexistence (two radios, not three)
 
-## What we explicitly avoid
+BLE and 2.4-LoRa both live on the board; while a phone is connected, the BLE slot
+preempts LoRa airtime (a connected phone *reduces* mesh throughput — fine for an
+ephemeral gateway, not a tether). This is the **two-radio** coexistence question
+measured in the near-term P7. The full **three-radio super-frame** (LoRa +
+ESP-NOW + BLE) is the end-goal mechanism →
+[12 §3](12-end-goal-full-hybrid-mesh.md#3--rf-coexistence-the-three-radio-problem).
 
-- No proactive/link-state routing on the LRP.
-- No always-on WiFi or always-on relay nodes.
-- No fixed gateways/infrastructure; gateways are ephemeral.
-- No global time master (loose sync via Head beacons; guard intervals absorb drift).
-- No simultaneous 2.4 GHz transmissions — the schedule forbids it.
-- No assumption that mesh helps — every plane's strategy has a measured regime
-  where it's the right choice ([08](08-mobility-and-topology.md)).
+## What we defer to the end goal ([12](12-end-goal-full-hybrid-mesh.md))
+
+- The **ESP-NOW local plane** (fast local burst sync) — and the reason for the
+  second radio (ESP-NOW also reaches LoRa-less ESP32 nodes).
+- **Clusters, roles (Head/Relay), election**, and **digest aggregation** (the
+  airtime scaling win).
+- The **three-radio super-frame** time-division schedule.
+- **DTN** store-and-forward across partitions.
+
+## What we avoid (near-term and end-goal alike)
+
+No proactive/link-state routing on LoRa; no always-on WiFi; no fixed
+gateways/infrastructure (the gateway is ephemeral); no assumption that mesh always
+helps — every strategy must show a measured win for some real scenario
+([10](10-experiments-and-metrics.md)).

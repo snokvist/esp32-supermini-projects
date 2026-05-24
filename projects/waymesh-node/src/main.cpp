@@ -8,14 +8,17 @@
 //     listens the rest of the time, tracking received count / RSSI / SNR so two
 //     nodes give a quick PDR read at a known distance.
 //   - Reads a GNSS module on the spare UART (TinyGPSPlus) and logs fixes.
-//   - Blinks the LED for liveness and prints structured CSV logs over USB-CDC.
+//   - Blinks the LED for liveness and prints structured CSV logs over serial
+//     (USB-CDC by default; UART0 on the XR2 bench env — see platformio.ini).
 //
 // What this does NOT do: ESP-NOW (Phase 1), aggregation, the super-frame.
 //
-// NOT HARDWARE-VERIFIED. Built in CI/cloud (compile-checked only). The pin map,
-// RF-switch/TCXO config, and radio routing in board_config.h are placeholders
-// that MUST be confirmed on the bench before flashing. begin() will report an
-// error over serial if the SPI pins are wrong.
+// Hardware-verified single-node on a RadioMaster XR2 Nano (2026-05-24): radio_ok,
+// beacon TX, GPS 3D fix, badcrc=0. The pin map + TCXO in board_config.h are
+// confirmed against the ELRS XR2 target (no TCXO; XOSC). Still untuned: the
+// LR1121 RF-switch/DCDC routing is at RadioLib defaults (TX/RX path + range not
+// yet validated), and the 2-node RX/PDR loopback needs a second XR2. begin()
+// reports an error over serial if the SPI wiring is wrong.
 // =============================================================================
 
 #include <Arduino.h>

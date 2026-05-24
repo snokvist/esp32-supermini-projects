@@ -1,6 +1,7 @@
 # 11 — Mobile/PC Gateway: Meshtastic Client Compatibility (BLE + Serial)
 
-A design proposal (no firmware yet). Goal: a connected client sees a Waymesh node
+A design proposal (no firmware yet) — **promoted to the near-term track as
+Phase G** ([09](09-poc-roadmap.md)). Goal: a connected client sees a Waymesh node
 as a **Meshtastic device** — a **phone over BLE** *and* a **PC over USB serial**
 (and optionally TCP) — so we reuse the polished Meshtastic apps / CLI
 (Android / iOS / web / desktop / `meshtastic` Python CLI) as our UI instead of
@@ -19,17 +20,18 @@ There are two distinct levels of "Meshtastic compatible":
   LoRa. This requires adopting Meshtastic's LoRa PHY + managed-flood protocol,
   which fights our hybrid two-plane design. **Explicit non-goal.**
 
-The phone only ever sees the **BLE GATT interface**. It cannot tell that our
-long-range plane is our own 2.4-LoRa protocol and our local plane is ESP-NOW. So
-this is a **compatibility shim at the gateway** — the planes
-([04](04-architecture.md)) stay entirely ours. The node is a *translator* between
-its internal model and the Meshtastic client protocol.
+The phone only ever sees the **BLE GATT interface**. It cannot tell that our radio
+plane is our own protocol — **near-term a flat 2.4-LoRa mesh**
+([04](04-architecture.md)); later, ESP-NOW clusters too
+([12](12-end-goal-full-hybrid-mesh.md)). So this is a **compatibility shim at the
+gateway** — the radio stays entirely ours. The node is a *translator* between its
+internal model and the Meshtastic client protocol.
 
 ```
-   Meshtastic app  <--BLE/GATT-->  [ Waymesh node: gateway shim ]  <--our planes-->  the mesh
-   (thinks it's                     FromRadio/ToRadio protobufs        ESP-NOW + 2.4-LoRa
-    talking to a                    <-> internal node/msg model        clusters, aggregation,
-    Meshtastic radio)                                                  roles, DTN
+   Meshtastic app  <--BLE/GATT-->  [ Waymesh node: gateway shim ]  <--our radio-->  the mesh
+   (thinks it's                     FromRadio/ToRadio protobufs        near-term: flat 2.4-LoRa
+    talking to a                    <-> internal node/msg model        (deferred: ESP-NOW clusters,
+    Meshtastic radio)                                                   aggregation, roles, DTN)
 ```
 
 ## BLE GATT surface to expose
@@ -135,10 +137,13 @@ The read path is clean because we already hold all of this:
 | role (Head/Relay/Member) | (no native field) | surface via `long_name` suffix or telemetry; don't overload routing |
 | RSSI/SNR (from our planes) | `MeshPacket.rx_rssi/rx_snr` | direct |
 
-**De-aggregation:** our long-range plane carries *aggregated* cluster digests
-([05](05-protocol.md)). The gateway expands each digest back into per-node
-`NodeInfo`/`Position` updates so the phone sees individual nodes on its map —
-which is exactly the desired UX.
+**De-aggregation (deferred).** *Near-term the LoRa mesh is flat* — every node
+beacons its own position ([04](04-architecture.md)) — so the gateway maps each
+beacon to a `NodeInfo`/`Position` **directly**. Once the cluster arc lands, the
+long-range plane will carry *aggregated* digests
+([12 §2](12-end-goal-full-hybrid-mesh.md#2--protocol-extensions-for-aggregation--dtn))
+and the gateway will expand each digest back into per-node updates — same phone
+UX, computed from a digest instead of from individual beacons.
 
 ## Channels & crypto (the one fiddly part)
 
@@ -166,11 +171,14 @@ To satisfy the app without lying in ways that break it:
 
 ## Coexistence
 
-BLE shares the C3's 2.4 GHz radio and contends with ESP-NOW and 2.4-LoRa, so the
-**BLE-gateway slot is part of the single-band super-frame** ([06](06-rf-coexistence.md)):
-when a phone is connected, the gateway slot preempts the other 2.4 GHz activity.
-A connected phone therefore *reduces* mesh throughput while active — acceptable
-for an ephemeral, on-demand gateway, not a tether.
+**Near-term this is a two-radio problem, not three:** BLE shares the C3's 2.4 GHz
+radio with the **2.4-LoRa** link only (the ESP-NOW local plane is deferred). When
+a phone is connected, the BLE slot preempts LoRa airtime, so a connected phone
+*reduces* mesh throughput while active — acceptable for an ephemeral, on-demand
+gateway, not a tether. This BLE↔LoRa cost is measured in the near-term P7
+([09](09-poc-roadmap.md)). Once the local plane lands, the BLE-gateway slot
+rejoins the full single-band super-frame alongside ESP-NOW + 2.4-LoRa
+([12 §3](12-end-goal-full-hybrid-mesh.md#3--rf-coexistence-the-three-radio-problem)).
 
 ## Tradeoffs & risks
 
@@ -185,15 +193,22 @@ for an ephemeral, on-demand gateway, not a tether.
 4. **Memory/complexity.** nanopb + GATT server + a node-DB projection layer; modest
    on the C3 but real.
 
-## Phasing (gateway is Phase 4+, see [09](09-poc-roadmap.md))
+## Phasing (PROMOTED to the near-term track — Phase G, see [09](09-poc-roadmap.md))
 
-Design the gateway abstraction now (node state ↔ `FromRadio`/`ToRadio`), build
-incrementally once the core architecture is proven:
+This gateway is now a **near-term priority**, built directly on the flat 2.4-LoRa
+link (P3) — *ahead* of the deferred cluster/aggregation arc, not after it. Build
+incrementally:
 
-1. **Read-only** — handshake + node DB + positions + text RX. Instant value, low
-   risk: open the Meshtastic app and watch our mesh appear on the map.
-2. **TX** — phone sends text → decrypt with advertised PSK → inject into our mesh.
+1. **Read-only** — handshake + node DB + positions + text RX over the flat LoRa
+   mesh. Instant value, low risk: open the Meshtastic app and watch our mesh
+   appear on the map.
+2. **TX** — phone sends text → decrypt with advertised PSK → flood onto the LoRa
+   mesh.
 3. **Channels / config-write** — multiple channels, accept-and-reflect config.
+
+(De-aggregation of cluster digests is **not** part of Phase G — it arrives with
+the deferred P4 aggregation work; near-term the mesh is flat, so beacons map to
+`NodeInfo` directly.)
 
 ## Open questions
 
