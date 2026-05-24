@@ -11,8 +11,13 @@
 // Success criterion: a third node appears in `meshtastic --ble --info`, and both
 // nodes log nonzero rx= with sane RSSI/SNR.
 //
-// NOT here (later, Tier 2/3): GPS over remapped PWM-pin UART, PWM servo outputs,
-// relay/suppression/dedup. PoC #0 is pure radio interop.
+// Managed-flood RELAY (Tier 2/3) is compiled in when WAYMESH_RELAY is set (the
+// bayck_7pwm env): seen-set dedup + SNR-delay + overhear suppression, verbatim
+// rebroadcast, no hop-limit (see board_config.h + docs/hybrid-mesh/05). With
+// WAYMESH_RELAY unset this file is the pure PoC #0 interop firmware.
+//
+// STILL NOT here (later, Tier 2/3): GPS over remapped PWM-pin UART, PWM servo
+// outputs. PoC #0 / the relay primitive are pure radio.
 //
 // Bring-up notes:
 //   - begin() prints its return code. -707 (SPI_CMD_TIMEOUT) => BUSY pin wrong;
@@ -126,6 +131,103 @@ static void startRx() {
   }
 }
 
+// ---- Managed-flood relay (Tier 2/3) -----------------------------------------
+#if WAYMESH_RELAY
+// Dedup seen-set: a small ring of recent MessageIDs = (srcId:32, seq:16). Linear
+// scan (RELAY_SEEN_SET_SIZE is tiny); insert overwrites the oldest slot. This is
+// the low-mem dedup the Tier-3 "dumb relay" needs (a few hundred bytes total).
+struct SeenEntry { uint32_t srcId; uint16_t seq; bool valid; };
+static SeenEntry gSeen[RELAY_SEEN_SET_SIZE];
+static uint8_t gSeenHead = 0;
+
+// Rebroadcasts waiting out their SNR-proportional delay (so overhear suppression
+// can still cancel them). raw[] holds the VERBATIM bytes to re-send.
+struct PendingRelay {
+  bool active;
+  uint32_t srcId;
+  uint16_t seq;
+  unsigned long dueMs;
+  uint8_t len;
+  uint8_t raw[sizeof(Beacon)];
+};
+static PendingRelay gPending[RELAY_PENDING_SLOTS];
+
+static uint32_t gRelayTx = 0;          // beacons we rebroadcast
+static uint32_t gRelaySuppressed = 0;  // pending rebroadcasts cancelled (overhear)
+static uint32_t gRelayDropFull = 0;    // new msgs dropped (no free pending slot)
+
+static bool seenContains(uint32_t srcId, uint16_t seq) {
+  for (uint8_t i = 0; i < RELAY_SEEN_SET_SIZE; i++)
+    if (gSeen[i].valid && gSeen[i].srcId == srcId && gSeen[i].seq == seq)
+      return true;
+  return false;
+}
+static void seenAdd(uint32_t srcId, uint16_t seq) {
+  gSeen[gSeenHead].srcId = srcId;
+  gSeen[gSeenHead].seq = seq;
+  gSeen[gSeenHead].valid = true;
+  gSeenHead = (uint8_t)((gSeenHead + 1) % RELAY_SEEN_SET_SIZE);
+}
+
+// Overhear suppression: drop any pending rebroadcast of this MessageID because
+// someone else already put it on the air. Returns true if one was cancelled.
+static bool relaySuppress(uint32_t srcId, uint16_t seq) {
+  for (uint8_t i = 0; i < RELAY_PENDING_SLOTS; i++)
+    if (gPending[i].active && gPending[i].srcId == srcId && gPending[i].seq == seq) {
+      gPending[i].active = false;
+      return true;
+    }
+  return false;
+}
+
+// Queue a verbatim rebroadcast after an SNR-proportional delay (+ jitter): a
+// weaker-SNR receiver waits longer, so the best-placed relay transmits first and
+// suppresses the rest. Drops on a full queue (the seen-set still recorded it).
+static void relaySchedule(const uint8_t *raw, uint8_t len, uint32_t srcId,
+                          uint16_t seq, float snr) {
+  for (uint8_t i = 0; i < RELAY_PENDING_SLOTS; i++) {
+    if (!gPending[i].active) {
+      float s = isnan(snr) ? RELAY_SNR_REF_DB : snr;
+      long over = (long)(RELAY_SNR_REF_DB - s);   // dB below reference, if any
+      long d = RELAY_DELAY_BASE_MS + (over > 0 ? over * RELAY_DELAY_PER_DB_MS : 0);
+      if (d > RELAY_DELAY_MAX_MS) d = RELAY_DELAY_MAX_MS;
+      d += (long)random(RELAY_DELAY_JITTER_MS + 1);
+      gPending[i].active = true;
+      gPending[i].srcId = srcId;
+      gPending[i].seq = seq;
+      gPending[i].len = len;
+      memcpy(gPending[i].raw, raw, len);
+      gPending[i].dueMs = millis() + (unsigned long)d;
+      return;
+    }
+  }
+  gRelayDropFull++;
+}
+
+// Transmit any rebroadcasts whose delay has elapsed (called from loop()).
+static void relayService() {
+  const unsigned long now = millis();
+  for (uint8_t i = 0; i < RELAY_PENDING_SLOTS; i++) {
+    if (!gPending[i].active) continue;
+    if ((long)(now - gPending[i].dueMs) < 0) continue;
+    int16_t st = gRadio.transmit(gPending[i].raw, gPending[i].len);
+    if (st == RADIOLIB_ERR_NONE) {
+      gRelayTx++;
+      logEvent("relay", "lrp", gPending[i].srcId, gPending[i].seq, NAN, NAN, "fwd");
+    } else {
+      char buf[20];
+      snprintf(buf, sizeof(buf), "relay_err=%d", st);
+      logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
+    }
+    gPending[i].active = false;
+    // transmit() left us in standby and DIO1 fired TxDone; drop that phantom and
+    // re-arm RX (same fix as sendBeacon()).
+    gRxFlag = false;
+    startRx();
+  }
+}
+#endif  // WAYMESH_RELAY
+
 static void sendBeacon() {
   Beacon b;
   memset(&b, 0, sizeof(b));
@@ -173,9 +275,20 @@ static void handleRx() {
 
   if (st == RADIOLIB_ERR_NONE && plen >= BEACON_V0_SIZE && b.magic == WM_MAGIC &&
       b.srcId != gNodeId) {
-    gRxCount++;
     float rssi = gRadio.getRSSI();
     float snr = gRadio.getSNR();
+#if WAYMESH_RELAY
+    // Managed-flood dedup on MessageID = (srcId, seq). A second copy means a
+    // neighbour already has/relayed it: overhear-suppress our own pending
+    // rebroadcast and stop here (no double-count, no re-relay).
+    if (seenContains(b.srcId, b.seq)) {
+      if (relaySuppress(b.srcId, b.seq)) gRelaySuppressed++;
+      startRx();
+      return;
+    }
+    seenAdd(b.srcId, b.seq);
+#endif
+    gRxCount++;
     if (gHaveLastRxSeq) {
       uint16_t expected = (uint16_t)(gLastRxSeq + 1);
       int16_t delta = (int16_t)(b.seq - expected);  // signed modular gap
@@ -184,6 +297,10 @@ static void handleRx() {
     gLastRxSeq = b.seq;
     gHaveLastRxSeq = true;
     logEvent("rx", "lrp", b.srcId, b.seq, rssi, snr, "beacon");
+#if WAYMESH_RELAY
+    // First sighting: re-flood it verbatim after the SNR-proportional delay.
+    relaySchedule(raw, (uint8_t)plen, b.srcId, b.seq, snr);
+#endif
   } else if (st != RADIOLIB_ERR_NONE) {
     gRxBadCount++;
     char buf[20];
@@ -196,10 +313,18 @@ static void handleRx() {
 static void printStatus() {
   uint32_t expected = gRxCount + gRxSeqGaps;
   float pdr = expected ? (100.0f * (float)gRxCount / (float)expected) : 0.0f;
-  char extra[80];
+  char extra[120];
+#if WAYMESH_RELAY
+  snprintf(extra, sizeof(extra),
+           "tx=%u rx=%u gaps=%u badcrc=%u pdr=%.1f%% relay=%u supp=%u qfull=%u",
+           (unsigned)gTxSeq, (unsigned)gRxCount, (unsigned)gRxSeqGaps,
+           (unsigned)gRxBadCount, pdr,
+           (unsigned)gRelayTx, (unsigned)gRelaySuppressed, (unsigned)gRelayDropFull);
+#else
   snprintf(extra, sizeof(extra), "tx=%u rx=%u gaps=%u badcrc=%u pdr=%.1f%%",
            (unsigned)gTxSeq, (unsigned)gRxCount, (unsigned)gRxSeqGaps,
            (unsigned)gRxBadCount, pdr);
+#endif
   logEvent("status", "node", 0, -1, NAN, NAN, extra);
 }
 
@@ -255,6 +380,10 @@ void setup() {
   // ESP8266/ESP8285 has no efuse-MAC API; getChipId() (low 24 bits of the STA
   // MAC) is a stable per-board id. Distinct from the XR2's 32-bit nodeId.
   gNodeId = ESP.getChipId();
+#if WAYMESH_RELAY
+  // Per-node seed so the rebroadcast jitter differs across relays (tie-break).
+  randomSeed(gNodeId ^ micros());
+#endif
 
   Serial.println();
   Serial.println("# waymesh-8285 PoC #0 (BayckRC 7PWM: ESP8285 + SX1280, 2.4 GHz LoRa)");
@@ -269,6 +398,11 @@ void setup() {
 #if WAYMESH_GPS_DEBUG
   Serial.println("# GPS_DEBUG build: CSV + a 1 Hz gps line keep printing even in GPS mode.");
 #endif
+#endif
+#if WAYMESH_RELAY
+  Serial.printf("# RELAY MODE: managed flood (seen-set=%d, SNR-delay %d..%dms, "
+                "overhear suppress); verbatim re-flood, NO hop-limit.\n",
+                RELAY_SEEN_SET_SIZE, RELAY_DELAY_BASE_MS, RELAY_DELAY_MAX_MS);
 #endif
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
@@ -308,6 +442,9 @@ void loop() {
       gRxFlag = false;
       handleRx();
     }
+#if WAYMESH_RELAY
+    relayService();  // fire any rebroadcasts whose SNR-delay has elapsed
+#endif
     const unsigned long now = millis();
     if (now - gLastBeaconMs >= BEACON_PERIOD_MS) {
       gLastBeaconMs = now;

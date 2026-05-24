@@ -25,6 +25,14 @@ preamble 8, sync `0x12` PRIVATE) — so a successful PoC means:
 PoC #0 carries no GPS/PWM — it is pure radio interop. Tier 2/3 behaviour is built
 on top once interop is proven.
 
+**Result — PoC #0 PASSED & device-verified (2026-05-24):** a BayckRC 7PWM
+(`006D2929`) and the XR2 (`B17506DC`) exchange the byte-identical beacon at
+**100% PDR both ways**, `badcrc=0`, RSSI ~−28 dBm / SNR ~12 dB; the 8285 surfaces
+as a peer in a stock Meshtastic app via the XR2 gateway. Both "traps" below were
+non-issues on this board: `0x12` matched across families on the first flash, and
+**BUSY=GPIO5 / RST=GPIO2 are physically wired** (no `-707`). The managed-flood
+relay (below) is built on top.
+
 ### Interop traps (documented, watch on first bring-up)
 
 - **BUSY/RST pins** — the ELRS "Generic 2400 PWMP7" layout sacrifices the MCU
@@ -51,10 +59,18 @@ GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle):
 
 ```bash
 esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
+  --before no_reset --after no_reset \
   write_flash 0x0 .pio/build/bayck_7pwm/firmware.bin
 ```
 
-Serial logs are CSV on UART0 @115200 (same schema as `waybeam-node`):
+These bare RX boards have no DTR/RTS auto-reset, so `--before no_reset` (enter
+download mode by hand: hold GPIO0 low + power-cycle, then release). **After
+flashing, do a clean power-cycle — not `--after soft_reset`:** a soft reset leaves
+the SX1280 latched and `begin()` returns **-2 (CHIP_NOT_FOUND)**. The radio comes
+up fine on a real power-on. (The bootloader probe is finicky; retry the connect a
+couple of times.)
+
+Serial logs are CSV on UART0 @115200 (same schema as `waymesh-node`):
 `ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra` (role `poc0`).
 
 ## GPS (Tier 2, `-DWAYMESH_GPS=1`)
@@ -104,6 +120,45 @@ u-blox modules are tuned once, out-of-band, with `tools/gps_provision.py`
 Tunables (`board_config.h`): `GPS_GRACE_MS`, `GPS_PROBE_MS`, `GPS_BAUD` (default
 115200 = debug baud, so the switch is software-only), `GPS_PROBE_MIN_SENTENCES`,
 `GPS_FIX_MAX_AGE_MS`.
+
+## Managed-flood relay (Tier 2/3)
+
+Built into this firmware behind `-DWAYMESH_RELAY=1` (set in the `bayck_7pwm` env;
+unset it to reproduce the pure PoC #0 build). The relay re-floods beacons it hasn't
+seen so a beacon reaches nodes outside the originator's range — the forwarding
+primitive shared by Tier 2 and the Tier-3 dumb relay. Spec:
+`../../docs/hybrid-mesh/05-protocol.md` §"Suppression & dedup state". It is
+silicon-identical on the Tier-3 BetaFPV Nano; this env exercises it on Tier-2
+hardware (the Nano gets its own env once its pin map is confirmed).
+
+Mechanisms (`board_config.h` tunables):
+
+- **Seen-set dedup** — a small ring of recent `MessageID = (srcId, seq)`; a node
+  relays each MessageID **at most once** and ignores its own `srcId`, so the flood
+  terminates. Low-mem (a few hundred bytes) for the Tier-3 target.
+- **SNR-proportional delay + jitter** — a weaker-SNR receiver waits longer, so the
+  best-placed relay transmits first.
+- **Overhear suppression** — hearing the same MessageID again cancels a pending
+  rebroadcast.
+- **Verbatim re-flood** — the rebroadcast keeps the original `srcId/seq`, so the
+  gateway still attributes presence to the true originator and downstream nodes
+  dedup correctly.
+- **No hop-limit** — the as-built beacon carries no hop field; the seen-set alone
+  bounds the flood. A decrementing hop-limit arrives with the LRP-header migration.
+
+Status counters (the `status` log line): `relay=` rebroadcasts sent, `supp=`
+pending rebroadcasts cancelled by overhear, `qfull=` new messages dropped on a
+full pending queue.
+
+**Device-verified (2026-05-24), XR2 + one BayckRC relay:**
+
+- *Forward + dedup* (relay side): every received XR2 beacon is relayed **exactly
+  once** — `relay == rx` (67/67), `gaps=0 badcrc=0 supp=0 qfull=0`, relay fired
+  ~55–72 ms after RX.
+- *Round-trip* (witness side, via `waymesh-node` `esp32c3_xr2_relaytest`): the XR2
+  hears its own beacons relayed back at **100% relay PDR** (`relayback == tx`).
+- *Not yet on hardware:* overhear suppression and multi-hop reach-extension need a
+  2nd relay / 3rd node (`supp`/`qfull` correctly stayed 0 on the 2-node bench).
 
 ## Pin map (ELRS "Generic 2400 PWMP7")
 

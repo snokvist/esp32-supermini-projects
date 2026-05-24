@@ -128,6 +128,20 @@ Needed even for the flat mesh so multi-hop text (P5) doesn't storm:
   re-measure the constants).
 - **Hop limit:** decremented per relay; 0 = stop.
 
+### As-built relay (firmware today: `waymesh-8285` `-DWAYMESH_RELAY=1`)
+
+Device-verified 2026-05-24 on a BayckRC relay + the XR2 (see
+[09](09-poc-roadmap.md) Phase H Tier 3). Implemented on the **as-built beacon**
+(no LRP header yet): seen-set dedup on `MessageID`, SNR-proportional rebroadcast
+delay (+ jitter), overhear suppression, and **verbatim** re-flood (same
+`srcId/seq`, so the gateway still attributes presence to the originator).
+
+**No hop-limit yet** — the as-built beacon carries no hop field, so the seen-set
+alone bounds the flood (each node relays each `MessageID` at most once and ignores
+its own `srcId`, so it terminates). The decrementing hop-limit above lands with
+the LRP-header migration. Forward + dedup + round-trip (100% relay PDR) are
+hardware-proven; overhear suppression + multi-hop need a 3rd node.
+
 ## Meshtastic client mapping
 
 The gateway translates these frames to/from the Meshtastic client protobufs over

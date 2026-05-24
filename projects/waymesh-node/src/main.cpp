@@ -66,6 +66,9 @@ static uint32_t gRxBadCount = 0;
 static uint16_t gLastRxSeq = 0;
 static bool gHaveLastRxSeq = false;
 static uint32_t gRxSeqGaps = 0;  // missed beacons inferred from seq jumps
+#if WAYMESH_RELAY_WITNESS
+static uint32_t gRelayedBack = 0;  // our own beacons heard back via a relay (debug)
+#endif
 
 static unsigned long gLastBeaconMs = 0;
 static unsigned long gLastStatusMs = 0;
@@ -190,6 +193,23 @@ static void handleRx() {
     snprintf(buf, sizeof(buf), "rx_err=%d", st);
     logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
   }
+#if WAYMESH_RELAY_WITNESS
+  // Debug instrumentation (reversible; gated by WAYMESH_RELAY_WITNESS). A VALID
+  // beacon carrying our OWN srcId can only be one of our beacons rebroadcast by
+  // a relay — we clear gRxFlag after every TX, so we never hear ourselves. The
+  // normal RX path above ignores srcId==self (the != gNodeId guard); here we
+  // count it instead, which turns "XR2 -> relay -> XR2" into a measurable relay
+  // PDR on a 2-node bench (relayed_back vs tx). Remove the flag to drop this.
+  if (st == RADIOLIB_ERR_NONE && plen >= BEACON_V0_SIZE && b.magic == WM_MAGIC &&
+      b.srcId == gNodeId) {
+    gRelayedBack++;
+    float rssi = gRadio.getRSSI();
+    float snr = gRadio.getSNR();
+    char buf[28];
+    snprintf(buf, sizeof(buf), "relayed_back=%lu", (unsigned long)gRelayedBack);
+    logEvent("relay_witness", "lrp", b.srcId, b.seq, rssi, snr, buf);
+  }
+#endif
   startRx();
 }
 
@@ -197,12 +217,20 @@ static void printStatus() {
   // Rough PDR estimate vs a single peer: received / (received + inferred gaps).
   uint32_t expected = gRxCount + gRxSeqGaps;
   float pdr = expected ? (100.0f * (float)gRxCount / (float)expected) : 0.0f;
-  char extra[96];
+  char extra[112];
+  unsigned long sats =
+      (unsigned long)(gGps.satellites.isValid() ? gGps.satellites.value() : 0);
+#if WAYMESH_RELAY_WITNESS
+  snprintf(extra, sizeof(extra),
+           "tx=%u rx=%u gaps=%u badcrc=%u pdr=%.1f%% sats=%lu relayback=%u",
+           (unsigned)gTxSeq, (unsigned)gRxCount, (unsigned)gRxSeqGaps,
+           (unsigned)gRxBadCount, pdr, sats, (unsigned)gRelayedBack);
+#else
   snprintf(extra, sizeof(extra),
            "tx=%u rx=%u gaps=%u badcrc=%u pdr=%.1f%% sats=%lu",
            (unsigned)gTxSeq, (unsigned)gRxCount, (unsigned)gRxSeqGaps,
-           (unsigned)gRxBadCount, pdr,
-           (unsigned long)(gGps.satellites.isValid() ? gGps.satellites.value() : 0));
+           (unsigned)gRxBadCount, pdr, sats);
+#endif
   logEvent("status", "node", 0, -1, NAN, NAN, extra);
 }
 

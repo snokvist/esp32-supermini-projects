@@ -121,6 +121,19 @@ UART pads + GPIO0 (esptool).
   small fixed-size seen-set (RAM-frugal dedup) — no GPS/BLE. *Validates:* managed
   flood on the cheapest tier (P5's discipline on Tier-3 silicon). *Metric:*
   redundancy factor R, RAM footprint, no-storm under load.
+  - **Relay primitive — device-verified (2026-05-24), `waymesh-8285` `bayck_7pwm`
+    (`-DWAYMESH_RELAY=1`).** Seen-set dedup + SNR-proportional delay + verbatim
+    re-flood are working on hardware on the (silicon-identical) Tier-2 board:
+    *forward + dedup* — the relay rebroadcasts each XR2 beacon **exactly once**
+    (`relay==rx` 67/67, `gaps=0 badcrc=0 supp=0 qfull=0`); *round-trip* — via the
+    `waymesh-node` `esp32c3_xr2_relaytest` witness (XR2 counts its own beacons heard
+    back) the relay PDR to the originator is **100%** (`relayback==tx`). **No
+    hop-limit** yet (the as-built beacon has no hop field; the seen-set bounds the
+    flood — a decrementing hop-limit arrives with the LRP-header migration, 05).
+    **Overhear suppression + multi-hop reach-extension are code-complete but
+    pending a 3rd node** (`supp`/`qfull` correctly stayed 0 on the 2-node bench).
+    Remaining Tier-3-specific work: a BetaFPV Nano env/pin map, and R / RAM /
+    no-storm metrics under a real 3-node flood.
 - **Go/No-Go (strand):** a mixed C3 + 8285 mesh delivers presence/GPS/text with
   the dumb relays extending range — the heterogeneous thesis vs all-C3.
 
