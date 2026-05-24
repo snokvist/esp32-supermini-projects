@@ -25,8 +25,12 @@ void bleGattBegin(uint32_t nodeId);
 // Periodic service: flushes a pending FromNum notify to a connected client.
 void bleGattLoop();
 
-// Feed the latest GPS fix for the self NodeInfo/Position reported in the
-// handshake. lat_i/lon_i are degrees * 1e7 (the Meshtastic Position encoding).
+// Feed the latest GPS fix for the self NodeInfo/Position. lat_i/lon_i are
+// degrees * 1e7 (the Meshtastic Position encoding). Besides updating the value
+// reported in the want_config handshake, while a client is connected this also
+// enqueues a live self NodeInfo (rate-limited, mirrors bleGattOnPeer) so THIS
+// node's position keeps streaming after ConfigComplete, not only once. Call
+// bleGattSetTime() before this so the emitted NodeInfo carries the fresh epoch.
 void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
                         bool valid);
 

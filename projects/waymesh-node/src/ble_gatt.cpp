@@ -21,6 +21,8 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 #define WAYMESH_HW_MODEL   255u  // HardwareModel.PRIVATE_HW — non-Meshtastic hardware
 #define WAYMESH_ROLE       0u    // Config.DeviceConfig.Role.CLIENT
 #define MESH_LOC_INTERNAL  2u    // Position.LocSource.LOC_INTERNAL
+#define MESH_PORTNUM_POSITION 3u // PortNum.POSITION_APP
+#define MESH_BROADCAST_ADDR 0xFFFFFFFFu
 
 static_assert(sizeof(WAYMESH_FW_VERSION) <= 24,
               "WAYMESH_FW_VERSION must fit DeviceMetadata.firmware_version[24]");
@@ -29,6 +31,12 @@ static NimBLECharacteristic *gFromRadio = nullptr;
 static NimBLECharacteristic *gFromNum = nullptr;
 
 static volatile bool gBleConnected = false;
+// True once this connection's want_config handshake has been queued. Gates live
+// emits so nothing is pushed before the client asks for config (matches real
+// Meshtastic ordering: my_info/metadata/nodedb/complete come first). Written on
+// the BLE host task (onConnect/onDisconnect/queueConfigSequence), read on the
+// main loop task (bleGattSetPosition).
+static volatile bool gConfigDone = false;
 static uint32_t gFromNumVal = 0;
 
 // --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
@@ -38,6 +46,9 @@ static int32_t gLatI = 0, gLonI = 0;
 static uint32_t gSats = 0;
 static bool gPosValid = false;
 static uint32_t gEpoch = 0;  // current UTC epoch seconds (0 = unknown)
+// Rate-limit for the live SELF NodeInfo emit (main loop task only — set/read
+// from bleGattSetPosition). 0 = not yet emitted this connection.
+static unsigned long gSelfLastEmitMs = 0;
 
 // --- peer node DB (Phase G 1b) ----------------------------------------------
 // Peers heard over LoRa, projected to Meshtastic NodeInfo. Written from the main
@@ -172,6 +183,46 @@ static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
   }
 }
 
+// Build a FromRadio{packet} carrying a POSITION_APP Data payload for one node
+// (#2 supplementary). Stock Meshtastic streams live position updates as a
+// MeshPacket, not a bare NodeInfo; we send this ALONGSIDE the NodeInfo so a
+// stock/strict client and the NodeInfo-only gateway app both work. Each packet
+// gets a unique id so the client doesn't dedup successive updates. snr 0 for
+// self. Returns false if the inner Position fails to encode. Main-loop task only
+// (the pktId counter needs no lock). Live emits only — the want_config nodedb
+// dump stays bare NodeInfo, matching how real firmware downloads the node DB.
+static bool buildPositionPacketFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
+                                     int32_t latI, int32_t lonI, uint32_t sats,
+                                     float snr, uint32_t epoch) {
+  meshtastic_Position pos = meshtastic_Position_init_zero;
+  pos.latitude_i = latI;
+  pos.longitude_i = lonI;
+  pos.location_source = MESH_LOC_INTERNAL;
+  pos.sats_in_view = sats;
+  pos.time = epoch;
+
+  *fr = meshtastic_FromRadio_init_zero;
+  fr->which_payload_variant = meshtastic_FromRadio_packet_tag;
+  meshtastic_MeshPacket &mp = fr->payload_variant.packet;
+  mp.from = nodeId;
+  mp.to = MESH_BROADCAST_ADDR;
+  mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+  meshtastic_Data &d = mp.payload_variant.decoded;
+  d.portnum = MESH_PORTNUM_POSITION;
+  pb_ostream_t ps =
+      pb_ostream_from_buffer(d.payload.bytes, sizeof(d.payload.bytes));
+  if (!pb_encode(&ps, meshtastic_Position_fields, &pos)) {
+    Serial.printf("# BLE Position encode failed: %s\n", PB_GET_ERROR(&ps));
+    return false;
+  }
+  d.payload.size = (pb_size_t)ps.bytes_written;
+  static uint32_t pktId = 0;
+  mp.id = ++pktId;
+  mp.rx_time = epoch;
+  mp.rx_snr = snr;
+  return true;
+}
+
 // Build + queue the connect handshake in response to ToRadio{want_config_id}.
 static void queueConfigSequence(uint32_t wantConfigId) {
   // 1) MyNodeInfo
@@ -231,16 +282,24 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   Serial.printf("# BLE handshake queued (self + %d peer(s)) for "
                 "want_config_id=%u\n",
                 peers, (unsigned)wantConfigId);
+
+  // Open the live-emit gate now that the client has its config dump. Stamp the
+  // self emit-gate so the first live self update waits a full interval after the
+  // handshake's self frame (no near-duplicate right after ConfigComplete).
+  gSelfLastEmitMs = millis();
+  gConfigDone = true;
 }
 
 // --- GATT callbacks ----------------------------------------------------------
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *) override {
     gBleConnected = true;
+    gConfigDone = false;  // hold live emits until this client's want_config
     Serial.println("# BLE connect");
   }
   void onDisconnect(NimBLEServer *) override {
     gBleConnected = false;
+    gConfigDone = false;
     // Drop any half-drained handshake so the next client starts clean.
     portENTER_CRITICAL(&gQMux);
     gQHead = gQTail = gQCount = 0;
@@ -353,12 +412,37 @@ void bleGattLoop() {
 
 void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
                         bool valid) {
+  uint32_t epoch;
   portENTER_CRITICAL(&gPosMux);
   gLatI = lat_i;
   gLonI = lon_i;
   gSats = sats_in_view;
   gPosValid = valid;
+  epoch = gEpoch;  // snapshot for the self NodeInfo (set just before us in loop)
   portEXIT_CRITICAL(&gPosMux);
+
+  // Live SELF NodeInfo: the want_config handshake emits this node once, but
+  // nothing re-streamed it after ConfigComplete (only peers had a live path via
+  // bleGattOnPeer). Mirror that path here so a connected client keeps getting
+  // THIS node's moving position. Only after the handshake (gConfigDone) so we
+  // never queue a frame before the client's want_config. Rate-limited like peers
+  // (kPeerEmitMinMs); no fix => no emit (never 0,0). Called only from the main
+  // loop task, so the emit-gate static needs no lock and enqueueFromRadio runs
+  // outside gPosMux.
+  if (!valid || !gBleConnected || !gConfigDone) return;
+  const unsigned long now = millis();
+  if (gSelfLastEmitMs != 0 && now - gSelfLastEmitMs < kPeerEmitMinMs) return;
+  gSelfLastEmitMs = now;
+  meshtastic_FromRadio fr;
+  buildNodeInfoFrame(&fr, gNodeId, true, lat_i, lon_i, sats_in_view, 0.0f, epoch);
+  enqueueFromRadio(&fr);
+  // #2: also the stock-style MeshPacket{POSITION} (supplementary; NodeInfo above
+  // is what the gateway app parses, this is for stock/strict clients).
+  if (buildPositionPacketFrame(&fr, gNodeId, lat_i, lon_i, sats_in_view, 0.0f,
+                               epoch))
+    enqueueFromRadio(&fr);
+  Serial.printf("# BLE self %08X -> NodeInfo + Position (live)\n",
+                (unsigned)gNodeId);
 }
 
 void bleGattSetTime(uint32_t epoch) {
@@ -393,7 +477,11 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
   p->snr = snr;
   p->lastHeardEpoch = epoch;
   unsigned long now = millis();
-  if (gBleConnected && (p->lastEmitMs == 0 || now - p->lastEmitMs >= kPeerEmitMinMs)) {
+  // gConfigDone: like the self path, hold live peer emits until after this
+  // connection's want_config handshake so we never queue a NodeInfo ahead of
+  // my_info (the handshake already dumps every known peer). No-op when no client.
+  if (gBleConnected && gConfigDone &&
+      (p->lastEmitMs == 0 || now - p->lastEmitMs >= kPeerEmitMinMs)) {
     p->lastEmitMs = now;
     snap = *p;
     emit = true;
@@ -405,6 +493,13 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
     buildNodeInfoFrame(&fr, snap.nodeId, snap.posValid, snap.latI, snap.lonI,
                        snap.sats, snap.snr, snap.lastHeardEpoch);
     enqueueFromRadio(&fr);
-    Serial.printf("# BLE peer %08X -> NodeInfo (live)\n", (unsigned)node_id);
+    // #2: also the stock-style MeshPacket{POSITION} when we have a fix for this
+    // peer (supplementary; the NodeInfo above is what the gateway app parses).
+    if (snap.posValid &&
+        buildPositionPacketFrame(&fr, snap.nodeId, snap.latI, snap.lonI,
+                                 snap.sats, snap.snr, snap.lastHeardEpoch))
+      enqueueFromRadio(&fr);
+    Serial.printf("# BLE peer %08X -> NodeInfo%s (live)\n", (unsigned)node_id,
+                  snap.posValid ? " + Position" : "");
   }
 }
