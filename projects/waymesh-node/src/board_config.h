@@ -3,62 +3,61 @@
 // Board configuration for the RadioMaster XR2 Nano (ESP32-C3 + Semtech LR1121)
 // Phase 0 bring-up. See docs/hybrid-mesh/09-poc-roadmap.md.
 //
-// !!! EVERY VALUE BELOW IS A PLACEHOLDER UNTIL VERIFIED ON HARDWARE. !!!
-// The pin map and RF-switch/TCXO config are board-specific and are NOT yet
-// confirmed for the XR2. Phase 0, task #1 is literally "confirm the ELRS LR1121
-// pin map/SPI on the XR2". Extract the real values from the open-source
-// ExpressLRS hardware target for the RadioMaster XR2 before flashing:
-//   https://github.com/ExpressLRS/targets   (RX layout JSON for the XR2)
-// Map the ELRS layout fields to the defines here:
-//   radio_nss   -> PIN_LORA_NSS      radio_busy -> PIN_LORA_BUSY
-//   radio_dio1  -> PIN_LORA_DIO1     radio_rst  -> PIN_LORA_RST
-//   radio_sck   -> PIN_LORA_SCK      radio_miso -> PIN_LORA_MISO
-//   radio_mosi  -> PIN_LORA_MOSI
-// Wrong pins = the radio simply will not respond (begin() returns an error).
+// Pin map VERIFIED against the open-source ExpressLRS hardware target for the
+// RadioMaster XR2 (the board ships with ELRS, so this is ground truth):
+//   ExpressLRS/targets  RX/"Generic C3 LR1121.json"  (base layout)
+//   ExpressLRS/targets  targets.json  ->  "xr2" overlay (serial1, led, +13 dBm)
+// This completes Phase 0 task #1 ("confirm the ELRS LR1121 pin map/SPI on XR2").
+//
+// Still bench-verify RF behaviour: the LR1121 RF-switch routing and regulator
+// mode (radio_dcdc=true on the XR2) are board defaults here and should be
+// confirmed against live TX/RX before trusting range numbers. SPI/control pins
+// below are the verified values, so begin() should now succeed.
 // =============================================================================
 
-// ---- LR1121 SPI + control pins (VERIFY against ELRS XR2 target) -------------
+// ---- LR1121 SPI + control pins (ELRS "Generic C3 LR1121" base layout) -------
 #ifndef PIN_LORA_SCK
-#define PIN_LORA_SCK 4    // PLACEHOLDER
+#define PIN_LORA_SCK 6    // radio_sck
 #endif
 #ifndef PIN_LORA_MISO
-#define PIN_LORA_MISO 5   // PLACEHOLDER
+#define PIN_LORA_MISO 5   // radio_miso
 #endif
 #ifndef PIN_LORA_MOSI
-#define PIN_LORA_MOSI 6   // PLACEHOLDER
+#define PIN_LORA_MOSI 4   // radio_mosi
 #endif
 #ifndef PIN_LORA_NSS
-#define PIN_LORA_NSS 7    // PLACEHOLDER (chip select)
+#define PIN_LORA_NSS 7    // radio_nss (chip select)
 #endif
 #ifndef PIN_LORA_BUSY
-#define PIN_LORA_BUSY 2   // PLACEHOLDER
+#define PIN_LORA_BUSY 3   // radio_busy
 #endif
 #ifndef PIN_LORA_DIO1
-#define PIN_LORA_DIO1 3   // PLACEHOLDER (IRQ)
+#define PIN_LORA_DIO1 1   // radio_dio1 (IRQ)
 #endif
 #ifndef PIN_LORA_RST
-#define PIN_LORA_RST 10   // PLACEHOLDER
+#define PIN_LORA_RST 2    // radio_rst
 #endif
 
-// ---- GNSS UART (kept in early phases, on the XR2 spare UART) -----------------
-// Using the spare UART for GNSS typically means giving up the CRSF interface;
-// acceptable for a standalone mesh node. VERIFY pins against the XR2 pads.
+// ---- GNSS UART (XR2 "serial1" overlay = the spare UART; GY-GPS6MV2 here) -----
+// XR2 overlay: serial1_rx=18, serial1_tx=19. Using serial1 for GNSS gives up the
+// primary CRSF UART (GPIO20/21) — fine for a standalone mesh node. The primary
+// UART is also how we reflash/log on the bench (C3 UART0 = the FTDI port).
 #ifndef PIN_GNSS_RX
-#define PIN_GNSS_RX 20    // PLACEHOLDER (C3 RX  <- GNSS TX)
+#define PIN_GNSS_RX 18    // C3 RX  <- GNSS TX
 #endif
 #ifndef PIN_GNSS_TX
-#define PIN_GNSS_TX 21    // PLACEHOLDER (C3 TX  -> GNSS RX)
+#define PIN_GNSS_TX 19    // C3 TX  -> GNSS RX
 #endif
 #ifndef GNSS_BAUD
-#define GNSS_BAUD 9600    // u-blox MAX-M10S default; adjust if reconfigured
+#define GNSS_BAUD 9600    // GY-GPS6MV2 (u-blox NEO-6M) NMEA default
 #endif
 
-// ---- Status LED (VERIFY; XR2 has an LED, GPIO unknown here) ------------------
+// ---- Status LED (XR2 overlay: led=8, led_rgb=-1 -> simple GPIO LED on 8) -----
 #ifndef PIN_LED
-#define PIN_LED 8         // PLACEHOLDER
+#define PIN_LED 8
 #endif
 #ifndef LED_ACTIVE_LOW
-#define LED_ACTIVE_LOW 0  // set to 1 if the XR2 LED is active-low
+#define LED_ACTIVE_LOW 0  // simple LED; polarity unconfirmed, flip to 1 if dark
 #endif
 
 // ---- LR1121 2.4 GHz LoRa radio configuration --------------------------------
@@ -77,16 +76,17 @@
 #define LORA_CR 5               // coding rate 4/5..4/8 -> 5..8
 #endif
 #ifndef LORA_POWER_DBM
-#define LORA_POWER_DBM 10       // XR2 ships ~10 dBm; LR1121 2.4 GHz max +13 dBm
+#define LORA_POWER_DBM 10       // XR2 stock telemetry power; overlay allows +13
 #endif
 #ifndef LORA_PREAMBLE
 #define LORA_PREAMBLE 8
 #endif
-// LR1121 needs a board-correct RF-switch (DIO) table and TCXO voltage to route
-// TX/RX. These are board-specific and MUST come from the XR2 design. Left at
-// RadioLib defaults here; the radio may TX/RX incorrectly until set on the bench.
+// XR2 base layout declares no TCXO control pin -> the LR1121 runs off the board
+// XTAL, so no radio-driven TCXO voltage is needed (confirmed, not a guess).
+// radio_dcdc=true: once bring-up is stable, enable the LR1121 DCDC regulator via
+// RadioLib setRegulatorDCDC() to match the power model in 07-power-and-runtime.
 #ifndef LORA_TCXO_V
-#define LORA_TCXO_V 0.0f        // 0 = no TCXO control via radio (VERIFY for XR2)
+#define LORA_TCXO_V 0.0f        // no DIO-controlled TCXO on the XR2
 #endif
 
 // ---- Phase 0 behavior -------------------------------------------------------
