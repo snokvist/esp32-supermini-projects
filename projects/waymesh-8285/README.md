@@ -3,8 +3,14 @@
 Firmware for the 2.4 GHz LoRa nodes of the Waymesh heterogeneous mesh that run on
 **ExpressLRS-class ESP8285 + Semtech SX1280** hardware:
 
-- **Tier 2** — BayckRC 7PWM (GPS via remapped PWM-pin UART, beacon + relay)
-- **Tier 3** — BetaFPV Nano RX (dumb forward-only relay, no GPS/BLE)
+- **Tier 2** — BayckRC 7PWM (`bayck_7pwm`): plain SX1280; beacon + relay + optional GPS
+- **Tier 2/3** — BetaFPV Nano RX (`betafpv_nano`): SX1280 + external PA/LNA, **same
+  firmware** — relay always on, GPS auto-detected if a module is wired
+
+> The Nano was originally speced as a Tier-3 *dumb forward-only relay*; it instead
+> runs the full Tier-2 GPS-or-relay build (the relay + GPS-autodetect logic is
+> board-agnostic, so there was no reason to ship a reduced firmware). Its only
+> hardware difference from the bayck is the external PA/LNA — see the pin map.
 
 The Tier-1 smart gateway (ESP32-C3 + LR1121, RadioMaster XR2) lives in
 `../waymesh-node`. Architecture: `../../docs/hybrid-mesh/` (02 tiers + interop
@@ -51,16 +57,18 @@ relay (below) is built on top.
 ## Build & flash
 
 ```bash
-pio run -e bayck_7pwm
+pio run -e bayck_7pwm        # BayckRC 7PWM (plain SX1280)
+pio run -e betafpv_nano      # BetaFPV Nano RX (SX1280 + PA/LNA)
 ```
 
 ESP8266 produces a single image. Flash over the UART pads (GPIO1 TX / GPIO3 RX,
-GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle):
+GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle). Both
+boards use the identical procedure — only the `firmware.bin` path differs:
 
 ```bash
 esptool.py --chip esp8266 --port /dev/ttyUSB0 --baud 460800 \
   --before no_reset --after no_reset \
-  write_flash 0x0 .pio/build/bayck_7pwm/firmware.bin
+  write_flash 0x0 .pio/build/betafpv_nano/firmware.bin   # or .../bayck_7pwm/...
 ```
 
 These bare RX boards have no DTR/RTS auto-reset, so `--before no_reset` (enter
@@ -94,6 +102,8 @@ the GPS's). The **`bayck_gpstest`** build keeps the CSV plus a 1 Hz
 ```bash
 pio run -e bayck_gpstest          # bring-up (observable in GPS mode)
 pio run -e bayck_7pwm             # production (silent once GPS-locked)
+pio run -e betafpv_nano_gpstest   # Nano bring-up
+pio run -e betafpv_nano           # Nano production
 ```
 
 The grace window is the maintenance window: power on → ~25 s of readable logs →
@@ -128,8 +138,8 @@ unset it to reproduce the pure PoC #0 build). The relay re-floods beacons it has
 seen so a beacon reaches nodes outside the originator's range — the forwarding
 primitive shared by Tier 2 and the Tier-3 dumb relay. Spec:
 `../../docs/hybrid-mesh/05-protocol.md` §"Suppression & dedup state". It is
-silicon-identical on the Tier-3 BetaFPV Nano; this env exercises it on Tier-2
-hardware (the Nano gets its own env once its pin map is confirmed).
+silicon-identical on the BetaFPV Nano, which runs the same relay from its own
+`betafpv_nano` env (pin map confirmed against ELRS "Generic 2400 PA" — below).
 
 Mechanisms (`board_config.h` tunables):
 
@@ -160,13 +170,28 @@ full pending queue.
 - *Not yet on hardware:* overhear suppression and multi-hop reach-extension need a
   2nd relay / 3rd node (`supp`/`qfull` correctly stayed 0 on the 2-node bench).
 
-## Pin map (ELRS "Generic 2400 PWMP7")
+## Pin map
+
+Both boards are ESP8285 + SX1280 and share the radio/LED/UART pins below (the
+SPI lines are the ESP8266 fixed HW-SPI pins). They differ only in the front-end.
 
 | Function | GPIO | | Function | GPIO |
 |---|---|---|---|---|
 | SX1280 SCK | 14 (fixed HW-SPI) | | SX1280 NSS | 15 |
 | SX1280 MISO | 12 (fixed HW-SPI) | | SX1280 DIO1 | 4 |
-| SX1280 MOSI | 13 (fixed HW-SPI) | | SX1280 BUSY | 5 (see traps) |
-| LED | 16 | | SX1280 RST | 2 (see traps) |
+| SX1280 MOSI | 13 (fixed HW-SPI) | | SX1280 BUSY | 5 |
+| LED | 16 | | SX1280 RST | 2 |
+| GPS / debug (UART0) | TX 1 / RX 3 | | | |
 
-7 PWM outputs (Tier 2, not used in PoC #0): GPIO `[0,1,3,9,10,5,2]`.
+**BayckRC 7PWM** (ELRS "Generic 2400 PWMP7"): no PA. That layout sacrifices the
+MCU BUSY/RST GPIOs for PWM, so `board_config.h` *borrows* GPIO5/GPIO2 for BUSY/RST
+(see the traps above — fall back to `RADIOLIB_NC` if `begin()` returns `-707`).
+7 PWM outputs (Tier 2, unused here): GPIO `[0,1,3,9,10,5,2]`.
+
+**BetaFPV Nano RX** (ELRS "Generic 2400 PA"): adds an external **PA/LNA** the
+SX1280 gates via **RXEN = GPIO9, TXEN = GPIO10** (`PIN_LORA_RXEN`/`PIN_LORA_TXEN`,
+set only for `WAYMESH_BOARD_BETAFPV_NANO`; RadioLib drives them — IDLE `{L,L}`,
+RX `{H,L}`, TX `{L,H}`). Without this the PA never powers and the link collapses.
+Here BUSY=GPIO5 / RST=GPIO2 are **physically wired** by the board, so the `-707`
+trap does not apply. GPIO9/10 are the SDIO pins the ESP8285's DIO-mode embedded
+flash frees. (Confirmed against ELRS `targets` `RX/Generic 2400 PA.json`.)

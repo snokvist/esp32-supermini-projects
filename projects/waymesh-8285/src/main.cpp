@@ -386,7 +386,7 @@ void setup() {
 #endif
 
   Serial.println();
-  Serial.println("# waymesh-8285 PoC #0 (BayckRC 7PWM: ESP8285 + SX1280, 2.4 GHz LoRa)");
+  Serial.println("# waymesh-8285 (" WAYMESH_BOARD_NAME ": ESP8285 + SX1280, 2.4 GHz LoRa)");
   Serial.printf("# nodeId=%08X freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d pwr=%ddBm sync=0x%02X\n",
                 gNodeId, (double)LORA_FREQ_MHZ, (double)LORA_BW_KHZ, LORA_SF,
                 LORA_CR, LORA_POWER_DBM, (unsigned)LORA_SYNC_WORD);
@@ -403,6 +403,11 @@ void setup() {
   Serial.printf("# RELAY MODE: managed flood (seen-set=%d, SNR-delay %d..%dms, "
                 "overhear suppress); verbatim re-flood, NO hop-limit.\n",
                 RELAY_SEEN_SET_SIZE, RELAY_DELAY_BASE_MS, RELAY_DELAY_MAX_MS);
+#endif
+#if defined(PIN_LORA_RXEN) && defined(PIN_LORA_TXEN)
+  Serial.printf("# PA front-end: external PA/LNA gated via RXEN=GPIO%d / "
+                "TXEN=GPIO%d (RadioLib RF switch).\n",
+                PIN_LORA_RXEN, PIN_LORA_TXEN);
 #endif
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
@@ -421,8 +426,19 @@ void setup() {
     //    variants are unreadable by the LR1121).
     int16_t sw = gRadio.setSyncWord(LORA_SYNC_WORD);
     int16_t cr = gRadio.setCodingRate(LORA_CR, false);
-    char buf[40];
+#if defined(PIN_LORA_RXEN) && defined(PIN_LORA_TXEN)
+    // External PA/LNA front-end (BetaFPV Nano): hand RadioLib the RXEN/TXEN lines
+    // so it powers the PA on TX and the LNA on RX automatically. MUST be set
+    // before startRx() so the first receive enables the LNA (board_config.h).
+    gRadio.setRfSwitchPins(PIN_LORA_RXEN, PIN_LORA_TXEN);
+#endif
+    char buf[56];
+#if defined(PIN_LORA_RXEN) && defined(PIN_LORA_TXEN)
+    snprintf(buf, sizeof(buf), "radio_ok sw=%d cr=%d pa=rxen%d/txen%d",
+             sw, cr, PIN_LORA_RXEN, PIN_LORA_TXEN);
+#else
     snprintf(buf, sizeof(buf), "radio_ok sw=%d cr=%d", sw, cr);
+#endif
     gRadio.setPacketReceivedAction(onDio1);
     startRx();
     gRadioOk = true;

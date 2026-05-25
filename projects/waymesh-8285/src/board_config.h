@@ -11,6 +11,20 @@
 
 #include <RadioLib.h>  // for RADIOLIB_NC
 
+// ---- Board identity ---------------------------------------------------------
+// One -DWAYMESH_BOARD_* flag selects the hardware variant (set in the env). Both
+// supported boards are ESP8285 + SX1280 and share the fixed HW-SPI + UART0 GPS
+// pins below; they differ only in the front-end (the Nano adds an external PA).
+#ifndef WAYMESH_BOARD_NAME
+#if WAYMESH_BOARD_BETAFPV_NANO
+#define WAYMESH_BOARD_NAME "BetaFPV Nano RX (Generic 2400 PA)"
+#elif WAYMESH_BOARD_BAYCK_7PWM
+#define WAYMESH_BOARD_NAME "BayckRC 7PWM (Generic 2400 PWMP7)"
+#else
+#define WAYMESH_BOARD_NAME "ESP8285+SX1280 (generic)"
+#endif
+#endif
+
 // ---- SX1280 SPI + control pins ---------------------------------------------
 // ESP8266/ESP8285 hardware SPI is on FIXED pins: SCK=GPIO14, MISO=GPIO12,
 // MOSI=GPIO13, HW-CS=GPIO15. SPI.begin() takes no pin args. PWMP7 puts
@@ -41,7 +55,26 @@
 #define PIN_LORA_RST 2    // radio_rst    (set to RADIOLIB_NC if PWMP7 wiring)
 #endif
 
-// ---- Status LED (PWMP7 led=16) ----------------------------------------------
+// ---- External PA/LNA front-end (BetaFPV Nano "Generic 2400 PA") --------------
+// The Nano RX has a power amplifier + LNA the SX1280 must GATE through two RF-
+// switch lines: RXEN (GPIO9) and TXEN (GPIO10) — the ELRS power_rxen/power_txen.
+// RadioLib drives them automatically once setRfSwitchPins(RXEN,TXEN) is called
+// (IDLE={L,L}, RX={H,L}, TX={L,H}); WITHOUT it the PA stays off and both TX reach
+// and RX sensitivity collapse to a fraction of range. The bayck PWMP7 board has
+// NO PA — those same GPIOs are PWM outputs there — so it leaves these undefined.
+//   GPIO9/GPIO10 are the SDIO pins the ESP8285's DIO-mode embedded flash frees;
+//   ELRS uses them for exactly this PA control on these boards (harmless to drive
+//   even on a non-PA "Lite" unit, where they connect to nothing).
+#if WAYMESH_BOARD_BETAFPV_NANO
+#ifndef PIN_LORA_RXEN
+#define PIN_LORA_RXEN 9
+#endif
+#ifndef PIN_LORA_TXEN
+#define PIN_LORA_TXEN 10
+#endif
+#endif
+
+// ---- Status LED (PWMP7 led=16, Generic 2400 PA led=16) -----------------------
 #ifndef PIN_LED
 #define PIN_LED 16
 #endif
