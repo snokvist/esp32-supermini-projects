@@ -38,6 +38,13 @@ void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
 // NodeInfo.last_heard on self and peers.
 void bleGattSetTime(uint32_t epoch);
 
+// Periodic self announcement (rate-limited, gated on the want_config handshake)
+// so this node stays in a connected client's node list like the LoRa peers do,
+// even with no GPS fix — emits a live self NodeInfo carrying the last known fix
+// if any, else a bare no-pos NodeInfo (never a 0,0 Position). Call from the
+// beacon-TX cadence in loop(); shares the rate-limit gate with bleGattSetPosition.
+void bleGattHeartbeat();
+
 // Record a peer heard over LoRa (Phase G 1b). Upserts the gateway node DB; while
 // a client is connected it also enqueues a live NodeInfo (rate-limited) so the
 // peer appears/updates in the Meshtastic app. Called from the main loop task
