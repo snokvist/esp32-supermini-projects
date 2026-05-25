@@ -349,6 +349,11 @@ void loop() {
       gLedOn = !gLedOn;
       ledWrite(gLedOn);
       sendBeacon();
+      // Announce ourselves to a connected BLE client on the same cadence the
+      // peers get re-announced (bleGattOnPeer on each beacon heard) — keeps this
+      // node in the app's list even with no GPS fix. Rate-limited internally, so
+      // it no-ops while a live fix is already streaming via bleGattSetPosition.
+      bleGattHeartbeat();
     }
   }
 

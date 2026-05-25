@@ -410,6 +410,33 @@ void bleGattLoop() {
   Serial.printf("# BLE FromNum notify=%u (q=%d)\n", (unsigned)gFromNumVal, qn);
 }
 
+// Emit a live SELF NodeInfo to a connected client (rate-limited, gated on the
+// want_config handshake). Shared by the GPS-fix path (bleGattSetPosition) and
+// the beacon-cadence heartbeat (bleGattHeartbeat) so this node announces itself
+// like a LoRa peer even with no fix — a bare NodeInfo (no has_position) when
+// valid is false, never a 0,0. Only after the handshake (gConfigDone) so we
+// never queue a frame before the client's want_config. Main-loop task only, so
+// the emit-gate static needs no lock and enqueueFromRadio runs outside gPosMux.
+static void emitSelfNodeInfo(bool valid, int32_t latI, int32_t lonI,
+                             uint32_t sats, uint32_t epoch) {
+  if (!gBleConnected || !gConfigDone) return;
+  const unsigned long now = millis();
+  if (gSelfLastEmitMs != 0 && now - gSelfLastEmitMs < kPeerEmitMinMs) return;
+  gSelfLastEmitMs = now;
+  meshtastic_FromRadio fr;
+  buildNodeInfoFrame(&fr, gNodeId, valid, latI, lonI, sats, 0.0f, epoch);
+  enqueueFromRadio(&fr);
+  // #2: the stock-style MeshPacket{POSITION} (supplementary; the NodeInfo above
+  // is what the gateway app parses). ONLY with a real fix — a no-fix emit would
+  // broadcast 0,0 and teleport the client to null island. Mirrors the per-peer
+  // `if (snap.posValid && ...)` guard in bleGattOnPeer.
+  if (valid && buildPositionPacketFrame(&fr, gNodeId, latI, lonI, sats, 0.0f,
+                                        epoch))
+    enqueueFromRadio(&fr);
+  Serial.printf("# BLE self %08X -> NodeInfo%s (live)\n", (unsigned)gNodeId,
+                valid ? " + Position" : "");
+}
+
 void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
                         bool valid) {
   uint32_t epoch;
@@ -421,28 +448,30 @@ void bleGattSetPosition(int32_t lat_i, int32_t lon_i, uint32_t sats_in_view,
   epoch = gEpoch;  // snapshot for the self NodeInfo (set just before us in loop)
   portEXIT_CRITICAL(&gPosMux);
 
-  // Live SELF NodeInfo: the want_config handshake emits this node once, but
-  // nothing re-streamed it after ConfigComplete (only peers had a live path via
-  // bleGattOnPeer). Mirror that path here so a connected client keeps getting
-  // THIS node's moving position. Only after the handshake (gConfigDone) so we
-  // never queue a frame before the client's want_config. Rate-limited like peers
-  // (kPeerEmitMinMs); no fix => no emit (never 0,0). Called only from the main
-  // loop task, so the emit-gate static needs no lock and enqueueFromRadio runs
-  // outside gPosMux.
-  if (!valid || !gBleConnected || !gConfigDone) return;
-  const unsigned long now = millis();
-  if (gSelfLastEmitMs != 0 && now - gSelfLastEmitMs < kPeerEmitMinMs) return;
-  gSelfLastEmitMs = now;
-  meshtastic_FromRadio fr;
-  buildNodeInfoFrame(&fr, gNodeId, true, lat_i, lon_i, sats_in_view, 0.0f, epoch);
-  enqueueFromRadio(&fr);
-  // #2: also the stock-style MeshPacket{POSITION} (supplementary; NodeInfo above
-  // is what the gateway app parses, this is for stock/strict clients).
-  if (buildPositionPacketFrame(&fr, gNodeId, lat_i, lon_i, sats_in_view, 0.0f,
-                               epoch))
-    enqueueFromRadio(&fr);
-  Serial.printf("# BLE self %08X -> NodeInfo + Position (live)\n",
-                (unsigned)gNodeId);
+  // Live SELF NodeInfo on a fresh fix: the want_config handshake emits this node
+  // once, but nothing re-streamed it after ConfigComplete (only peers had a live
+  // path via bleGattOnPeer). This keeps THIS node's moving position streaming.
+  emitSelfNodeInfo(valid, lat_i, lon_i, sats_in_view, epoch);
+}
+
+// Periodic self announcement so this node stays in a connected client's node
+// list like the LoRa peers do (they re-emit on every beacon heard via
+// bleGattOnPeer). Driven by the beacon-TX cadence in loop(); carries the last
+// known fix if we have one, else a bare no-pos NodeInfo. Shares the self
+// rate-limit gate with bleGattSetPosition, so it never doubles up while a fix is
+// actively streaming. Main-loop task only.
+void bleGattHeartbeat() {
+  int32_t latI, lonI;
+  uint32_t sats, epoch;
+  bool valid;
+  portENTER_CRITICAL(&gPosMux);
+  latI = gLatI;
+  lonI = gLonI;
+  sats = gSats;
+  valid = gPosValid;
+  epoch = gEpoch;
+  portEXIT_CRITICAL(&gPosMux);
+  emitSelfNodeInfo(valid, latI, lonI, sats, epoch);
 }
 
 void bleGattSetTime(uint32_t epoch) {
