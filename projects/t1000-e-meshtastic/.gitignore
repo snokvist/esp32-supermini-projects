@@ -1,0 +1,4 @@
+# Downloaded Meshtastic release artifacts; reproducible via tools/flash.sh
+tools/.cache/
+# Project-local venv (adafruit-nrfutil + meshtastic CLI)
+tools/.venv/
