@@ -20,8 +20,16 @@ full hybrid mesh adds live in
 | Field | Size | Notes |
 |-------|------|-------|
 | NodeID | 32 bit | from C3 MAC / provisioned key; globally unique-enough |
-| GroupID | 16 bit | optional logical-group tag to share spectrum without merging |
+| GroupID | (see note) | logical-group tag to share spectrum without merging |
 | seq | 16 bit | per-originator monotonic; wraps; with NodeID forms MessageID |
+
+> **GroupID is realized as the Meshtastic channel hash, not a bespoke 16-bit tag**
+> — see [13 — Auth & Groups](13-auth-and-groups.md). A channel created in the
+> Meshtastic app (name + PSK) *is* a Waymesh group: its 1-byte channel hash is the
+> on-wire group filter, and the channel PSK provides membership gating +
+> encryption. This reuses the app's key-management UI instead of building our own,
+> and supersedes the standalone `GroupID:16` field. The crypto-bearing `v2` beacon
+> there also widens `seq` to a 32-bit `packetId` (CTR-nonce safety).
 
 (`ShortAddr` / `ClusterID` are cluster identifiers — deferred,
 [12](12-end-goal-full-hybrid-mesh.md#addressing-extensions-beyond-the-near-term-nodeidmessageid).)
@@ -154,4 +162,8 @@ crypto/channel handling: [11](11-mobile-gateway-meshtastic-compat.md).
 - Beacon period vs mobility (stale positions vs airtime)?
 - TEXT reliability: selective ACK vs pure epidemic — what's the airtime cost?
 - Bloom-filter sizing for the seen-set under realistic message rates.
-- Minimal MIC/auth scheme that fits the byte budget (security track, later).
+- Auth/group filtering: **resolved in [13 — Auth & Groups](13-auth-and-groups.md)**
+  — reuse the Meshtastic channel hash (group identity/filter) + PSK/AES-CTR
+  (membership + confidentiality) on the `v2` beacon. Stock Meshtastic channels
+  carry no MIC (key-possession *is* the auth); a per-node integrity/signature track
+  stays optional and additive there.

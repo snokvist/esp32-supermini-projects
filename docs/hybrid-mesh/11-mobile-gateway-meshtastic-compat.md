@@ -147,6 +147,16 @@ UX, computed from a digest instead of from individual beacons.
 
 ## Channels & crypto (the one fiddly part)
 
+> **Channels are not just a gateway detail — they are Waymesh's group-identity +
+> authentication mechanism.** A Meshtastic channel (name → 1-byte hash, plus a PSK)
+> doubles as a Waymesh *group*: the channel hash is the on-wire group filter and
+> the PSK gives membership gating + encryption — and the app already manages the
+> keys (create / QR / URL / rotate). So the same channel set we advertise here is
+> what gates and encrypts traffic **on our own LoRa wire**, not only on the BLE
+> link. The full design + `v2` wire format + RX/relay/gateway changes:
+> [13 — Auth & Groups](13-auth-and-groups.md). The notes below cover only the
+> gateway↔app boundary.
+
 - **Read path needs no crypto.** A real Meshtastic radio decrypts before handing
   packets to the phone; we do the same by populating `MeshPacket.decoded`
   (plaintext `Data`). So FromRadio packets are already-decoded.

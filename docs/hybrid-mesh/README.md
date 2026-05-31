@@ -88,6 +88,7 @@ What the XR2 can and can't prove:
 | 10 | [Experiments & Metrics](10-experiments-and-metrics.md) | **Near-term:** metrics, rigs, config matrix, logging schema |
 | 11 | [Mobile/PC Gateway: Meshtastic Compat](11-mobile-gateway-meshtastic-compat.md) | The centerpiece: a phone (BLE) / PC (serial) sees the node as a Meshtastic device — reuse their apps as our UI |
 | 12 | [End Goal: Full Hybrid Mesh](12-end-goal-full-hybrid-mesh.md) | **Deferred:** the two-plane (ESP-NOW + LoRa) mesh — coexistence, power/runtime, mobility/clustering, aggregation, DTN, deferred phases |
+| 13 | [Auth & Groups](13-auth-and-groups.md) | **Spec (no firmware yet):** group identity + authentication by reusing the Meshtastic channel hash + PSK/AES-CTR on a `v2` beacon — wire format, RX/relay/gateway changes, phasing |
 
 ## Current status
 
