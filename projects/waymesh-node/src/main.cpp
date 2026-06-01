@@ -28,6 +28,9 @@
 
 #include "board_config.h"
 #include "ble_gatt.h"
+#include "waymesh_config.h"
+#include "wm_beacon.h"
+#include "config_nvs.h"
 
 // ---- Radio ------------------------------------------------------------------
 // LR11x0 Module pin order: (NSS/CS, IRQ/DIO1, RESET, BUSY)
@@ -37,35 +40,23 @@ static LR1121 gRadio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN
 static TinyGPSPlus gGps;
 static HardwareSerial gGnssSerial(1);
 
-// ---- Loopback beacon packet -------------------------------------------------
-// v1 adds GPS position so peers can be mapped (Phase G 1b). Backward-compatible:
-// a v0 (8-byte) beacon is still parsed for srcId/seq; the position tail is read
-// only when present (len >= sizeof(Beacon)) and BEACON_FLAG_POS is set.
-static const uint8_t WM_MAGIC = 0x57;  // 'W'
-static const uint8_t WM_VERSION = 1;
-static const uint8_t BEACON_FLAG_POS = 0x01;  // lat_i/lon_i valid
-
-struct __attribute__((packed)) Beacon {
-  uint8_t magic;
-  uint8_t version;
-  uint32_t srcId;
-  uint16_t seq;
-  // v1 tail:
-  int32_t lat_i;   // degrees * 1e7
-  int32_t lon_i;   // degrees * 1e7
-  uint8_t sats;
-  uint8_t flags;   // BEACON_FLAG_*
-};
-static const size_t BEACON_V0_SIZE = 8;  // magic+version+srcId+seq
+// ---- Beacon wire format -----------------------------------------------------
+// The v2 beacon (chanHash group filter + 32-bit reboot-safe packetId) and its
+// v0/v1 back-compat parsing live in the portable, host-tested waymesh_beacon
+// lib (lib/waymesh_beacon, doc 13 §3). This node TXes a clear v2 beacon on its
+// home channel and applies the group filter on RX (Phase 1 — positions clear;
+// AES-CCM lands in Phase 2). Persistent channels + the crash-safe packetId
+// counter come from waymesh_config over the C3 NVS backend (config_nvs).
 
 // ---- State ------------------------------------------------------------------
 static uint32_t gNodeId = 0;
-static uint16_t gTxSeq = 0;
+static uint32_t gTxSeq = 0;       // beacons transmitted (status metric)
+static wm_config_t gCfg;          // channels + relay policy + packetId counter
 static uint32_t gRxCount = 0;
 static uint32_t gRxBadCount = 0;
-static uint16_t gLastRxSeq = 0;
-static bool gHaveLastRxSeq = false;
-static uint32_t gRxSeqGaps = 0;  // missed beacons inferred from seq jumps
+static uint32_t gLastRxId = 0;    // last accepted packetId (single-peer PDR)
+static bool gHaveLastRxId = false;
+static uint32_t gRxSeqGaps = 0;  // missed beacons inferred from packetId jumps
 #if WAYMESH_RELAY_WITNESS
 static uint32_t gRelayedBack = 0;  // our own beacons heard back via a relay (debug)
 #endif
@@ -116,22 +107,30 @@ static void startRx() {
 }
 
 static void sendBeacon() {
-  Beacon b;
-  memset(&b, 0, sizeof(b));
-  b.magic = WM_MAGIC;
-  b.version = WM_VERSION;
-  b.srcId = gNodeId;
-  b.seq = gTxSeq;
-  if (gGps.location.isValid()) {
-    b.lat_i = (int32_t)lround(gGps.location.lat() * 1e7);
-    b.lon_i = (int32_t)lround(gGps.location.lng() * 1e7);
-    b.sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
-    b.flags |= BEACON_FLAG_POS;
+  // TX a clear v2 beacon on our home channel (Phase 1: group filter, no crypto).
+  const wm_channel_t *home = wm_config_home(&gCfg);
+  uint8_t chanHash = (home && home->hash >= 0) ? (uint8_t)home->hash
+                                               : WM_OPEN_GROUP_HASH;
+  uint32_t pid = wm_config_next_packet_id(&gCfg);
+
+  bool posValid = gGps.location.isValid();
+  int32_t lat = 0, lon = 0;
+  uint8_t sats = 0;
+  if (posValid) {
+    lat = (int32_t)lround(gGps.location.lat() * 1e7);
+    lon = (int32_t)lround(gGps.location.lng() * 1e7);
+    sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
   }
 
-  int16_t st = gRadio.transmit((uint8_t *)&b, sizeof(b));
+  uint8_t out[WM_BEACON_V2_MAX];
+  size_t n = wm_beacon_build_v2_clear(out, chanHash, gNodeId, pid, posValid,
+                                      lat, lon, sats);
+
+  int16_t st = gRadio.transmit(out, n);
   if (st == RADIOLIB_ERR_NONE) {
-    logEvent("tx", "lrp", gNodeId, gTxSeq, NAN, NAN, "beacon");
+    char ex[20];
+    snprintf(ex, sizeof(ex), "beacon ch=%u", (unsigned)chanHash);
+    logEvent("tx", "lrp", gNodeId, (long)(pid & 0xFFFF), NAN, NAN, ex);
     gTxSeq++;
   } else {
     char buf[20];
@@ -150,66 +149,79 @@ static void sendBeacon() {
 }
 
 static void handleRx() {
-  // Read exactly the received length so a v0 (8-byte) beacon and a v1 (with
-  // position tail) beacon both parse; the position tail is read only if present.
-  uint8_t raw[sizeof(Beacon)];
+  // Read exactly the received length; the codec parses v0/v1/v2 by version byte.
+  uint8_t raw[WM_BEACON_V2_MAX];
   memset(raw, 0, sizeof(raw));
   size_t plen = gRadio.getPacketLength();
   if (plen > sizeof(raw)) plen = sizeof(raw);
   int16_t st = gRadio.readData(raw, plen);
 
-  Beacon b;
-  memset(&b, 0, sizeof(b));
-  if (plen >= BEACON_V0_SIZE) memcpy(&b, raw, plen);
-
-  if (st == RADIOLIB_ERR_NONE && plen >= BEACON_V0_SIZE && b.magic == WM_MAGIC &&
-      b.srcId != gNodeId) {
-    gRxCount++;
-    float rssi = gRadio.getRSSI();
-    float snr = gRadio.getSNR();
-    if (gHaveLastRxSeq) {
-      uint16_t expected = (uint16_t)(gLastRxSeq + 1);
-      // Signed modular delta: >0 is a forward gap (missed beacons); <=0 is a
-      // duplicate / reordered / post-restart frame and must NOT count as loss.
-      // (The old unsigned subtraction wrapped to ~65535 on any dup and exploded
-      // the PDR estimate.) Assumes a single peer (Phase 0 PDR metric).
-      int16_t delta = (int16_t)(b.seq - expected);
-      if (delta > 0) {
-        gRxSeqGaps += (uint16_t)delta;
-      }
-    }
-    gLastRxSeq = b.seq;
-    gHaveLastRxSeq = true;
-    logEvent("rx", "lrp", b.srcId, b.seq, rssi, snr, "beacon");
-
-    // Feed the BLE gateway's peer node DB (Phase G 1b). Position only when the
-    // v1 tail is present and flagged.
-    bool posValid = b.version >= 1 && plen >= sizeof(Beacon) &&
-                    (b.flags & BEACON_FLAG_POS);
-    bleGattOnPeer(b.srcId, b.lat_i, b.lon_i, b.sats, posValid, snr);
-  } else if (st != RADIOLIB_ERR_NONE) {
+  if (st != RADIOLIB_ERR_NONE) {
     gRxBadCount++;
     char buf[20];
     snprintf(buf, sizeof(buf), "rx_err=%d", st);
     logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
+    startRx();
+    return;
   }
+
+  wm_beacon_t b;
+  if (wm_beacon_parse(raw, plen, &b) != 0) {
+    startRx(); // not a recognized Waymesh beacon — ignore quietly (magic gate)
+    return;
+  }
+
+  float rssi = gRadio.getRSSI();
+  float snr = gRadio.getSNR();
+
 #if WAYMESH_RELAY_WITNESS
-  // Debug instrumentation (reversible; gated by WAYMESH_RELAY_WITNESS). A VALID
-  // beacon carrying our OWN srcId can only be one of our beacons rebroadcast by
-  // a relay — we clear gRxFlag after every TX, so we never hear ourselves. The
-  // normal RX path above ignores srcId==self (the != gNodeId guard); here we
-  // count it instead, which turns "XR2 -> relay -> XR2" into a measurable relay
-  // PDR on a 2-node bench (relayed_back vs tx). Remove the flag to drop this.
-  if (st == RADIOLIB_ERR_NONE && plen >= BEACON_V0_SIZE && b.magic == WM_MAGIC &&
-      b.srcId == gNodeId) {
+  // Debug (gated): a beacon carrying our OWN srcId can only be a relay's
+  // rebroadcast — we clear gRxFlag after every TX, so we never hear ourselves.
+  // Counting it turns "XR2 -> relay -> XR2" into a measurable relay PDR.
+  if (b.src_id == gNodeId) {
     gRelayedBack++;
-    float rssi = gRadio.getRSSI();
-    float snr = gRadio.getSNR();
     char buf[28];
     snprintf(buf, sizeof(buf), "relayed_back=%lu", (unsigned long)gRelayedBack);
-    logEvent("relay_witness", "lrp", b.srcId, b.seq, rssi, snr, buf);
+    logEvent("relay_witness", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF),
+             rssi, snr, buf);
+    startRx();
+    return;
   }
 #endif
+
+  // Acceptance steps 2-3 (§6): drop self and foreign groups.
+  wm_rx_decision_t d = wm_beacon_accept(&b, gNodeId, &gCfg);
+  if (d == WM_RX_DROP_FOREIGN_GROUP) {
+    // Logged so the "two groups on one band ignore each other" gate is visible.
+    char ex[24];
+    snprintf(ex, sizeof(ex), "foreign_group ch=%u", (unsigned)b.chan_hash);
+    logEvent("drop", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+    startRx();
+    return;
+  }
+  if (d != WM_RX_ACCEPT) { // DROP_SELF
+    startRx();
+    return;
+  }
+
+  // Accepted: a beacon from a group we belong to.
+  gRxCount++;
+  if (gHaveLastRxId) {
+    // Forward gap on a single peer's packetId; ignore reserve-ahead block skips
+    // / reboots / reordering (Phase 0 single-peer PDR metric, best-effort).
+    int32_t delta = (int32_t)(b.packet_id - (gLastRxId + 1));
+    if (delta > 0 && delta < (int32_t)WM_PKTID_BLOCK)
+      gRxSeqGaps += (uint32_t)delta;
+  }
+  gLastRxId = b.packet_id;
+  gHaveLastRxId = true;
+
+  char ex[20];
+  snprintf(ex, sizeof(ex), "beacon ch=%u", (unsigned)b.chan_hash);
+  logEvent("rx", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+
+  // Feed the BLE gateway's peer node DB (Phase G 1b); position only when valid.
+  bleGattOnPeer(b.src_id, b.lat_i, b.lon_i, b.sats, b.has_pos, snr);
   startRx();
 }
 
@@ -280,6 +292,12 @@ void setup() {
 
   gNodeId = (uint32_t)(ESP.getEfuseMac() & 0xFFFFFFFFULL);
 
+  // Persistent config: channels (seeds the Meshtastic default "LongFast" open
+  // group -> chanHash 8 on fresh NVS), relay policy, and the crash-safe
+  // packetId counter (reserve-ahead high-water in NVS). See doc 13 §8.
+  wm_store_t store = wm_nvs_store();
+  wm_config_init(&gCfg, &store);
+
   Serial.println();
   Serial.println("# waymesh-node Phase 0 (XR2: ESP32-C3 + LR1121, 2.4 GHz LoRa)");
   Serial.printf("# nodeId=%08X freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d pwr=%ddBm\n",
@@ -287,6 +305,13 @@ void setup() {
                 LORA_CR, LORA_POWER_DBM);
   Serial.println("# pins verified vs ELRS XR2 target; LR1121 RF-switch/DCDC at "
                  "RadioLib defaults - confirm TX/RX routing before trusting range.");
+  {
+    const wm_channel_t *home = wm_config_home(&gCfg);
+    Serial.printf("# config: %u chan(s), home '%s' chanHash=%d relay=%s\n",
+                  (unsigned)gCfg.channel_count, home ? home->name : "-",
+                  home ? home->hash : -1,
+                  gCfg.relay_policy == WM_RELAY_ALL ? "all" : "known");
+  }
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
   // GNSS on the spare UART.

@@ -1,0 +1,15 @@
+{
+  "name": "waymesh_beacon",
+  "version": "0.1.0",
+  "description": "Waymesh v2 beacon wire codec (plaintext header) + RX accept / relay-policy decisions. Pure C99, host/C3/8285.",
+  "keywords": ["waymesh", "beacon", "lora", "protocol"],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": {
+    "waymesh_config": "*"
+  },
+  "build": {
+    "srcFilter": ["+<*.c>"]
+  }
+}
