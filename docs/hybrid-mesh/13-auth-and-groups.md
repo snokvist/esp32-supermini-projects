@@ -269,7 +269,8 @@ The gateway is the crypto boundary. Changes layer onto the existing handshake
 1. **Advertise the channel set.** Emit `FromRadio{channel: Channel}` frames for
    each provisioned channel (name + PSK + index) during the handshake — the app
    adopts them ([11 §Channels & crypto](11-mobile-gateway-meshtastic-compat.md)).
-   Today only the implicit default is assumed; make the set explicit.
+   Today only the implicit default is assumed; make the set explicit. The reverse
+   direction — the app *editing* a channel — is the runtime-update path (§8.1).
 2. **Read path (OTA → app):** when a v2 beacon is accepted+decrypted (§6), map to
    `NodeInfo`/`Position`/text **tagged with the matching channel index** on the
    `MeshPacket` so the app shows it on the right channel. (`buildNodeInfoFrame` /
@@ -309,6 +310,70 @@ The gateway is the crypto boundary. Changes layer onto the existing handshake
   unprovisioned node still interoperates on the open group (today's behavior),
   selectable rather than mandatory.
 
+### 8.1 — Runtime channel update over the Meshtastic app (no reflash)
+
+The reuse payoff: a BLE-gateway (C3) node's channel set is editable from the stock
+app's **Channel editor** — no custom tool, no reflash. Flow (verify message/field
+numbers against the pinned `admin.proto` / `channel.proto`):
+
+1. App → node `ToRadio{packet}` with `packet.decoded.portnum = ADMIN_APP (6)` and a
+   serialized `AdminMessage` payload. Admin rides **inside the existing
+   `ToRadio{packet}` path** — no new transport variant; the stub at
+   `ble_gatt.cpp:336` is exactly where it lands.
+2. `AdminMessage.set_channel = Channel{ index, role, settings{ name, psk, … } }` →
+   the gateway recomputes `chanHash` + the AES key (§4), validates, and **persists**
+   the channel to NVS.
+3. Node re-advertises: bump `FromNum`, emit the updated `FromRadio{channel}`; new
+   beacons use the new hash/key immediately.
+4. Read-back: `AdminMessage.get_channel_request` → node replies
+   `get_channel_response` (or relies on the handshake's `FromRadio{channel}` dump) so
+   the editor shows current state.
+5. **Session passkey:** recent apps require an admin session — the node returns a
+   `session_passkey` nonce (in a `get_*` response) that the app echoes on mutating
+   admin writes; it expires. Implement it, or stub-accept for a locally-bonded BLE
+   client, per the pinned version.
+
+Share the resulting channel to other **C3** nodes with the standard Meshtastic
+channel **QR / URL** out of the app.
+
+### 8.2 — What's needed to close the gap (investigated against the current tree)
+
+None of this exists yet. Concretely, to ship 8.1:
+
+- **Proto (absent):** the vendored trimmed proto
+  (`projects/waymesh-node/proto/waymesh_mesh.proto`) has **no** `Channel`,
+  `ChannelSettings`, or `AdminMessage`, and `FromRadio` has **no** `channel`
+  variant — the gateway can't even represent a channel today. Add
+  `ChannelSettings{psk, name, id}`, `Channel{index, settings, role}`, a **trimmed**
+  `AdminMessage` (just `set_channel` / `get_channel_request` / `get_channel_response`
+  / `session_passkey`), and `FromRadio.channel = 10` (`MeshPacket.channel` already
+  exists, field 3). Regenerate nanopb per `proto/README.md`, field numbers in
+  lockstep with upstream.
+- **NVS/config store (absent):** there is **no** `Preferences`/NVS/EEPROM usage in
+  the firmware today. Add a small persistence module holding the channel list **and**
+  the §8 `packetId` high-water — one store, written on channel-set and on the
+  periodic reserve-ahead. (C3: `Preferences`/NVS; the 8285 tier uses its
+  EEPROM/flash equivalent.)
+- **Crypto prerequisite:** `set_channel` can't be honored until `chanHash` + the
+  PSK/default-key expansion (§4) exist — so the runtime-update path **depends on the
+  §9 Phase-1/2 crypto landing first**; it is not independently shippable.
+- **Gateway handler:** extend the `ToRadio{packet}` stub (`ble_gatt.cpp:336`) to
+  decode `ADMIN_APP` → `AdminMessage`, and emit `FromRadio{channel}` in
+  `queueConfigSequence` (the handshake emits my_info/metadata/nodeinfo/complete
+  only — no channel today).
+
+### 8.3 — Tier constraints (who can be configured how)
+
+- **C3 / BLE-gateway nodes (XR2):** full 8.1 — set/update channels live from the app.
+- **ESP8285 tiers (Bayck / BetaFPV):** the ESP8285 is **WiFi-only, no BLE**, so they
+  **cannot** be configured from the Meshtastic app at all → **flash/NVS provisioned**,
+  full stop. A `relay-all` relay needs no channel/key anyway (it re-floods verbatim,
+  §6), so most dumb relays need zero channel config; a `relay-known` 8285 takes its
+  allow-list at flash/NVS time.
+- **OTA key distribution to headless nodes** (a signed "channel-announce" beacon) is
+  a *possible later* convenience but carries a bootstrap-trust problem (securely
+  shipping a new key needs an existing shared key) — out of scope here.
+
 ## 9 — Phasing (slots into [09](09-poc-roadmap.md))
 
 Build on top of Phase G / Phase 5, incrementally:
@@ -322,8 +387,12 @@ Build on top of Phase G / Phase 5, incrementally:
    **Gate:** only key-holders see positions/text; tampered/foreign frames are
    dropped on the MIC; the app shows them on the right channel; relay still works
    without the key.
-3. **TX with channel crypto.** Wire the gateway write path (§7.3). **Gate:** phone
-   text round-trips on a chosen channel over multi-hop LoRa.
+3. **TX + runtime channel-set ([09](09-poc-roadmap.md) Phase G inc. 3).** Wire the
+   gateway write path (§7.3) for text, *and* the `AdminMessage.set_channel` →
+   NVS-persist → re-advertise flow (§8.1) — both ride the same `ToRadio{packet}`
+   handler. **Gate:** phone text round-trips on a chosen channel over multi-hop
+   LoRa, and a channel edited in the app persists across reboot and takes effect
+   without a reflash.
 4. **(Deferred) per-node signatures.** *Only* if a real threat needs non-repudiation
    between group members — an asymmetric per-node signature (§2). Expensive (a 64-B
    Ed25519 sig triples beacon airtime) and needs a key-trust story we don't want, so
