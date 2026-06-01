@@ -104,6 +104,19 @@ message Channel {
   uint32          role     = 3;   // Channel.Role: DISABLED=0, PRIMARY=1, SECONDARY=2
 }
 
+// Runtime channel update over the app (§8.1). Rides in Data.payload with
+// portnum = ADMIN_APP (6). Field numbers match upstream admin.proto @ f00e96f.
+// session_passkey is a top-level field (NOT in the oneof); the node issues it in
+// get_channel_response and the app echoes it in set_channel.
+message AdminMessage {
+  oneof payload_variant {
+    uint32  get_channel_request  = 1;   // 1-based channel index to read
+    Channel get_channel_response = 2;
+    Channel set_channel          = 33;
+  }
+  bytes session_passkey = 101;
+}
+
 // --- top-level transport messages -------------------------------------------
 
 message ToRadio {

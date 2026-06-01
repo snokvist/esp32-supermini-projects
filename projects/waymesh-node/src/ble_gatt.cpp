@@ -116,6 +116,27 @@ static void appTextPush(uint8_t chanHash, const uint8_t *text, size_t len) {
   portEXIT_CRITICAL(&gTxMux);
 }
 
+// --- admin: runtime set_channel (§8.1) --------------------------------------
+// The node issues an 8-byte session passkey in a get_channel_response; the app
+// echoes it in set_channel, which we accept only if it matches within 300 s
+// (mirrors upstream AdminMessage session semantics). An applied set_channel is
+// queued to the main loop (it owns NVS) which persists it and reboots so the new
+// channel set loads + re-advertises cleanly (no cross-task gCfg mutation race).
+extern "C" uint32_t esp_random(void);
+static uint8_t gPasskey[8];
+static bool gPasskeyValid = false;
+static unsigned long gPasskeyIssuedMs = 0;
+static const unsigned long kPasskeyTtlMs = 300000;  // 300 s
+
+struct PendingChan {
+  bool active;
+  uint8_t index, role, psk_len;
+  uint8_t psk[WM_PSK_MAX];
+  char name[WM_CHAN_NAME_MAX];
+};
+static PendingChan gPendingChan;
+static portMUX_TYPE gAdminMux = portMUX_INITIALIZER_UNLOCKED;
+
 // --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
 static uint32_t gNodeId = 0;
 static portMUX_TYPE gPosMux = portMUX_INITIALIZER_UNLOCKED;  // guards the below
@@ -422,10 +443,123 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
+static void issuePasskey(void) {
+  for (int i = 0; i < 8; i += 4) {
+    uint32_t r = esp_random();
+    memcpy(gPasskey + i, &r, 4);
+  }
+  gPasskeyValid = true;
+  gPasskeyIssuedMs = millis();
+}
+
+static bool passkeyOk(const uint8_t *pk, size_t len) {
+  if (!gPasskeyValid || len != sizeof(gPasskey)) return false;
+  if (millis() - gPasskeyIssuedMs > kPasskeyTtlMs) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < len; i++) diff |= (uint8_t)(pk[i] ^ gPasskey[i]);
+  return diff == 0;
+}
+
+// Fill a Channel proto from a configured channel — psk is the STORED Meshtastic
+// PSK so the app derives the same hash+key we use (§4), never the expanded key.
+static void fillChannel(meshtastic_Channel *ch, const wm_channel_t *c,
+                        uint8_t role) {
+  ch->index = c->index;
+  ch->role = role;
+  ch->has_settings = true;
+  size_t pk = c->psk_len <= sizeof(ch->settings.psk.bytes)
+                  ? c->psk_len : sizeof(ch->settings.psk.bytes);
+  memcpy(ch->settings.psk.bytes, c->psk, pk);
+  ch->settings.psk.size = (pb_size_t)pk;
+  snprintf(ch->settings.name, sizeof(ch->settings.name), "%s", c->name);
+  ch->settings.id = 0;
+}
+
+// Reply to a get_channel_request: an ADMIN MeshPacket carrying
+// AdminMessage{get_channel_response: Channel[idx], session_passkey}.
+static void sendAdminChannelResponse(uint8_t idx) {
+  meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+  am.which_payload_variant = meshtastic_AdminMessage_get_channel_response_tag;
+  const wm_channel_t *c = channelByIndex(idx);
+  if (c) {
+    uint8_t home = homeChannelIndex();
+    fillChannel(&am.payload_variant.get_channel_response, c,
+                idx == home ? MESH_CHANNEL_ROLE_PRIMARY
+                            : MESH_CHANNEL_ROLE_SECONDARY);
+  } else {
+    am.payload_variant.get_channel_response.index = idx;  // empty/disabled slot
+  }
+  issuePasskey();
+  memcpy(am.session_passkey.bytes, gPasskey, sizeof(gPasskey));
+  am.session_passkey.size = sizeof(gPasskey);
+
+  meshtastic_FromRadio fr = meshtastic_FromRadio_init_zero;
+  fr.which_payload_variant = meshtastic_FromRadio_packet_tag;
+  meshtastic_MeshPacket &mp = fr.payload_variant.packet;
+  mp.from = gNodeId;
+  mp.to = gNodeId;  // admin reply addressed to the local node
+  mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+  meshtastic_Data &d = mp.payload_variant.decoded;
+  d.portnum = MESH_PORTNUM_ADMIN;
+  pb_ostream_t os =
+      pb_ostream_from_buffer(d.payload.bytes, sizeof(d.payload.bytes));
+  if (!pb_encode(&os, meshtastic_AdminMessage_fields, &am)) return;
+  d.payload.size = (pb_size_t)os.bytes_written;
+  static uint32_t adminId = 0x60000000u;
+  mp.id = ++adminId;
+  enqueueFromRadio(&fr);
+  Serial.printf("# BLE admin get_channel(%u) -> response + passkey\n",
+                (unsigned)idx);
+}
+
+// Decode + handle an AdminMessage from the phone (Data.portnum == ADMIN_APP, §8.1).
+static void routeAdminMessage(const uint8_t *payload, size_t len) {
+  meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+  pb_istream_t is = pb_istream_from_buffer(payload, len);
+  if (!pb_decode(&is, meshtastic_AdminMessage_fields, &am)) {
+    Serial.println("# BLE admin decode failed");
+    return;
+  }
+  switch (am.which_payload_variant) {
+    case meshtastic_AdminMessage_get_channel_request_tag: {
+      // upstream get_channel_request is 1-based (0 = none) -> 0-based index.
+      uint32_t req = am.payload_variant.get_channel_request;
+      sendAdminChannelResponse(req ? (uint8_t)(req - 1) : 0);
+      break;
+    }
+    case meshtastic_AdminMessage_set_channel_tag: {
+      if (!passkeyOk(am.session_passkey.bytes, am.session_passkey.size)) {
+        Serial.println("# BLE admin set_channel REJECTED (bad/expired passkey)");
+        break;
+      }
+      const meshtastic_Channel &ch = am.payload_variant.set_channel;
+      portENTER_CRITICAL(&gAdminMux);
+      gPendingChan.active = true;
+      gPendingChan.index = (uint8_t)ch.index;
+      gPendingChan.role = (uint8_t)ch.role;
+      size_t pk = ch.settings.psk.size <= WM_PSK_MAX ? ch.settings.psk.size
+                                                     : WM_PSK_MAX;
+      memcpy(gPendingChan.psk, ch.settings.psk.bytes, pk);
+      gPendingChan.psk_len = (uint8_t)pk;
+      snprintf(gPendingChan.name, sizeof(gPendingChan.name), "%s",
+               ch.settings.name);
+      portEXIT_CRITICAL(&gAdminMux);
+      Serial.printf("# BLE admin set_channel idx=%u name='%s' role=%u -> queued\n",
+                    (unsigned)ch.index, ch.settings.name, (unsigned)ch.role);
+      break;
+    }
+    default:
+      Serial.printf("# BLE admin variant=%u (ignored)\n",
+                    (unsigned)am.which_payload_variant);
+      break;
+  }
+}
+
 // Route an inbound app MeshPacket (write path, §7.3): recover the channel text
 // — used as-is if the app sent it decoded, else CTR-decrypted byte-compatibly
 // with the stock Meshtastic channel cipher (constraint c) — and queue it for the
-// main loop to flood as a v2 TEXT beacon. NVS/radio stay on the main task.
+// main loop to flood as a v2 TEXT beacon. NVS/radio stay on the main task. An
+// ADMIN_APP payload is handed to the AdminMessage handler instead (§8.1).
 static void routeAppPacket(const meshtastic_MeshPacket *mp) {
   const wm_channel_t *ch = channelByIndex((uint8_t)mp->channel);
   if (!ch || ch->hash < 0) {
@@ -458,9 +592,11 @@ static void routeAppPacket(const meshtastic_MeshPacket *mp) {
     appTextPush((uint8_t)ch->hash, data.payload.bytes, data.payload.size);
     Serial.printf("# BLE app text -> channel %u (%u B), queued for LoRa\n",
                   (unsigned)mp->channel, (unsigned)data.payload.size);
+  } else if (data.portnum == MESH_PORTNUM_ADMIN && data.payload.size > 0) {
+    routeAdminMessage(data.payload.bytes, data.payload.size);
   } else {
-    Serial.printf("# BLE ToRadio packet portnum=%u ch=%u (not text, ignored)\n",
-                  (unsigned)data.portnum, (unsigned)mp->channel);
+    Serial.printf("# BLE ToRadio packet portnum=%u ch=%u (not text/admin, "
+                  "ignored)\n", (unsigned)data.portnum, (unsigned)mp->channel);
   }
 }
 
@@ -728,4 +864,28 @@ int bleGattPopAppText(uint8_t *chan_hash, uint8_t *out, size_t cap) {
   }
   portEXIT_CRITICAL(&gTxMux);
   return n;
+}
+
+bool bleGattPopSetChannel(uint8_t *index, uint8_t *role, uint8_t *psk,
+                          size_t psk_cap, size_t *psk_len, char *name,
+                          size_t name_cap) {
+  bool got = false;
+  portENTER_CRITICAL(&gAdminMux);
+  if (gPendingChan.active) {
+    *index = gPendingChan.index;
+    *role = gPendingChan.role;
+    size_t pk = gPendingChan.psk_len <= psk_cap ? gPendingChan.psk_len : psk_cap;
+    memcpy(psk, gPendingChan.psk, pk);
+    *psk_len = pk;
+    size_t nl = 0;
+    while (nl + 1 < name_cap && gPendingChan.name[nl]) {
+      name[nl] = gPendingChan.name[nl];
+      nl++;
+    }
+    name[nl] = '\0';
+    gPendingChan.active = false;
+    got = true;
+  }
+  portEXIT_CRITICAL(&gAdminMux);
+  return got;
 }

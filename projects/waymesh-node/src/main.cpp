@@ -194,6 +194,33 @@ static void serviceAppText() {
   startRx();
 }
 
+// Apply a passkey-validated set_channel the BLE gateway queued (§8.1): persist
+// the new channel to NVS, then reboot so the updated channel set loads + is
+// re-advertised cleanly (matches Meshtastic's reboot-after-config and avoids a
+// cross-task gCfg mutation race — the BLE handshake reads gCfg concurrently).
+static void serviceSetChannel() {
+  uint8_t index, role, psk[WM_PSK_MAX];
+  size_t psk_len;
+  char name[WM_CHAN_NAME_MAX];
+  if (!bleGattPopSetChannel(&index, &role, psk, sizeof(psk), &psk_len, name,
+                            sizeof(name)))
+    return;
+  if (name[0] == '\0') return;  // we require explicit non-empty names (§4)
+
+  int rc = wm_config_add_channel(&gCfg, name, psk, psk_len, index);
+  if (rc == 0 && role == 1 /* PRIMARY */) wm_config_set_home(&gCfg, index);
+  char ex[44];
+  snprintf(ex, sizeof(ex), "set_channel %s idx=%u%s",
+           rc == 0 ? "applied" : "FAILED", (unsigned)index,
+           rc == 0 ? " -> reboot" : "");
+  logEvent("admin", "node", gNodeId, -1, NAN, NAN, ex);
+  if (rc == 0) {
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+  }
+}
+
 static void handleRx() {
   // Read exactly the received length; the codec parses v0/v1/v2 by version byte.
   // Buffer fits the largest v2 frame (a TEXT beacon: header + text + MIC).
@@ -466,6 +493,9 @@ void loop() {
 #endif
 
   bleGattLoop();
+
+  // Apply a runtime channel edit the app pushed (§8.1) — persists + reboots.
+  serviceSetChannel();
 
   const unsigned long nowStatus = millis();
   if (nowStatus - gLastStatusMs >= STATUS_PERIOD_MS) {

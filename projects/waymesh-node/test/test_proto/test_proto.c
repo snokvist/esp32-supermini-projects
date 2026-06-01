@@ -106,11 +106,70 @@ static void test_channel_roundtrip(void)
                              got.payload_variant.channel.settings.name);
 }
 
+/* Upstream-format AdminMessage{ set_channel = Channel{index=2},
+ *                               session_passkey = {0xDE,0xAD} }.
+ * set_channel is field 33 (the high tag a naive impl gets wrong): key =
+ * (33<<3)|2 = 266 -> varint 8A 02. session_passkey is the top-level field 101:
+ * key = (101<<3)|2 = 810 -> varint AA 06. Decoding this with our generated code
+ * locks both numbers against upstream admin.proto. */
+static const uint8_t kUpstreamAdminSetChannel[] = {
+    0x8A, 0x02, 0x02,       /* set_channel (field 33, LEN, 2 bytes)        */
+      0x08, 0x02,           /*   Channel.index = 2                          */
+    0xAA, 0x06, 0x02,       /* session_passkey (field 101, LEN, 2 bytes)   */
+      0xDE, 0xAD,
+};
+
+static void test_decode_upstream_admin(void)
+{
+    meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(kUpstreamAdminSetChannel,
+                                             sizeof(kUpstreamAdminSetChannel));
+    TEST_ASSERT_TRUE(pb_decode(&is, meshtastic_AdminMessage_fields, &am));
+    TEST_ASSERT_EQUAL_UINT(meshtastic_AdminMessage_set_channel_tag,
+                           am.which_payload_variant);
+    TEST_ASSERT_EQUAL_UINT32(2, am.payload_variant.set_channel.index);
+    TEST_ASSERT_EQUAL_UINT(2, am.session_passkey.size);
+    TEST_ASSERT_EQUAL_HEX8(0xDE, am.session_passkey.bytes[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xAD, am.session_passkey.bytes[1]);
+}
+
+/* get_channel_request (field 1) + set_channel (field 33) round-trip. */
+static void test_admin_roundtrip(void)
+{
+    meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+    am.which_payload_variant = meshtastic_AdminMessage_set_channel_tag;
+    am.payload_variant.set_channel.index = 1;
+    am.payload_variant.set_channel.role = 1;  /* PRIMARY */
+    am.payload_variant.set_channel.has_settings = true;
+    am.payload_variant.set_channel.settings.psk.size = 1;
+    am.payload_variant.set_channel.settings.psk.bytes[0] = 0x01;
+    snprintf(am.payload_variant.set_channel.settings.name,
+             sizeof(am.payload_variant.set_channel.settings.name), "Gold");
+    am.session_passkey.size = 8;
+    for (int i = 0; i < 8; i++) am.session_passkey.bytes[i] = (uint8_t)(i + 1);
+
+    uint8_t buf[meshtastic_AdminMessage_size];
+    pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+    TEST_ASSERT_TRUE(pb_encode(&os, meshtastic_AdminMessage_fields, &am));
+
+    meshtastic_AdminMessage got = meshtastic_AdminMessage_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(buf, os.bytes_written);
+    TEST_ASSERT_TRUE(pb_decode(&is, meshtastic_AdminMessage_fields, &got));
+    TEST_ASSERT_EQUAL_UINT(meshtastic_AdminMessage_set_channel_tag,
+                           got.which_payload_variant);
+    TEST_ASSERT_EQUAL_UINT32(1, got.payload_variant.set_channel.index);
+    TEST_ASSERT_EQUAL_STRING("Gold",
+                             got.payload_variant.set_channel.settings.name);
+    TEST_ASSERT_EQUAL_UINT(8, got.session_passkey.size);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_decode_upstream_channel);
     RUN_TEST(test_encode_channel_field_numbers);
     RUN_TEST(test_channel_roundtrip);
+    RUN_TEST(test_decode_upstream_admin);
+    RUN_TEST(test_admin_roundtrip);
     return UNITY_END();
 }

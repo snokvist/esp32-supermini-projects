@@ -10,3 +10,4 @@ meshtastic.MeshPacket.encrypted             max_size:256
 meshtastic.DeviceMetadata.firmware_version  max_size:24
 meshtastic.ChannelSettings.psk              max_size:32
 meshtastic.ChannelSettings.name             max_size:16
+meshtastic.AdminMessage.session_passkey     max_size:8

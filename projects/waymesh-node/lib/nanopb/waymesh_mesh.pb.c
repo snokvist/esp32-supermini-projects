@@ -33,6 +33,9 @@ PB_BIND(meshtastic_ChannelSettings, meshtastic_ChannelSettings, AUTO)
 PB_BIND(meshtastic_Channel, meshtastic_Channel, AUTO)
 
 
+PB_BIND(meshtastic_AdminMessage, meshtastic_AdminMessage, 2)
+
+
 PB_BIND(meshtastic_ToRadio, meshtastic_ToRadio, 2)
 
 

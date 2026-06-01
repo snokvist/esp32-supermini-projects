@@ -79,3 +79,12 @@ void bleGattOnText(uint32_t src_id, uint8_t chan_hash, const uint8_t *text,
 // (>=0) or -1 if none pending. Called from the main loop, which then builds +
 // transmits a v2 TEXT beacon (it owns the radio + packetId/NVS). */
 int bleGattPopAppText(uint8_t *chan_hash, uint8_t *out, size_t cap);
+
+// Drain a passkey-validated AdminMessage{set_channel} the phone wrote (§8.1).
+// Returns true and fills index/role/psk/name if one is pending, else false.
+// The main loop applies it (wm_config_add_channel persists to NVS) and reboots
+// so the new channel set loads + re-advertises cleanly — keeping the config
+// mutation off the BLE task and out of a race with the live readers.
+bool bleGattPopSetChannel(uint8_t *index, uint8_t *role, uint8_t *psk,
+                          size_t psk_cap, size_t *psk_len, char *name,
+                          size_t name_cap);

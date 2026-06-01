@@ -96,6 +96,21 @@ typedef struct _meshtastic_Channel {
     uint32_t role; /* Channel.Role: DISABLED=0, PRIMARY=1, SECONDARY=2 */
 } meshtastic_Channel;
 
+typedef PB_BYTES_ARRAY_T(8) meshtastic_AdminMessage_session_passkey_t;
+/* Runtime channel update over the app (§8.1). Rides in Data.payload with
+ portnum = ADMIN_APP (6). Field numbers match upstream admin.proto @ f00e96f.
+ session_passkey is a top-level field (NOT in the oneof); the node issues it in
+ get_channel_response and the app echoes it in set_channel. */
+typedef struct _meshtastic_AdminMessage {
+    pb_size_t which_payload_variant;
+    union {
+        uint32_t get_channel_request; /* 1-based channel index to read */
+        meshtastic_Channel get_channel_response;
+        meshtastic_Channel set_channel;
+    } payload_variant;
+    meshtastic_AdminMessage_session_passkey_t session_passkey;
+} meshtastic_AdminMessage;
+
 typedef struct _meshtastic_ToRadio {
     pb_size_t which_payload_variant;
     union {
@@ -134,6 +149,7 @@ extern "C" {
 #define meshtastic_DeviceMetadata_init_default   {"", 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ChannelSettings_init_default  {{0, {0}}, "", 0}
 #define meshtastic_Channel_init_default          {0, false, meshtastic_ChannelSettings_init_default, 0}
+#define meshtastic_AdminMessage_init_default     {0, {0}, {0, {0}}}
 #define meshtastic_ToRadio_init_default          {0, {meshtastic_MeshPacket_init_default}}
 #define meshtastic_FromRadio_init_default        {0, 0, {meshtastic_MeshPacket_init_default}}
 #define meshtastic_Position_init_zero            {0, 0, 0, 0, 0, 0}
@@ -145,6 +161,7 @@ extern "C" {
 #define meshtastic_DeviceMetadata_init_zero      {"", 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define meshtastic_ChannelSettings_init_zero     {{0, {0}}, "", 0}
 #define meshtastic_Channel_init_zero             {0, false, meshtastic_ChannelSettings_init_zero, 0}
+#define meshtastic_AdminMessage_init_zero        {0, {0}, {0, {0}}}
 #define meshtastic_ToRadio_init_zero             {0, {meshtastic_MeshPacket_init_zero}}
 #define meshtastic_FromRadio_init_zero           {0, 0, {meshtastic_MeshPacket_init_zero}}
 
@@ -199,6 +216,10 @@ extern "C" {
 #define meshtastic_Channel_index_tag             1
 #define meshtastic_Channel_settings_tag          2
 #define meshtastic_Channel_role_tag              3
+#define meshtastic_AdminMessage_get_channel_request_tag 1
+#define meshtastic_AdminMessage_get_channel_response_tag 2
+#define meshtastic_AdminMessage_set_channel_tag  33
+#define meshtastic_AdminMessage_session_passkey_tag 101
 #define meshtastic_ToRadio_packet_tag            1
 #define meshtastic_ToRadio_want_config_id_tag    3
 #define meshtastic_ToRadio_disconnect_tag        4
@@ -302,6 +323,16 @@ X(a, STATIC,   SINGULAR, UINT32,   role,              3)
 #define meshtastic_Channel_DEFAULT NULL
 #define meshtastic_Channel_settings_MSGTYPE meshtastic_ChannelSettings
 
+#define meshtastic_AdminMessage_FIELDLIST(X, a) \
+X(a, STATIC,   ONEOF,    UINT32,   (payload_variant,get_channel_request,payload_variant.get_channel_request),   1) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,get_channel_response,payload_variant.get_channel_response),   2) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,set_channel,payload_variant.set_channel),  33) \
+X(a, STATIC,   SINGULAR, BYTES,    session_passkey, 101)
+#define meshtastic_AdminMessage_CALLBACK NULL
+#define meshtastic_AdminMessage_DEFAULT NULL
+#define meshtastic_AdminMessage_payload_variant_get_channel_response_MSGTYPE meshtastic_Channel
+#define meshtastic_AdminMessage_payload_variant_set_channel_MSGTYPE meshtastic_Channel
+
 #define meshtastic_ToRadio_FIELDLIST(X, a) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,packet,payload_variant.packet),   1) \
 X(a, STATIC,   ONEOF,    UINT32,   (payload_variant,want_config_id,payload_variant.want_config_id),   3) \
@@ -336,6 +367,7 @@ extern const pb_msgdesc_t meshtastic_NodeInfo_msg;
 extern const pb_msgdesc_t meshtastic_DeviceMetadata_msg;
 extern const pb_msgdesc_t meshtastic_ChannelSettings_msg;
 extern const pb_msgdesc_t meshtastic_Channel_msg;
+extern const pb_msgdesc_t meshtastic_AdminMessage_msg;
 extern const pb_msgdesc_t meshtastic_ToRadio_msg;
 extern const pb_msgdesc_t meshtastic_FromRadio_msg;
 
@@ -349,11 +381,13 @@ extern const pb_msgdesc_t meshtastic_FromRadio_msg;
 #define meshtastic_DeviceMetadata_fields &meshtastic_DeviceMetadata_msg
 #define meshtastic_ChannelSettings_fields &meshtastic_ChannelSettings_msg
 #define meshtastic_Channel_fields &meshtastic_Channel_msg
+#define meshtastic_AdminMessage_fields &meshtastic_AdminMessage_msg
 #define meshtastic_ToRadio_fields &meshtastic_ToRadio_msg
 #define meshtastic_FromRadio_fields &meshtastic_FromRadio_msg
 
 /* Maximum encoded size of messages (where known) */
 #define MESHTASTIC_WAYMESH_MESH_PB_H_MAX_SIZE    meshtastic_FromRadio_size
+#define meshtastic_AdminMessage_size             85
 #define meshtastic_ChannelSettings_size          57
 #define meshtastic_Channel_size                  71
 #define meshtastic_Data_size                     265
