@@ -366,13 +366,50 @@ None of this exists yet. Concretely, to ship 8.1:
 
 - **C3 / BLE-gateway nodes (XR2):** full 8.1 — set/update channels live from the app.
 - **ESP8285 tiers (Bayck / BetaFPV):** the ESP8285 is **WiFi-only, no BLE**, so they
-  **cannot** be configured from the Meshtastic app at all → **flash/NVS provisioned**,
-  full stop. A `relay-all` relay needs no channel/key anyway (it re-floods verbatim,
-  §6), so most dumb relays need zero channel config; a `relay-known` 8285 takes its
-  allow-list at flash/NVS time.
+  **cannot** be configured from the Meshtastic app — instead they are provisioned at
+  flash/NVS time **or live via an ELRS-style WiFi config portal (§8.4)**. A
+  `relay-all` relay needs no channel/key anyway (it re-floods verbatim, §6), so most
+  dumb relays need zero channel config; a `relay-known` 8285 takes its allow-list the
+  same way.
 - **OTA key distribution to headless nodes** (a signed "channel-announce" beacon) is
   a *possible later* convenience but carries a bootstrap-trust problem (securely
   shipping a new key needs an existing shared key) — out of scope here.
+
+### 8.4 — ESP8285 provisioning: ELRS-style WiFi config portal
+
+The 8285's WiFi (its only client-facing radio) is the lever: stand up a **SoftAP +
+captive web UI** — the same pattern ExpressLRS already ships on this exact hardware
+class — so we crib its proven flow instead of inventing one. This gives the 8285
+tier feature-parity with the C3's app-based channel-set (§8.1): **both end at the
+same NVS config store (§8.2)**, just reached over WiFi instead of BLE.
+
+- **Entry into config mode:**
+  - **Long-press** the board button ~5 s → AP mode (the proposed trigger; requires a
+    button — define its GPIO in `board_config.h`, which today defines none).
+  - **Button-less RX boards** (the Bayck/BetaFPV are bare — no button pin, GPIO0 is
+    the flash strap): use the ELRS fallback — **auto-AP on boot if no mesh peer is
+    heard within N s**, or ELRS's **power-cycle-N-times** trigger. Pick one per board.
+- **Portal (reuse ELRS's):** SoftAP SSID `Waymesh_XXXX` (matches the C3 BLE name),
+  optional WPA2 password, UI at **`http://10.0.0.1`**, `DNSServer` captive redirect,
+  `ESP8266WebServer`/`ESPAsyncWebServer` + a tiny static page (all bundled with the
+  `espressif8266` Arduino stack; LittleFS for assets). Verify the exact SSID/IP/auth
+  defaults against the ELRS rig you want to mirror.
+- **What it sets:** the home channel (name + PSK), the accepted-channel set + relay
+  policy (`relay-all` | `relay-known` allow-list), and node name. On save, recompute
+  `chanHash`/key (§4) and write the **same NVS/EEPROM store as §8.2** (ESP8266
+  `Preferences`/EEPROM).
+- **RF coexistence:** the ESP WiFi radio and the SX1280 are both 2.4 GHz, so
+  **suspend LoRa relay while the AP is up** (you're provisioning on the bench, not
+  relaying); drop the AP on save/timeout and resume. Same two-radio self-desense
+  caution as the C3's BLE↔LoRa slot ([09 P7](09-poc-roadmap.md)).
+- **Trust:** typing a PSK into the local AP is a physical-proximity step (same model
+  as ELRS WiFi config). Prefer a **WPA2-protected AP** so a passer-by can't join; the
+  captive portal is the only writer of the config store.
+
+This is the **one** place we add a *small* custom UI (a single config page),
+justified because the Meshtastic app cannot reach a BLE-less node — everything the
+app *can* reach still reuses it. Lands with the Tier-2/3 `relay-known` / 8285
+home-channel work (§9 / [09 Phase H](09-poc-roadmap.md)).
 
 ## 9 — Phasing (slots into [09](09-poc-roadmap.md))
 
