@@ -249,7 +249,7 @@ static void handleRx() {
   logEvent("rx", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
 
   // Feed the BLE gateway's peer node DB (Phase G 1b); position only when valid.
-  bleGattOnPeer(b.src_id, b.lat_i, b.lon_i, b.sats, b.has_pos, snr);
+  bleGattOnPeer(b.src_id, b.lat_i, b.lon_i, b.sats, b.has_pos, snr, b.chan_hash);
   startRx();
 }
 
@@ -305,7 +305,7 @@ static void injectTestPeer() {
   if (now - last < 2000) return;
   last = now;
   bleGattOnPeer(0xCAFE1234, 587530000 + step * 300L, 168600000 + step * 300L,
-                7, true, -8.5f);
+                7, true, -8.5f, WM_OPEN_GROUP_HASH);
   step = (step + 1) % 60;
 }
 #endif
@@ -367,6 +367,9 @@ void setup() {
 
   // Meshtastic BLE GATT transport (Phase G, increment 1 — stub). Comes up even if
   // the radio failed, so the BLE path can be brought up/tested independently.
+  // Register the provisioned channel set first so the connect handshake
+  // advertises our groups to the app (doc 13 §7).
+  bleGattSetChannels(&gCfg);
   bleGattBegin(gNodeId);
 }
 

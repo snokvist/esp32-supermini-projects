@@ -82,6 +82,20 @@ typedef struct _meshtastic_DeviceMetadata {
     bool hasRemoteHardware;
 } meshtastic_DeviceMetadata;
 
+typedef PB_BYTES_ARRAY_T(32) meshtastic_ChannelSettings_psk_t;
+typedef struct _meshtastic_ChannelSettings {
+    meshtastic_ChannelSettings_psk_t psk;
+    char name[16];
+    uint32_t id;
+} meshtastic_ChannelSettings;
+
+typedef struct _meshtastic_Channel {
+    uint32_t index;
+    bool has_settings;
+    meshtastic_ChannelSettings settings;
+    uint32_t role; /* Channel.Role: DISABLED=0, PRIMARY=1, SECONDARY=2 */
+} meshtastic_Channel;
+
 typedef struct _meshtastic_ToRadio {
     pb_size_t which_payload_variant;
     union {
@@ -100,6 +114,7 @@ typedef struct _meshtastic_FromRadio {
         meshtastic_NodeInfo node_info;
         uint32_t config_complete_id;
         bool rebooted;
+        meshtastic_Channel channel;
         meshtastic_DeviceMetadata metadata;
     } payload_variant;
 } meshtastic_FromRadio;
@@ -117,6 +132,8 @@ extern "C" {
 #define meshtastic_MyNodeInfo_init_default       {0, 0, 0}
 #define meshtastic_NodeInfo_init_default         {0, false, meshtastic_User_init_default, false, meshtastic_Position_init_default, 0, 0, 0}
 #define meshtastic_DeviceMetadata_init_default   {"", 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ChannelSettings_init_default  {{0, {0}}, "", 0}
+#define meshtastic_Channel_init_default          {0, false, meshtastic_ChannelSettings_init_default, 0}
 #define meshtastic_ToRadio_init_default          {0, {meshtastic_MeshPacket_init_default}}
 #define meshtastic_FromRadio_init_default        {0, 0, {meshtastic_MeshPacket_init_default}}
 #define meshtastic_Position_init_zero            {0, 0, 0, 0, 0, 0}
@@ -126,6 +143,8 @@ extern "C" {
 #define meshtastic_MyNodeInfo_init_zero          {0, 0, 0}
 #define meshtastic_NodeInfo_init_zero            {0, false, meshtastic_User_init_zero, false, meshtastic_Position_init_zero, 0, 0, 0}
 #define meshtastic_DeviceMetadata_init_zero      {"", 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define meshtastic_ChannelSettings_init_zero     {{0, {0}}, "", 0}
+#define meshtastic_Channel_init_zero             {0, false, meshtastic_ChannelSettings_init_zero, 0}
 #define meshtastic_ToRadio_init_zero             {0, {meshtastic_MeshPacket_init_zero}}
 #define meshtastic_FromRadio_init_zero           {0, 0, {meshtastic_MeshPacket_init_zero}}
 
@@ -174,6 +193,12 @@ extern "C" {
 #define meshtastic_DeviceMetadata_position_flags_tag 8
 #define meshtastic_DeviceMetadata_hw_model_tag   9
 #define meshtastic_DeviceMetadata_hasRemoteHardware_tag 10
+#define meshtastic_ChannelSettings_psk_tag       2
+#define meshtastic_ChannelSettings_name_tag      3
+#define meshtastic_ChannelSettings_id_tag        4
+#define meshtastic_Channel_index_tag             1
+#define meshtastic_Channel_settings_tag          2
+#define meshtastic_Channel_role_tag              3
 #define meshtastic_ToRadio_packet_tag            1
 #define meshtastic_ToRadio_want_config_id_tag    3
 #define meshtastic_ToRadio_disconnect_tag        4
@@ -183,6 +208,7 @@ extern "C" {
 #define meshtastic_FromRadio_node_info_tag       4
 #define meshtastic_FromRadio_config_complete_id_tag 7
 #define meshtastic_FromRadio_rebooted_tag        8
+#define meshtastic_FromRadio_channel_tag         10
 #define meshtastic_FromRadio_metadata_tag        13
 
 /* Struct field encoding specification for nanopb */
@@ -261,6 +287,21 @@ X(a, STATIC,   SINGULAR, BOOL,     hasRemoteHardware,  10)
 #define meshtastic_DeviceMetadata_CALLBACK NULL
 #define meshtastic_DeviceMetadata_DEFAULT NULL
 
+#define meshtastic_ChannelSettings_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, BYTES,    psk,               2) \
+X(a, STATIC,   SINGULAR, STRING,   name,              3) \
+X(a, STATIC,   SINGULAR, UINT32,   id,                4)
+#define meshtastic_ChannelSettings_CALLBACK NULL
+#define meshtastic_ChannelSettings_DEFAULT NULL
+
+#define meshtastic_Channel_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   index,             1) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  settings,          2) \
+X(a, STATIC,   SINGULAR, UINT32,   role,              3)
+#define meshtastic_Channel_CALLBACK NULL
+#define meshtastic_Channel_DEFAULT NULL
+#define meshtastic_Channel_settings_MSGTYPE meshtastic_ChannelSettings
+
 #define meshtastic_ToRadio_FIELDLIST(X, a) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,packet,payload_variant.packet),   1) \
 X(a, STATIC,   ONEOF,    UINT32,   (payload_variant,want_config_id,payload_variant.want_config_id),   3) \
@@ -276,12 +317,14 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,my_info,payload_variant.my_i
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,node_info,payload_variant.node_info),   4) \
 X(a, STATIC,   ONEOF,    UINT32,   (payload_variant,config_complete_id,payload_variant.config_complete_id),   7) \
 X(a, STATIC,   ONEOF,    BOOL,     (payload_variant,rebooted,payload_variant.rebooted),   8) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,channel,payload_variant.channel),  10) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload_variant,metadata,payload_variant.metadata),  13)
 #define meshtastic_FromRadio_CALLBACK NULL
 #define meshtastic_FromRadio_DEFAULT NULL
 #define meshtastic_FromRadio_payload_variant_packet_MSGTYPE meshtastic_MeshPacket
 #define meshtastic_FromRadio_payload_variant_my_info_MSGTYPE meshtastic_MyNodeInfo
 #define meshtastic_FromRadio_payload_variant_node_info_MSGTYPE meshtastic_NodeInfo
+#define meshtastic_FromRadio_payload_variant_channel_MSGTYPE meshtastic_Channel
 #define meshtastic_FromRadio_payload_variant_metadata_MSGTYPE meshtastic_DeviceMetadata
 
 extern const pb_msgdesc_t meshtastic_Position_msg;
@@ -291,6 +334,8 @@ extern const pb_msgdesc_t meshtastic_MeshPacket_msg;
 extern const pb_msgdesc_t meshtastic_MyNodeInfo_msg;
 extern const pb_msgdesc_t meshtastic_NodeInfo_msg;
 extern const pb_msgdesc_t meshtastic_DeviceMetadata_msg;
+extern const pb_msgdesc_t meshtastic_ChannelSettings_msg;
+extern const pb_msgdesc_t meshtastic_Channel_msg;
 extern const pb_msgdesc_t meshtastic_ToRadio_msg;
 extern const pb_msgdesc_t meshtastic_FromRadio_msg;
 
@@ -302,11 +347,15 @@ extern const pb_msgdesc_t meshtastic_FromRadio_msg;
 #define meshtastic_MyNodeInfo_fields &meshtastic_MyNodeInfo_msg
 #define meshtastic_NodeInfo_fields &meshtastic_NodeInfo_msg
 #define meshtastic_DeviceMetadata_fields &meshtastic_DeviceMetadata_msg
+#define meshtastic_ChannelSettings_fields &meshtastic_ChannelSettings_msg
+#define meshtastic_Channel_fields &meshtastic_Channel_msg
 #define meshtastic_ToRadio_fields &meshtastic_ToRadio_msg
 #define meshtastic_FromRadio_fields &meshtastic_FromRadio_msg
 
 /* Maximum encoded size of messages (where known) */
 #define MESHTASTIC_WAYMESH_MESH_PB_H_MAX_SIZE    meshtastic_FromRadio_size
+#define meshtastic_ChannelSettings_size          57
+#define meshtastic_Channel_size                  71
 #define meshtastic_Data_size                     265
 #define meshtastic_DeviceMetadata_size           59
 #define meshtastic_FromRadio_size                333

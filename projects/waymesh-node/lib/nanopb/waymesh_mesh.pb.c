@@ -27,6 +27,12 @@ PB_BIND(meshtastic_NodeInfo, meshtastic_NodeInfo, AUTO)
 PB_BIND(meshtastic_DeviceMetadata, meshtastic_DeviceMetadata, AUTO)
 
 
+PB_BIND(meshtastic_ChannelSettings, meshtastic_ChannelSettings, AUTO)
+
+
+PB_BIND(meshtastic_Channel, meshtastic_Channel, AUTO)
+
+
 PB_BIND(meshtastic_ToRadio, meshtastic_ToRadio, 2)
 
 

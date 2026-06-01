@@ -33,6 +33,9 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 #define MESH_LOC_INTERNAL  2u    // Position.LocSource.LOC_INTERNAL
 #define MESH_PORTNUM_POSITION 3u // PortNum.POSITION_APP
 #define MESH_BROADCAST_ADDR 0xFFFFFFFFu
+#define MESH_CHANNEL_ROLE_DISABLED  0u
+#define MESH_CHANNEL_ROLE_PRIMARY   1u
+#define MESH_CHANNEL_ROLE_SECONDARY 2u
 
 static_assert(sizeof(WAYMESH_FW_VERSION) <= 24,
               "WAYMESH_FW_VERSION must fit DeviceMetadata.firmware_version[24]");
@@ -48,6 +51,31 @@ static volatile bool gBleConnected = false;
 // main loop task (bleGattSetPosition).
 static volatile bool gConfigDone = false;
 static uint32_t gFromNumVal = 0;
+
+// --- provisioned channel set (advertised to the app; read-only this phase) ---
+// Set once from main after wm_config_init; process-lifetime pointer. Read on the
+// BLE host task (handshake) and the main loop task (peer hash->index); both are
+// reads with no concurrent writer in this phase, so no lock is needed.
+static const wm_config_t *gCfgRef = nullptr;
+
+// Meshtastic channel index for our home (TX) channel — the primary the app
+// shows our own node + same-group peers on. 0 (primary) before channels load.
+static uint8_t homeChannelIndex() {
+  if (gCfgRef && gCfgRef->channel_count)
+    return gCfgRef->channels[gCfgRef->home_slot].index;
+  return 0;
+}
+
+// Map a heard chanHash to its Meshtastic channel index (the table position the
+// app knows). Falls back to 0 (primary) if not a configured channel — accepted
+// frames always resolve, but a relayed/edge frame degrades gracefully.
+static uint8_t channelIndexForHash(uint8_t hash) {
+  if (gCfgRef) {
+    const wm_channel_t *c = wm_config_channel_by_hash(gCfgRef, hash);
+    if (c) return c->index;
+  }
+  return 0;
+}
 
 // --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
 static uint32_t gNodeId = 0;
@@ -72,6 +100,7 @@ struct Peer {
   bool posValid;
   float snr;
   uint32_t lastHeardEpoch;
+  uint8_t chanHash;          // group the peer was heard on -> NodeInfo.channel
   unsigned long lastEmitMs;  // 0 = not yet emitted this connection
   bool used;
 };
@@ -168,11 +197,13 @@ static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
 // Fill a FromRadio{node_info} for one node (self or peer). snr 0 for self.
 static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
                                bool posValid, int32_t latI, int32_t lonI,
-                               uint32_t sats, float snr, uint32_t lastHeard) {
+                               uint32_t sats, float snr, uint32_t lastHeard,
+                               uint8_t channelIdx) {
   *fr = meshtastic_FromRadio_init_zero;
   fr->which_payload_variant = meshtastic_FromRadio_node_info_tag;
   meshtastic_NodeInfo &ni = fr->payload_variant.node_info;
   ni.num = nodeId;
+  ni.channel = channelIdx;  // the group the app shows this node on (§7)
   ni.has_user = true;
   snprintf(ni.user.id, sizeof(ni.user.id), "!%08x", (unsigned)nodeId);
   snprintf(ni.user.long_name, sizeof(ni.user.long_name), "Waymesh_%04X",
@@ -203,7 +234,8 @@ static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
 // dump stays bare NodeInfo, matching how real firmware downloads the node DB.
 static bool buildPositionPacketFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
                                      int32_t latI, int32_t lonI, uint32_t sats,
-                                     float snr, uint32_t epoch) {
+                                     float snr, uint32_t epoch,
+                                     uint8_t channelIdx) {
   meshtastic_Position pos = meshtastic_Position_init_zero;
   pos.latitude_i = latI;
   pos.longitude_i = lonI;
@@ -216,6 +248,7 @@ static bool buildPositionPacketFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
   meshtastic_MeshPacket &mp = fr->payload_variant.packet;
   mp.from = nodeId;
   mp.to = MESH_BROADCAST_ADDR;
+  mp.channel = channelIdx;  // the channel the app renders this position on (§7)
   mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
   meshtastic_Data &d = mp.payload_variant.decoded;
   d.portnum = MESH_PORTNUM_POSITION;
@@ -256,6 +289,32 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   md.hw_model = WAYMESH_HW_MODEL;
   enqueueFromRadio(&fr);
 
+  // 2b) Advertise the provisioned channel set (§7): one FromRadio{channel} per
+  // channel so the app adopts our groups. psk is the STORED Meshtastic PSK (not
+  // the expanded key) so the app derives the same hash + key we use (§4).
+  int chans = 0;
+  if (gCfgRef) {
+    for (uint8_t i = 0; i < gCfgRef->channel_count; i++) {
+      const wm_channel_t *c = &gCfgRef->channels[i];
+      fr = meshtastic_FromRadio_init_zero;
+      fr.which_payload_variant = meshtastic_FromRadio_channel_tag;
+      meshtastic_Channel &ch = fr.payload_variant.channel;
+      ch.index = c->index;
+      ch.role = (i == gCfgRef->home_slot) ? MESH_CHANNEL_ROLE_PRIMARY
+                                          : MESH_CHANNEL_ROLE_SECONDARY;
+      ch.has_settings = true;
+      size_t pk = c->psk_len <= sizeof(ch.settings.psk.bytes)
+                      ? c->psk_len
+                      : sizeof(ch.settings.psk.bytes);
+      memcpy(ch.settings.psk.bytes, c->psk, pk);
+      ch.settings.psk.size = (pb_size_t)pk;
+      snprintf(ch.settings.name, sizeof(ch.settings.name), "%s", c->name);
+      ch.settings.id = 0;  // app derives the channel from name+psk; id unused
+      enqueueFromRadio(&fr);
+      chans++;
+    }
+  }
+
   // 3) Self NodeInfo (with the live GPS position, if we have a fix).
   int32_t latI, lonI;
   uint32_t sats, epoch;
@@ -263,7 +322,8 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   portENTER_CRITICAL(&gPosMux);
   latI = gLatI; lonI = gLonI; sats = gSats; posValid = gPosValid; epoch = gEpoch;
   portEXIT_CRITICAL(&gPosMux);
-  buildNodeInfoFrame(&fr, gNodeId, posValid, latI, lonI, sats, 0.0f, epoch);
+  buildNodeInfoFrame(&fr, gNodeId, posValid, latI, lonI, sats, 0.0f, epoch,
+                     homeChannelIndex());
   enqueueFromRadio(&fr);
 
   // 4) One NodeInfo per peer heard over LoRa (snapshot each under the DB lock,
@@ -278,7 +338,7 @@ static void queueConfigSequence(uint32_t wantConfigId) {
     portEXIT_CRITICAL(&gDbMux);
     if (!used) continue;
     buildNodeInfoFrame(&fr, p.nodeId, p.posValid, p.latI, p.lonI, p.sats, p.snr,
-                       p.lastHeardEpoch);
+                       p.lastHeardEpoch, channelIndexForHash(p.chanHash));
     enqueueFromRadio(&fr);
     peers++;
   }
@@ -289,9 +349,9 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   fr.payload_variant.config_complete_id = wantConfigId;
   enqueueFromRadio(&fr);
 
-  Serial.printf("# BLE handshake queued (self + %d peer(s)) for "
+  Serial.printf("# BLE handshake queued (%d chan(s) + self + %d peer(s)) for "
                 "want_config_id=%u\n",
-                peers, (unsigned)wantConfigId);
+                chans, peers, (unsigned)wantConfigId);
 
   // Open the live-emit gate now that the client has its config dump. Stamp the
   // self emit-gate so the first live self update waits a full interval after the
@@ -368,6 +428,8 @@ class FromRadioCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+void bleGattSetChannels(const wm_config_t *cfg) { gCfgRef = cfg; }
+
 void bleGattBegin(uint32_t nodeId) {
   gNodeId = nodeId;
   char name[20];
@@ -434,14 +496,15 @@ static void emitSelfNodeInfo(bool valid, int32_t latI, int32_t lonI,
   if (gSelfLastEmitMs != 0 && now - gSelfLastEmitMs < kPeerEmitMinMs) return;
   gSelfLastEmitMs = now;
   meshtastic_FromRadio fr;
-  buildNodeInfoFrame(&fr, gNodeId, valid, latI, lonI, sats, 0.0f, epoch);
+  uint8_t home = homeChannelIndex();
+  buildNodeInfoFrame(&fr, gNodeId, valid, latI, lonI, sats, 0.0f, epoch, home);
   enqueueFromRadio(&fr);
   // #2: the stock-style MeshPacket{POSITION} (supplementary; the NodeInfo above
   // is what the gateway app parses). ONLY with a real fix — a no-fix emit would
   // broadcast 0,0 and teleport the client to null island. Mirrors the per-peer
   // `if (snap.posValid && ...)` guard in bleGattOnPeer.
   if (valid && buildPositionPacketFrame(&fr, gNodeId, latI, lonI, sats, 0.0f,
-                                        epoch))
+                                        epoch, home))
     enqueueFromRadio(&fr);
   Serial.printf("# BLE self %08X -> NodeInfo%s (live)\n", (unsigned)gNodeId,
                 valid ? " + Position" : "");
@@ -491,7 +554,8 @@ void bleGattSetTime(uint32_t epoch) {
 }
 
 void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
-                   uint32_t sats_in_view, bool pos_valid, float snr) {
+                   uint32_t sats_in_view, bool pos_valid, float snr,
+                   uint8_t chan_hash) {
   uint32_t epoch;
   portENTER_CRITICAL(&gPosMux);
   epoch = gEpoch;
@@ -515,6 +579,7 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
   }
   p->snr = snr;
   p->lastHeardEpoch = epoch;
+  p->chanHash = chan_hash;
   unsigned long now = millis();
   // gConfigDone: like the self path, hold live peer emits until after this
   // connection's want_config handshake so we never queue a NodeInfo ahead of
@@ -529,14 +594,15 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
 
   if (emit) {
     meshtastic_FromRadio fr;
+    uint8_t chIdx = channelIndexForHash(snap.chanHash);
     buildNodeInfoFrame(&fr, snap.nodeId, snap.posValid, snap.latI, snap.lonI,
-                       snap.sats, snap.snr, snap.lastHeardEpoch);
+                       snap.sats, snap.snr, snap.lastHeardEpoch, chIdx);
     enqueueFromRadio(&fr);
     // #2: also the stock-style MeshPacket{POSITION} when we have a fix for this
     // peer (supplementary; the NodeInfo above is what the gateway app parses).
     if (snap.posValid &&
         buildPositionPacketFrame(&fr, snap.nodeId, snap.latI, snap.lonI,
-                                 snap.sats, snap.snr, snap.lastHeardEpoch))
+                                 snap.sats, snap.snr, snap.lastHeardEpoch, chIdx))
       enqueueFromRadio(&fr);
     Serial.printf("# BLE peer %08X -> NodeInfo%s (live)\n", (unsigned)node_id,
                   snap.posValid ? " + Position" : "");

@@ -85,6 +85,25 @@ message DeviceMetadata {
   bool   hasRemoteHardware    = 10;
 }
 
+// --- channels (group identity advertised to the app, docs/hybrid-mesh/13 §7) -
+// The gateway emits one Channel per provisioned group during the want_config
+// handshake so the stock app adopts our channels. psk is the STORED Meshtastic
+// PSK (1-byte index {0x00}=none/{0x01}=default/{0x01+N}=default+N, or 16/32 raw
+// bytes) — the app expands it the same way we do, so its channel hash + key
+// match ours byte-for-byte (§4). NOT the expanded key.
+
+message ChannelSettings {
+  bytes  psk  = 2;
+  string name = 3;
+  uint32 id   = 4;
+}
+
+message Channel {
+  uint32          index    = 1;
+  ChannelSettings settings = 2;
+  uint32          role     = 3;   // Channel.Role: DISABLED=0, PRIMARY=1, SECONDARY=2
+}
+
 // --- top-level transport messages -------------------------------------------
 
 message ToRadio {
@@ -103,6 +122,7 @@ message FromRadio {
     NodeInfo       node_info          = 4;
     uint32         config_complete_id = 7;
     bool           rebooted           = 8;
+    Channel        channel            = 10;
     DeviceMetadata metadata           = 13;
   }
 }
