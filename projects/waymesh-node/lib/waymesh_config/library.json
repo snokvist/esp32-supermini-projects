@@ -1,0 +1,15 @@
+{
+  "name": "waymesh_config",
+  "version": "0.1.0",
+  "description": "Portable Waymesh persistent config: channel list + relay policy + crash-safe packetId reserve-ahead, over a pluggable KV backend. Pure C99, host/C3/8285.",
+  "keywords": ["waymesh", "config", "nvs", "channels"],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": {
+    "waymesh_crypto": "*"
+  },
+  "build": {
+    "srcFilter": ["+<*.c>"]
+  }
+}
