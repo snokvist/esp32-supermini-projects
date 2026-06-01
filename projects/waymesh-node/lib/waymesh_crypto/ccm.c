@@ -19,13 +19,19 @@ static void be_store(uint8_t *out, size_t len, uint64_t v)
         out[len - 1 - i] = (uint8_t)(v >> (8 * i));
 }
 
-/* Validate params shared by seal/open. Returns L (15-nonce_len) or -1. */
+/* Validate params shared by seal/open. Returns L (15-nonce_len) or -1.
+ * Rejecting aad_len here (not just in a comment) keeps seal and open in lockstep
+ * so they can never disagree on what is encodable. */
 static int ccm_validate(size_t key_len, size_t nonce_len, size_t tag_len,
-                        size_t msg_len)
+                        size_t aad_len, size_t msg_len)
 {
     if (key_len != 16 && key_len != 32) return -1;
     if (nonce_len < 7 || nonce_len > 13) return -1;
     if (tag_len < 4 || tag_len > 16 || (tag_len & 1)) return -1;
+    /* We only emit the 2-byte AAD length prefix (RFC 3610 §2.2 / SP 800-38C):
+     * valid for 0 < l(a) < 2^16 - 2^8. Larger AAD would need the 0xFFFE/0xFFFF
+     * markers we don't implement, so reject it rather than mis-MAC silently. */
+    if (aad_len >= 0xFF00) return -1;
     int L = (int)(15 - nonce_len);
     /* message length must fit in L bytes */
     if (L < 8 && msg_len >= ((uint64_t)1 << (8 * L))) return -1;
@@ -128,7 +134,7 @@ int wm_ccm_seal(const uint8_t *key, size_t key_len,
                 const uint8_t *pt, size_t pt_len,
                 uint8_t *ct_out, uint8_t *tag_out, size_t tag_len)
 {
-    int L = ccm_validate(key_len, nonce_len, tag_len, pt_len);
+    int L = ccm_validate(key_len, nonce_len, tag_len, aad_len, pt_len);
     if (L < 0) return -1;
 
     wm_aes_ctx ctx;
@@ -150,7 +156,7 @@ int wm_ccm_open(const uint8_t *key, size_t key_len,
                 const uint8_t *tag, size_t tag_len,
                 uint8_t *pt_out)
 {
-    int L = ccm_validate(key_len, nonce_len, tag_len, ct_len);
+    int L = ccm_validate(key_len, nonce_len, tag_len, aad_len, ct_len);
     if (L < 0) return -1;
 
     wm_aes_ctx ctx;

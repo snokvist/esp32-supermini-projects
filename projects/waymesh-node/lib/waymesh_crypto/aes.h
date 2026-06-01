@@ -22,7 +22,7 @@ extern "C" {
 #define WM_AES_BLOCK 16
 #define WM_AES_MAX_ROUNDS 14
 /* round-key schedule: (Nr+1) * 16 bytes, max for AES-256 = 15*16 = 240 */
-#define WM_AES_MAX_RK (WM_AES_MAX_ROUNDS + 1) * WM_AES_BLOCK
+#define WM_AES_MAX_RK ((WM_AES_MAX_ROUNDS + 1) * WM_AES_BLOCK)
 
 typedef struct {
     uint8_t rk[WM_AES_MAX_RK];

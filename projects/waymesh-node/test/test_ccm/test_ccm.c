@@ -130,6 +130,13 @@ static void test_ccm_bad_params(void)
                                           ct, tag, 4));      /* nonce too short */
     TEST_ASSERT_EQUAL_INT(-1, wm_ccm_seal(key, 16, nonce, 13, NULL, 0, pt, 4,
                                           ct, tag, 5));      /* odd tag_len */
+    /* AAD beyond the 2-byte length prefix is rejected before any AAD read,
+     * so a tiny aad buffer is safe here. */
+    uint8_t aad1 = 0;
+    TEST_ASSERT_EQUAL_INT(-1, wm_ccm_seal(key, 16, nonce, 13, &aad1, 0xFF00,
+                                          pt, 4, ct, tag, 4));
+    TEST_ASSERT_EQUAL_INT(-1, wm_ccm_open(key, 16, nonce, 13, &aad1, 0xFF00,
+                                          ct, 4, tag, 4, pt));
 }
 
 int main(void)

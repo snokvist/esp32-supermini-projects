@@ -70,6 +70,13 @@ int wm_chan_hash(const char *name, const uint8_t *psk, size_t psk_len);
  *   key_len  : 16 (AES-128) or 32 (AES-256)
  *   nonce_len: 7..13   (Waymesh uses 13 -> L=2)
  *   tag_len  : 4,6,8,10,12,14,16 (Waymesh uses 4)
+ *   aad_len  : 0 .. 0xFEFF (the 2-byte AAD length prefix; larger is rejected)
+ *
+ * Output buffers are caller-allocated and unchecked — the caller MUST size:
+ *   wm_ccm_seal: ct_out >= pt_len, tag_out >= tag_len
+ *   wm_ccm_open: pt_out >= ct_len   (also zeroized to ct_len on auth failure)
+ * ct/ct_out and pt/pt_out may alias.
+ *
  * Returns 0 on success, -1 on invalid parameters, -2 (open only) on auth fail.
  */
 int wm_ccm_seal(const uint8_t *key, size_t key_len,
