@@ -163,7 +163,7 @@ crypto/channel handling: [11](11-mobile-gateway-meshtastic-compat.md).
 - TEXT reliability: selective ACK vs pure epidemic — what's the airtime cost?
 - Bloom-filter sizing for the seen-set under realistic message rates.
 - Auth/group filtering: **resolved in [13 — Auth & Groups](13-auth-and-groups.md)**
-  — reuse the Meshtastic channel hash (group identity/filter) + PSK/AES-CTR
+  — reuse the Meshtastic channel hash (group identity/filter) + PSK-based AEAD
   (membership + confidentiality) on the `v2` beacon. Stock Meshtastic channels
   carry no MIC (key-possession *is* the auth); a per-node integrity/signature track
   stays optional and additive there.
