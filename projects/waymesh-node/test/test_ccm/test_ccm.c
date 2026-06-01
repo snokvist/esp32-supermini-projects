@@ -139,6 +139,75 @@ static void test_ccm_bad_params(void)
                                           ct, 4, tag, 4, pt));
 }
 
+/* --- Meshtastic channel AES-CTR (byte-compat, doc 13 §7.3) ----------------- */
+/* Known-answer vectors at the exact Meshtastic nonce layout (packetId u64 LE |
+ * fromNode u32 LE | 4 zero counter bytes), computed with pyca AES-CTR. The
+ * AES-128 default-PSK anchor matches the value derived independently from the
+ * pinned upstream CryptoEngine (key d4f1bb..6901, from 0x12345678, id 0x9abcdef0,
+ * pt 01 02 03 -> 84 69 70). */
+static void test_meshtastic_ctr_kat(void)
+{
+    /* anchor: AES-128 default PSK, 3-byte payload */
+    {
+        uint8_t pt[3] = {0x01, 0x02, 0x03};
+        uint8_t exp[3] = {0x84, 0x69, 0x70};
+        uint8_t out[3];
+        TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(WM_DEFAULT_PSK, 16,
+                                                   0x12345678u, 0x9abcdef0ull,
+                                                   pt, sizeof(pt), out));
+        TEST_ASSERT_EQUAL_MEMORY(exp, out, sizeof(pt));
+    }
+    /* multi-block AES-128 (20 B spans 2 blocks -> exercises the counter bump) */
+    {
+        uint8_t pt[20]; for (int i = 0; i < 20; i++) pt[i] = (uint8_t)i;
+        uint8_t exp[20] = {0x7b,0xe3,0xfc,0xfc,0x8b,0x37,0x1a,0x23,0x08,0x71,
+                           0xc2,0xbf,0xbc,0xb6,0xd5,0x6f,0x7f,0x4f,0x66,0x94};
+        uint8_t out[20];
+        TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(WM_DEFAULT_PSK, 16,
+                                                   0xDEADBEEFu, 0x01020304ull,
+                                                   pt, sizeof(pt), out));
+        TEST_ASSERT_EQUAL_MEMORY(exp, out, sizeof(pt));
+    }
+    /* AES-256 (32-byte raw key), 33 B = 3 blocks with a partial last block */
+    {
+        uint8_t key[32]; for (int i = 0; i < 32; i++) key[i] = (uint8_t)i;
+        uint8_t pt[33]; memset(pt, 0xAA, sizeof(pt));
+        uint8_t exp[33] = {0xc2,0x6d,0x88,0xab,0xde,0xdd,0x1a,0x2e,0x9b,0xb2,
+                           0x5f,0xb0,0x99,0xb6,0xd1,0xe1,0x10,0xcc,0xf9,0x27,
+                           0x20,0xd5,0x0c,0xcc,0xb9,0x9e,0x95,0x09,0xd1,0x32,
+                           0x6b,0x18,0x56};
+        uint8_t out[33];
+        TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(key, 32, 0x00E0029Bu,
+                                                   0x0BADF00Dull, pt,
+                                                   sizeof(pt), out));
+        TEST_ASSERT_EQUAL_MEMORY(exp, out, sizeof(pt));
+    }
+}
+
+/* CTR is symmetric: a second pass with the same (key, from, id) recovers the
+ * plaintext — this is exactly how the gateway decrypts the phone's packet. */
+static void test_meshtastic_ctr_roundtrip(void)
+{
+    uint8_t pt[40]; for (int i = 0; i < 40; i++) pt[i] = (uint8_t)(i * 7 + 1);
+    uint8_t ct[40], back[40];
+    TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(WM_DEFAULT_PSK, 16, 0xCAFEBABEu,
+                                               0xFEEDFACEull, pt, sizeof(pt), ct));
+    TEST_ASSERT_NOT_EQUAL(0, memcmp(pt, ct, sizeof(pt))); /* actually encrypted */
+    TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(WM_DEFAULT_PSK, 16, 0xCAFEBABEu,
+                                               0xFEEDFACEull, ct, sizeof(ct),
+                                               back));
+    TEST_ASSERT_EQUAL_MEMORY(pt, back, sizeof(pt));
+}
+
+static void test_meshtastic_ctr_bad_params(void)
+{
+    uint8_t in = 0, out = 0;
+    TEST_ASSERT_EQUAL_INT(-1, wm_meshtastic_ctr(WM_DEFAULT_PSK, 24, 1, 2,
+                                                &in, 1, &out)); /* bad key_len */
+    TEST_ASSERT_EQUAL_INT(0, wm_meshtastic_ctr(WM_DEFAULT_PSK, 16, 1, 2,
+                                               &in, 0, &out));  /* empty ok */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -148,5 +217,8 @@ int main(void)
     RUN_TEST(test_ccm_tamper);
     RUN_TEST(test_ccm_roundtrip);
     RUN_TEST(test_ccm_bad_params);
+    RUN_TEST(test_meshtastic_ctr_kat);
+    RUN_TEST(test_meshtastic_ctr_roundtrip);
+    RUN_TEST(test_meshtastic_ctr_bad_params);
     return UNITY_END();
 }

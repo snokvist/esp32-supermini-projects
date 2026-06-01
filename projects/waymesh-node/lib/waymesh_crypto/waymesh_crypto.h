@@ -92,6 +92,31 @@ int wm_ccm_open(const uint8_t *key, size_t key_len,
                 const uint8_t *tag, size_t tag_len,
                 uint8_t *pt_out);
 
+/* --- Meshtastic channel AES-CTR (TX/RX byte-compat, §7.3 / constraint c) ---- */
+/*
+ * The stock Meshtastic app encrypts a channel MeshPacket's serialized `Data`
+ * payload with PLAIN AES-CTR (unauthenticated) under the channel's expanded PSK.
+ * This reproduces it byte-for-byte so the gateway can decrypt what the phone
+ * sends and encrypt what it shows. Verified against meshtastic/firmware
+ * v2.6.4.b89355f CryptoEngine::encryptAESCtr (rweather CTR, setCounterSize(4)).
+ *
+ * The 16-byte initial CTR counter block ("nonce") is:
+ *   bytes 0..7  : packet_id as uint64 LITTLE-ENDIAN (a 32-bit MeshPacket.id
+ *                 widens with zero high bytes)
+ *   bytes 8..11 : from_node as uint32 LITTLE-ENDIAN
+ *   bytes 12..15: zero (the big-endian block counter)
+ * The counter increments the last 4 bytes big-endian; for the <=256-byte
+ * Meshtastic payloads this is identical to textbook 128-bit CTR.
+ *
+ * CTR is symmetric, so this ONE call both encrypts and decrypts (in==out ok).
+ * out must hold len bytes. key_len: 16 (AES-128) or 32 (AES-256). The key is the
+ * channel's expanded PSK (wm_expand_psk) — the same key as the channel hash.
+ * Returns 0 on success, -1 on bad key_len.
+ */
+int wm_meshtastic_ctr(const uint8_t *key, size_t key_len,
+                      uint32_t from_node, uint64_t packet_id,
+                      const uint8_t *in, size_t len, uint8_t *out);
+
 #ifdef __cplusplus
 }
 #endif
