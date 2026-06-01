@@ -533,16 +533,20 @@ static void routeAdminMessage(const uint8_t *payload, size_t len) {
         break;
       }
       const meshtastic_Channel &ch = am.payload_variant.set_channel;
+      // Prepare everything OUTSIDE the critical section — snprintf can take
+      // newlib's reentrancy lock, which must never happen with a spinlock held
+      // (the same class of fault as the queue assert). Only plain stores inside.
+      char nm[WM_CHAN_NAME_MAX];
+      snprintf(nm, sizeof(nm), "%s", ch.settings.name);
+      size_t pk = ch.settings.psk.size <= WM_PSK_MAX ? ch.settings.psk.size
+                                                     : WM_PSK_MAX;
       portENTER_CRITICAL(&gAdminMux);
       gPendingChan.active = true;
       gPendingChan.index = (uint8_t)ch.index;
       gPendingChan.role = (uint8_t)ch.role;
-      size_t pk = ch.settings.psk.size <= WM_PSK_MAX ? ch.settings.psk.size
-                                                     : WM_PSK_MAX;
       memcpy(gPendingChan.psk, ch.settings.psk.bytes, pk);
       gPendingChan.psk_len = (uint8_t)pk;
-      snprintf(gPendingChan.name, sizeof(gPendingChan.name), "%s",
-               ch.settings.name);
+      memcpy(gPendingChan.name, nm, sizeof(nm));
       portEXIT_CRITICAL(&gAdminMux);
       Serial.printf("# BLE admin set_channel idx=%u name='%s' role=%u -> queued\n",
                     (unsigned)ch.index, ch.settings.name, (unsigned)ch.role);
@@ -633,7 +637,9 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
 
 class FromRadioCallbacks : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic *c) override {
-    uint8_t out[kFrameMax];
+    // static: onRead only ever runs on the single NimBLE host task, so this
+    // 384 B stays off that task's (limited) stack — it was a stack regression.
+    static uint8_t out[kFrameMax];
     int n = qPop(out, sizeof(out));
     if (n >= 0) {
       c->setValue(out, n);
