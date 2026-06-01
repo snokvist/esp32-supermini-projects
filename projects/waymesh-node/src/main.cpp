@@ -160,9 +160,44 @@ static void sendBeacon() {
   startRx();
 }
 
+// Flood any app->OTA text the BLE gateway queued (write path, §7.3) as a v2 TEXT
+// beacon on its channel. Main-loop only: it owns the radio + packetId/NVS, so it
+// allocates the reboot-safe packetId and transmits here rather than on the BLE
+// task. The keyless relay re-floods it verbatim like any v2 beacon.
+static void serviceAppText() {
+  uint8_t chanHash;
+  uint8_t text[WM_BEACON_TEXT_MAX];
+  int len = bleGattPopAppText(&chanHash, text, sizeof(text));
+  if (len <= 0) return;
+
+  const wm_channel_t *ch = wm_config_channel_by_hash(&gCfg, chanHash);
+  if (!ch || ch->key_len == 0) return;  // unknown / keyless channel -> drop
+
+  uint32_t pid = wm_config_next_packet_id(&gCfg);
+  uint8_t out[WM_BEACON_FRAME_MAX];
+  size_t n = wm_beacon_build_v2_text(out, chanHash, gNodeId, pid, text,
+                                     (size_t)len, ch->expanded_key, ch->key_len);
+  if (n == 0) return;
+
+  int16_t st = gRadio.transmit(out, n);
+  if (st == RADIOLIB_ERR_NONE) {
+    char ex[28];
+    snprintf(ex, sizeof(ex), "text ch=%u len=%d", (unsigned)chanHash, len);
+    logEvent("tx", "lrp", gNodeId, (long)(pid & 0xFFFF), NAN, NAN, ex);
+    gTxSeq++;
+  } else {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "tx_err=%d", st);
+    logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
+  }
+  gRxFlag = false;  // the TxDone DIO1 is ours; don't treat it as a phantom RX
+  startRx();
+}
+
 static void handleRx() {
   // Read exactly the received length; the codec parses v0/v1/v2 by version byte.
-  uint8_t raw[WM_BEACON_V2_MAX];
+  // Buffer fits the largest v2 frame (a TEXT beacon: header + text + MIC).
+  uint8_t raw[WM_BEACON_FRAME_MAX];
   memset(raw, 0, sizeof(raw));
   size_t plen = gRadio.getPacketLength();
   if (plen > sizeof(raw)) plen = sizeof(raw);
@@ -221,9 +256,12 @@ static void handleRx() {
   // plaintext exposed. The gateway thus only ever forwards verified plaintext
   // (the MIC is stripped — never reaches the app). The clear-header relay/dedup
   // path above is unaffected, so the keyless Tier-3 relay still re-floods this.
+  uint8_t ptext[WM_BEACON_TEXT_MAX];
+  size_t ptext_len = 0;
   if (b.flags & WM_BFLAG_ENCRYPTED) {
     const wm_channel_t *ch = wm_config_channel_by_hash(&gCfg, b.chan_hash);
-    if (!ch || wm_beacon_open(&b, ch->expanded_key, ch->key_len) != 0) {
+    if (!ch || wm_beacon_open(&b, ch->expanded_key, ch->key_len, ptext,
+                              sizeof(ptext), &ptext_len) != 0) {
       char ex[24];
       snprintf(ex, sizeof(ex), "bad_mic ch=%u", (unsigned)b.chan_hash);
       logEvent("drop", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
@@ -244,12 +282,19 @@ static void handleRx() {
   gLastRxId = b.packet_id;
   gHaveLastRxId = true;
 
-  char ex[20];
-  snprintf(ex, sizeof(ex), "beacon ch=%u", (unsigned)b.chan_hash);
+  bool isText = (b.flags & WM_BFLAG_TEXT) && ptext_len > 0;
+  char ex[24];
+  snprintf(ex, sizeof(ex), "beacon ch=%u%s", (unsigned)b.chan_hash,
+           isText ? " text" : "");
   logEvent("rx", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
 
-  // Feed the BLE gateway's peer node DB (Phase G 1b); position only when valid.
-  bleGattOnPeer(b.src_id, b.lat_i, b.lon_i, b.sats, b.has_pos, snr, b.chan_hash);
+  if (isText) {
+    // A decrypted channel text -> hand the gateway plaintext for the app (§7.3).
+    bleGattOnText(b.src_id, b.chan_hash, ptext, ptext_len, snr);
+  } else {
+    // Feed the peer node DB (Phase G 1b); position only when valid.
+    bleGattOnPeer(b.src_id, b.lat_i, b.lon_i, b.sats, b.has_pos, snr, b.chan_hash);
+  }
   startRx();
 }
 
@@ -411,6 +456,9 @@ void loop() {
       // it no-ops while a live fix is already streaming via bleGattSetPosition.
       bleGattHeartbeat();
     }
+
+    // Flood any text the phone wrote (app -> OTA, §7.3) outside the beacon slot.
+    serviceAppText();
   }
 
 #if WAYMESH_TEST_PEER

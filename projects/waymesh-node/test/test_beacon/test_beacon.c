@@ -197,12 +197,57 @@ static void test_v2_enc_roundtrip(void)
                                       0x00DECADE, -123456789, 987654321, 12,
                                       h->expanded_key, h->key_len);
     wm_beacon_t b;
+    uint8_t pt[WM_BEACON_TEXT_MAX]; size_t pl = 0;
     TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
-    TEST_ASSERT_EQUAL_INT(0, wm_beacon_open(&b, h->expanded_key, h->key_len));
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_open(&b, h->expanded_key, h->key_len,
+                                            pt, sizeof(pt), &pl));
     TEST_ASSERT_TRUE(b.has_pos);
+    TEST_ASSERT_EQUAL_size_t(WM_BEACON_POS_LEN, pl);
     TEST_ASSERT_EQUAL_INT32(-123456789, b.lat_i);
     TEST_ASSERT_EQUAL_INT32(987654321, b.lon_i);
     TEST_ASSERT_EQUAL_UINT8(12, b.sats);
+}
+
+/* TEXT beacon: build -> parse (has_pos stays false) -> open recovers the bytes. */
+static void test_v2_text_roundtrip(void)
+{
+    const wm_channel_t *h = home();
+    const char *msg = "hello waymesh \xf0\x9f\x93\xa1"; /* UTF-8 incl. a 4-byte glyph */
+    size_t mlen = strlen(msg);
+    uint8_t buf[WM_BEACON_FRAME_MAX];
+    size_t n = wm_beacon_build_v2_text(buf, (uint8_t)h->hash, 0x11223344,
+                                       0x55667788, (const uint8_t *)msg, mlen,
+                                       h->expanded_key, h->key_len);
+    TEST_ASSERT_EQUAL_UINT(WM_BEACON_V2_HDR + mlen + WM_BEACON_MIC_LEN, n);
+    TEST_ASSERT_EQUAL_HEX8(WM_BFLAG_TEXT | WM_BFLAG_ENCRYPTED | WM_BFLAG_HASMIC,
+                           buf[3]);
+
+    wm_beacon_t b;
+    uint8_t pt[WM_BEACON_TEXT_MAX]; size_t pl = 0;
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
+    TEST_ASSERT_FALSE(b.has_pos);             /* TEXT is never read as a position */
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_open(&b, h->expanded_key, h->key_len,
+                                            pt, sizeof(pt), &pl));
+    TEST_ASSERT_FALSE(b.has_pos);
+    TEST_ASSERT_EQUAL_size_t(mlen, pl);
+    TEST_ASSERT_EQUAL_MEMORY(msg, pt, mlen);
+
+    /* a flipped ciphertext byte fails the MIC -> DROP, no plaintext trusted */
+    buf[WM_BEACON_V2_HDR] ^= 0x01;
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
+    TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, h->expanded_key, h->key_len,
+                                             pt, sizeof(pt), &pl));
+
+    /* build rejects an over-long or empty text */
+    TEST_ASSERT_EQUAL_UINT(0, wm_beacon_build_v2_text(buf, 8, 1, 2,
+                                                      (const uint8_t *)msg, 0,
+                                                      h->expanded_key,
+                                                      h->key_len));
+    TEST_ASSERT_EQUAL_UINT(0, wm_beacon_build_v2_text(buf, 8, 1, 2,
+                                                      (const uint8_t *)msg,
+                                                      WM_BEACON_TEXT_MAX + 1,
+                                                      h->expanded_key,
+                                                      h->key_len));
 }
 
 /* §10 negative: a wrong key fails the MIC and leaks no plaintext. */
@@ -217,7 +262,9 @@ static void test_v2_enc_wrong_key(void)
     TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
 
     uint8_t wrong[16]; memset(wrong, 0xA5, sizeof(wrong));
-    TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, wrong, sizeof(wrong)));
+    uint8_t pt[WM_BEACON_TEXT_MAX]; size_t pl = 0;
+    TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, wrong, sizeof(wrong),
+                                             pt, sizeof(pt), &pl));
     TEST_ASSERT_FALSE(b.has_pos);   /* no position exposed on auth failure */
 }
 
@@ -245,7 +292,9 @@ static void test_v2_enc_tamper(void)
         /* a flipped header byte may change parsed fields but must still fail
          * open (AAD mismatch); a flipped ct/MIC byte fails the tag. */
         if (wm_beacon_parse(buf, n, &b) != 0) continue; /* unparseable = also rejected */
-        TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, h->expanded_key, h->key_len));
+        uint8_t pt[WM_BEACON_TEXT_MAX]; size_t pl = 0;
+        TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, h->expanded_key, h->key_len,
+                                                 pt, sizeof(pt), &pl));
         TEST_ASSERT_FALSE(b.has_pos);
     }
 }
@@ -271,6 +320,7 @@ int main(void)
     RUN_TEST(test_relay_policy);
     RUN_TEST(test_v2_enc_layout);
     RUN_TEST(test_v2_enc_roundtrip);
+    RUN_TEST(test_v2_text_roundtrip);
     RUN_TEST(test_v2_enc_wrong_key);
     RUN_TEST(test_v2_enc_tamper);
     RUN_TEST(test_v2_enc_no_key);

@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 #include "waymesh_config.h"  // wm_config_t — the advertised channel set
@@ -66,3 +67,15 @@ void bleGattHeartbeat();
 void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
                    uint32_t sats_in_view, bool pos_valid, float snr,
                    uint8_t chan_hash);
+
+// A decrypted channel TEXT message heard over LoRa (§7.3): projected to a
+// MeshPacket{TEXT_MESSAGE_APP} on the matching channel index so it shows in the
+// app's channel chat. Called from the main loop (handleRx) after wm_beacon_open.
+void bleGattOnText(uint32_t src_id, uint8_t chan_hash, const uint8_t *text,
+                   size_t len, float snr);
+
+// Drain one app->OTA text the phone wrote (write path, §7.3). Copies the text
+// into out (cap bytes) and its channel hash into *chan_hash; returns the length
+// (>=0) or -1 if none pending. Called from the main loop, which then builds +
+// transmits a v2 TEXT beacon (it owns the radio + packetId/NVS). */
+int bleGattPopAppText(uint8_t *chan_hash, uint8_t *out, size_t cap);

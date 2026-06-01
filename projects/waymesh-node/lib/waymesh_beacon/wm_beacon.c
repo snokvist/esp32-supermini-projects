@@ -167,29 +167,63 @@ size_t wm_beacon_build_v2_enc(uint8_t *buf, uint8_t chan_hash, uint32_t src_id,
     return WM_BEACON_V2_HDR + WM_BEACON_POS_LEN + WM_BEACON_MIC_LEN; /* 26 */
 }
 
-int wm_beacon_open(wm_beacon_t *b, const uint8_t *key, size_t key_len)
+size_t wm_beacon_build_v2_text(uint8_t *buf, uint8_t chan_hash, uint32_t src_id,
+                               uint32_t packet_id, const uint8_t *text,
+                               size_t text_len, const uint8_t *key,
+                               size_t key_len)
+{
+    if (key_len != 16 && key_len != 32) return 0;          /* no usable key */
+    if (text_len == 0 || text_len > WM_BEACON_TEXT_MAX) return 0;
+
+    buf[0] = WM_BEACON_MAGIC;
+    buf[1] = WM_BEACON_V2;
+    buf[2] = chan_hash;
+    buf[3] = WM_BFLAG_TEXT | WM_BFLAG_ENCRYPTED | WM_BFLAG_HASMIC;
+    wr_u32le(buf + 4, src_id);
+    wr_u32le(buf + 8, packet_id);
+
+    uint8_t aad[WM_V2_AAD_LEN], nonce[WM_V2_NONCE_LEN];
+    v2_aad(aad, chan_hash, buf[3], src_id, packet_id);
+    v2_nonce(nonce, chan_hash, src_id, packet_id);
+
+    uint8_t *ct = buf + WM_BEACON_V2_HDR;
+    uint8_t *tag = ct + text_len;
+    if (wm_ccm_seal(key, key_len, nonce, WM_V2_NONCE_LEN, aad, WM_V2_AAD_LEN,
+                    text, text_len, ct, tag, WM_BEACON_MIC_LEN) != 0)
+        return 0;
+    return WM_BEACON_V2_HDR + text_len + WM_BEACON_MIC_LEN;
+}
+
+int wm_beacon_open(wm_beacon_t *b, const uint8_t *key, size_t key_len,
+                   uint8_t *pt_out, size_t pt_cap, size_t *pt_len)
 {
     if (!(b->flags & WM_BFLAG_ENCRYPTED) || !(b->flags & WM_BFLAG_HASMIC))
         return -1;
     if (key_len != 16 && key_len != 32) return -1;
-    if (b->payload_len != WM_BEACON_POS_LEN || b->mic_len != WM_BEACON_MIC_LEN ||
-        !b->payload || !b->mic)
+    if (b->mic_len != WM_BEACON_MIC_LEN || !b->payload || !b->mic ||
+        b->payload_len == 0 || b->payload_len > pt_cap)
         return -1;
 
-    uint8_t aad[WM_V2_AAD_LEN], nonce[WM_V2_NONCE_LEN], pt[WM_BEACON_POS_LEN];
+    uint8_t aad[WM_V2_AAD_LEN], nonce[WM_V2_NONCE_LEN];
     v2_aad(aad, b->chan_hash, b->flags, b->src_id, b->packet_id);
     v2_nonce(nonce, b->chan_hash, b->src_id, b->packet_id);
 
-    /* verify-then-decrypt; on a bad tag wm_ccm_open zeroizes pt and returns <0,
-     * so a tampered/foreign frame exposes no plaintext (the caller DROPs). */
+    /* verify-then-decrypt; on a bad tag wm_ccm_open zeroizes pt_out and returns
+     * <0, so a tampered/foreign frame exposes no plaintext (the caller DROPs). */
     if (wm_ccm_open(key, key_len, nonce, WM_V2_NONCE_LEN, aad, WM_V2_AAD_LEN,
-                    b->payload, b->payload_len, b->mic, b->mic_len, pt) != 0)
+                    b->payload, b->payload_len, b->mic, b->mic_len, pt_out) != 0)
         return -1;
 
-    b->lat_i = (int32_t)rd_u32le(pt + 0);
-    b->lon_i = (int32_t)rd_u32le(pt + 4);
-    b->sats  = pt[8];
-    b->has_pos = true;
+    if (pt_len) *pt_len = b->payload_len;
+
+    /* A POS beacon (POS flag, not TEXT) also fills the parsed position. */
+    if ((b->flags & WM_BFLAG_POS) && !(b->flags & WM_BFLAG_TEXT)) {
+        if (b->payload_len < WM_BEACON_POS_LEN) return -1;
+        b->lat_i = (int32_t)rd_u32le(pt_out + 0);
+        b->lon_i = (int32_t)rd_u32le(pt_out + 4);
+        b->sats  = pt_out[8];
+        b->has_pos = true;
+    }
     return 0;
 }
 

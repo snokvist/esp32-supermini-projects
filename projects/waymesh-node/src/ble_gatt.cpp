@@ -31,8 +31,11 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 #define WAYMESH_HW_MODEL   255u  // HardwareModel.PRIVATE_HW — non-Meshtastic hardware
 #define WAYMESH_ROLE       0u    // Config.DeviceConfig.Role.CLIENT
 #define MESH_LOC_INTERNAL  2u    // Position.LocSource.LOC_INTERNAL
+#define MESH_PORTNUM_TEXT 1u     // PortNum.TEXT_MESSAGE_APP
 #define MESH_PORTNUM_POSITION 3u // PortNum.POSITION_APP
+#define MESH_PORTNUM_ADMIN 6u    // PortNum.ADMIN_APP
 #define MESH_BROADCAST_ADDR 0xFFFFFFFFu
+#define WM_TEXT_MAX 180          // mirrors WM_BEACON_TEXT_MAX (the OTA text cap)
 #define MESH_CHANNEL_ROLE_DISABLED  0u
 #define MESH_CHANNEL_ROLE_PRIMARY   1u
 #define MESH_CHANNEL_ROLE_SECONDARY 2u
@@ -75,6 +78,42 @@ static uint8_t channelIndexForHash(uint8_t hash) {
     if (c) return c->index;
   }
   return 0;
+}
+
+// The configured channel at a Meshtastic channel index (NULL if none).
+static const wm_channel_t *channelByIndex(uint8_t idx) {
+  if (!gCfgRef) return nullptr;
+  for (uint8_t i = 0; i < gCfgRef->channel_count; i++)
+    if (gCfgRef->channels[i].index == idx) return &gCfgRef->channels[i];
+  return nullptr;
+}
+
+// --- app -> OTA outbound text ring (write path, §7.3) ------------------------
+// onWrite() (BLE host task) decrypts the phone's channel text and pushes
+// {chanHash, text} here; the main loop drains it (bleGattPopAppText) and builds
+// + transmits a v2 TEXT beacon — keeping the radio + packetId/NVS on one task.
+struct AppText {
+  uint8_t chanHash;
+  uint16_t len;
+  uint8_t buf[WM_TEXT_MAX];
+};
+static const int kTxDepth = 4;
+static AppText gTx[kTxDepth];
+static int gTxHead = 0, gTxTail = 0, gTxCount = 0;
+static portMUX_TYPE gTxMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void appTextPush(uint8_t chanHash, const uint8_t *text, size_t len) {
+  if (len == 0 || len > WM_TEXT_MAX) return;
+  portENTER_CRITICAL(&gTxMux);
+  if (gTxCount < kTxDepth) {
+    AppText &t = gTx[gTxTail];
+    t.chanHash = chanHash;
+    t.len = (uint16_t)len;
+    memcpy(t.buf, text, len);
+    gTxTail = (gTxTail + 1) % kTxDepth;
+    gTxCount++;
+  }
+  portEXIT_CRITICAL(&gTxMux);
 }
 
 // --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
@@ -383,6 +422,48 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
+// Route an inbound app MeshPacket (write path, §7.3): recover the channel text
+// — used as-is if the app sent it decoded, else CTR-decrypted byte-compatibly
+// with the stock Meshtastic channel cipher (constraint c) — and queue it for the
+// main loop to flood as a v2 TEXT beacon. NVS/radio stay on the main task.
+static void routeAppPacket(const meshtastic_MeshPacket *mp) {
+  const wm_channel_t *ch = channelByIndex((uint8_t)mp->channel);
+  if (!ch || ch->hash < 0) {
+    Serial.printf("# BLE ToRadio packet: unknown channel %u\n",
+                  (unsigned)mp->channel);
+    return;
+  }
+  meshtastic_Data data = meshtastic_Data_init_zero;
+  bool have = false;
+  if (mp->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+    data = mp->payload_variant.decoded;          // app handed us plaintext
+    have = true;
+  } else if (mp->which_payload_variant == meshtastic_MeshPacket_encrypted_tag &&
+             ch->key_len > 0) {
+    // from==0 means "this node"; use our id for the nonce, matching the app.
+    uint8_t scratch[256];
+    size_t n = mp->payload_variant.encrypted.size;
+    if (n > sizeof(scratch)) n = sizeof(scratch);
+    uint32_t from = mp->from ? mp->from : gNodeId;
+    if (wm_meshtastic_ctr(ch->expanded_key, ch->key_len, from, mp->id,
+                          mp->payload_variant.encrypted.bytes, n, scratch) == 0) {
+      pb_istream_t is = pb_istream_from_buffer(scratch, n);
+      have = pb_decode(&is, meshtastic_Data_fields, &data);
+      if (!have)
+        Serial.println("# BLE ToRadio: encrypted Data decode failed (wrong key?)");
+    }
+  }
+  if (!have) return;
+  if (data.portnum == MESH_PORTNUM_TEXT && data.payload.size > 0) {
+    appTextPush((uint8_t)ch->hash, data.payload.bytes, data.payload.size);
+    Serial.printf("# BLE app text -> channel %u (%u B), queued for LoRa\n",
+                  (unsigned)mp->channel, (unsigned)data.payload.size);
+  } else {
+    Serial.printf("# BLE ToRadio packet portnum=%u ch=%u (not text, ignored)\n",
+                  (unsigned)data.portnum, (unsigned)mp->channel);
+  }
+}
+
 class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c) override {
     std::string v = c->getValue();
@@ -404,8 +485,7 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
         Serial.println("# BLE ToRadio disconnect");
         break;
       case meshtastic_ToRadio_packet_tag:
-        // Layer 2 increment 2: decrypt with advertised PSK + flood onto LoRa.
-        Serial.println("# BLE ToRadio packet (TX) — not yet routed to mesh");
+        routeAppPacket(&tr.payload_variant.packet);
         break;
       default:
         Serial.printf("# BLE ToRadio variant=%u (ignored)\n",
@@ -607,4 +687,45 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
     Serial.printf("# BLE peer %08X -> NodeInfo%s (live)\n", (unsigned)node_id,
                   snap.posValid ? " + Position" : "");
   }
+}
+
+void bleGattOnText(uint32_t src_id, uint8_t chan_hash, const uint8_t *text,
+                   size_t len, float snr) {
+  if (!gBleConnected || !gConfigDone) return;  // hold until handshake completes
+  if (len == 0 || len > WM_TEXT_MAX) return;
+
+  meshtastic_FromRadio fr = meshtastic_FromRadio_init_zero;
+  fr.which_payload_variant = meshtastic_FromRadio_packet_tag;
+  meshtastic_MeshPacket &mp = fr.payload_variant.packet;
+  mp.from = src_id;
+  mp.to = MESH_BROADCAST_ADDR;
+  mp.channel = channelIndexForHash(chan_hash);
+  mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+  meshtastic_Data &d = mp.payload_variant.decoded;
+  d.portnum = MESH_PORTNUM_TEXT;
+  size_t n = len <= sizeof(d.payload.bytes) ? len : sizeof(d.payload.bytes);
+  memcpy(d.payload.bytes, text, n);
+  d.payload.size = (pb_size_t)n;
+  static uint32_t txtId = 0x40000000u;  // distinct id space from position packets
+  mp.id = ++txtId;
+  mp.rx_snr = snr;
+  enqueueFromRadio(&fr);
+  Serial.printf("# BLE text from %08X ch=%u (%u B) -> app\n", (unsigned)src_id,
+                (unsigned)mp.channel, (unsigned)n);
+}
+
+int bleGattPopAppText(uint8_t *chan_hash, uint8_t *out, size_t cap) {
+  int n = -1;
+  portENTER_CRITICAL(&gTxMux);
+  if (gTxCount > 0) {
+    AppText &t = gTx[gTxHead];
+    size_t len = t.len <= cap ? t.len : cap;
+    memcpy(out, t.buf, len);
+    *chan_hash = t.chanHash;
+    n = (int)len;
+    gTxHead = (gTxHead + 1) % kTxDepth;
+    gTxCount--;
+  }
+  portEXIT_CRITICAL(&gTxMux);
+  return n;
 }

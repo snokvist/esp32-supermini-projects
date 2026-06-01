@@ -40,11 +40,18 @@ extern "C" {
 #define WM_BFLAG_POS       0x01
 #define WM_BFLAG_ENCRYPTED 0x02
 #define WM_BFLAG_HASMIC    0x04
+#define WM_BFLAG_TEXT      0x08  /* payload is UTF-8 text, not a POS struct (§7.3) */
 
 #define WM_BEACON_V2_HDR  12
 #define WM_BEACON_POS_LEN 10
 #define WM_BEACON_MIC_LEN 4
 #define WM_BEACON_V2_MAX  (WM_BEACON_V2_HDR + WM_BEACON_POS_LEN + WM_BEACON_MIC_LEN)
+
+/* Max TEXT payload (cleartext) and the largest v2 frame (header + text + MIC).
+ * 180 B keeps a SF9/BW812 frame well under the SX128x 255-byte cap while
+ * covering typical chat lines; tunable. RX/TX buffers size to WM_BEACON_FRAME_MAX. */
+#define WM_BEACON_TEXT_MAX 180
+#define WM_BEACON_FRAME_MAX (WM_BEACON_V2_HDR + WM_BEACON_TEXT_MAX + WM_BEACON_MIC_LEN)
 
 /* The Meshtastic default "open" channel hash (LongFast / psk={0x01}); see the
  * channel-hash vectors. v0/v1 beacons (no chanHash) are treated as this group. */
@@ -90,14 +97,27 @@ size_t wm_beacon_build_v2_enc(uint8_t *buf, uint8_t chan_hash, uint32_t src_id,
                               uint32_t packet_id, int32_t lat_i, int32_t lon_i,
                               uint8_t sats, const uint8_t *key, size_t key_len);
 
+/* Build an ENCRYPTED + MIC'd v2 TEXT beacon (flags = TEXT|ENCRYPTED|HASMIC,
+ * §7.3): clear 12-byte header + AES-CCM-sealed UTF-8 text payload + 4-byte tag.
+ * Same cipher path / nonce / AAD as the POS builder; only the payload semantics
+ * differ (variable-length text instead of the fixed POS struct). text_len must
+ * be 1..WM_BEACON_TEXT_MAX. Writes to buf (>= WM_BEACON_FRAME_MAX); returns bytes
+ * written (12 + text_len + 4), or 0 on a bad key_len / text_len. */
+size_t wm_beacon_build_v2_text(uint8_t *buf, uint8_t chan_hash, uint32_t src_id,
+                               uint32_t packet_id, const uint8_t *text,
+                               size_t text_len, const uint8_t *key,
+                               size_t key_len);
+
 /* AEAD-open a parsed ENCRYPTED beacon (§6 step 5): verify the MIC over the clear
- * header (AAD) and decrypt the POS payload under the channel key. On success
- * fills lat_i/lon_i/sats and sets has_pos. Returns 0 on success; -1 on a bad MIC
- * / wrong key / malformed shape (has_pos stays false and NO plaintext is exposed
- * -> the caller DROPs). Only meaningful when b->flags has ENCRYPTED set (parse
- * deliberately leaves has_pos=false for encrypted frames so a pre-open read
- * never trusts ciphertext as a position). */
-int wm_beacon_open(wm_beacon_t *b, const uint8_t *key, size_t key_len);
+ * header (AAD) and decrypt the payload under the channel key into pt_out
+ * (pt_cap must be >= b->payload_len). On success *pt_len = the decrypted length,
+ * and for a POS beacon (flags POS, !TEXT) lat_i/lon_i/sats + has_pos are also
+ * filled; for a TEXT beacon the caller reads pt_out[0..*pt_len) as UTF-8 text.
+ * Returns 0 on success; -1 on a bad MIC / wrong key / malformed shape / too-small
+ * buffer (has_pos stays false and NO plaintext is exposed -> the caller DROPs).
+ * Only meaningful when b->flags has ENCRYPTED set. */
+int wm_beacon_open(wm_beacon_t *b, const uint8_t *key, size_t key_len,
+                   uint8_t *pt_out, size_t pt_cap, size_t *pt_len);
 
 typedef enum {
     WM_RX_ACCEPT = 0,            /* passes steps 1-3 (phase 2 then AEAD-opens) */
