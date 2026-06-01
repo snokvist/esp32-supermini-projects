@@ -146,6 +146,120 @@ static void test_relay_policy(void)
     TEST_ASSERT_TRUE(wm_beacon_should_relay(&b, &g_cfg));   /* known kept */
 }
 
+/* --- phase 2: AES-CCM encryption + MIC (§5, §10 crypto round-trip/negative) - */
+
+/* The home channel's expanded key (default "LongFast" -> the famous default key,
+ * 16 B). Sealing/opening uses exactly the key the channel store derives. */
+static const wm_channel_t *home(void) { return wm_config_home(&g_cfg); }
+
+/* encrypted build is 26 B with a CLEAR header (relays/dedup read it keyless) and
+ * the POS bits hidden; parse exposes no position until opened. */
+static void test_v2_enc_layout(void)
+{
+    const wm_channel_t *h = home();
+    TEST_ASSERT_EQUAL_size_t(16, h->key_len);   /* default PSK -> AES-128 */
+
+    uint8_t buf[WM_BEACON_V2_MAX];
+    size_t n = wm_beacon_build_v2_enc(buf, (uint8_t)h->hash, 0x11223344,
+                                      0xAABBCCDD, 595000000, 168600000, 7,
+                                      h->expanded_key, h->key_len);
+    TEST_ASSERT_EQUAL_UINT(WM_BEACON_V2_MAX, n); /* 12 + 10 + 4 = 26 */
+
+    /* header is clear and exactly the relay/dedup fields */
+    TEST_ASSERT_EQUAL_HEX8(WM_BEACON_MAGIC, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(WM_BEACON_V2, buf[1]);
+    TEST_ASSERT_EQUAL_HEX8((uint8_t)h->hash, buf[2]);
+    TEST_ASSERT_EQUAL_HEX8(WM_BFLAG_POS | WM_BFLAG_ENCRYPTED | WM_BFLAG_HASMIC,
+                           buf[3]);
+    TEST_ASSERT_EQUAL_HEX8(0x44, buf[4]); TEST_ASSERT_EQUAL_HEX8(0xDD, buf[8]);
+
+    /* parse leaves has_pos false (ciphertext is never trusted as a position) */
+    wm_beacon_t b;
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
+    TEST_ASSERT_FALSE(b.has_pos);
+    TEST_ASSERT_EQUAL_size_t(WM_BEACON_POS_LEN, b.payload_len);
+    TEST_ASSERT_EQUAL_size_t(WM_BEACON_MIC_LEN, b.mic_len);
+
+    /* ciphertext must NOT equal the cleartext POS bytes (it is encrypted) */
+    uint8_t clear[WM_BEACON_V2_MAX];
+    wm_beacon_build_v2_clear(clear, (uint8_t)h->hash, 0x11223344, 0xAABBCCDD,
+                             true, 595000000, 168600000, 7);
+    TEST_ASSERT_NOT_EQUAL(0, memcmp(buf + WM_BEACON_V2_HDR,
+                                    clear + WM_BEACON_V2_HDR, WM_BEACON_POS_LEN));
+}
+
+/* seal -> parse -> open recovers the exact position. */
+static void test_v2_enc_roundtrip(void)
+{
+    const wm_channel_t *h = home();
+    uint8_t buf[WM_BEACON_V2_MAX];
+    size_t n = wm_beacon_build_v2_enc(buf, (uint8_t)h->hash, 0xCAFEBABE,
+                                      0x00DECADE, -123456789, 987654321, 12,
+                                      h->expanded_key, h->key_len);
+    wm_beacon_t b;
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_open(&b, h->expanded_key, h->key_len));
+    TEST_ASSERT_TRUE(b.has_pos);
+    TEST_ASSERT_EQUAL_INT32(-123456789, b.lat_i);
+    TEST_ASSERT_EQUAL_INT32(987654321, b.lon_i);
+    TEST_ASSERT_EQUAL_UINT8(12, b.sats);
+}
+
+/* §10 negative: a wrong key fails the MIC and leaks no plaintext. */
+static void test_v2_enc_wrong_key(void)
+{
+    const wm_channel_t *h = home();
+    uint8_t buf[WM_BEACON_V2_MAX];
+    size_t n = wm_beacon_build_v2_enc(buf, (uint8_t)h->hash, 1, 2,
+                                      595000000, 168600000, 7,
+                                      h->expanded_key, h->key_len);
+    wm_beacon_t b;
+    TEST_ASSERT_EQUAL_INT(0, wm_beacon_parse(buf, n, &b));
+
+    uint8_t wrong[16]; memset(wrong, 0xA5, sizeof(wrong));
+    TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, wrong, sizeof(wrong)));
+    TEST_ASSERT_FALSE(b.has_pos);   /* no position exposed on auth failure */
+}
+
+/* §10 negative: a bit-flip in the ciphertext, the MIC, or the CLEAR header
+ * (AAD) all fail MIC verification -> DROP, never silent acceptance. */
+static void test_v2_enc_tamper(void)
+{
+    const wm_channel_t *h = home();
+    uint8_t good[WM_BEACON_V2_MAX];
+    size_t n = wm_beacon_build_v2_enc(good, (uint8_t)h->hash, 0xABCD1234,
+                                      0x0BADF00D, 595000000, 168600000, 7,
+                                      h->expanded_key, h->key_len);
+
+    /* flip a ciphertext byte (payload) */
+    int idx[] = { WM_BEACON_V2_HDR,            /* ciphertext */
+                  WM_BEACON_V2_HDR + WM_BEACON_POS_LEN, /* MIC tail */
+                  2,                            /* chanHash (AAD) */
+                  3,                            /* flags (AAD) */
+                  8 };                          /* packetId LSB (AAD + nonce) */
+    for (size_t i = 0; i < sizeof(idx) / sizeof(idx[0]); i++) {
+        uint8_t buf[WM_BEACON_V2_MAX];
+        memcpy(buf, good, n);
+        buf[idx[i]] ^= 0x01;
+        wm_beacon_t b;
+        /* a flipped header byte may change parsed fields but must still fail
+         * open (AAD mismatch); a flipped ct/MIC byte fails the tag. */
+        if (wm_beacon_parse(buf, n, &b) != 0) continue; /* unparseable = also rejected */
+        TEST_ASSERT_EQUAL_INT(-1, wm_beacon_open(&b, h->expanded_key, h->key_len));
+        TEST_ASSERT_FALSE(b.has_pos);
+    }
+}
+
+/* a keyless channel (key_len 0) cannot encrypt: build returns 0 so the caller
+ * falls back to a clear beacon (header always clear, §5). */
+static void test_v2_enc_no_key(void)
+{
+    uint8_t buf[WM_BEACON_V2_MAX];
+    uint8_t key[16] = {0};
+    TEST_ASSERT_EQUAL_UINT(0, wm_beacon_build_v2_enc(buf, 8, 1, 2, 0, 0, 0,
+                                                     key, 0));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -155,5 +269,10 @@ int main(void)
     RUN_TEST(test_parse_rejects);
     RUN_TEST(test_accept_group_filter);
     RUN_TEST(test_relay_policy);
+    RUN_TEST(test_v2_enc_layout);
+    RUN_TEST(test_v2_enc_roundtrip);
+    RUN_TEST(test_v2_enc_wrong_key);
+    RUN_TEST(test_v2_enc_tamper);
+    RUN_TEST(test_v2_enc_no_key);
     return UNITY_END();
 }

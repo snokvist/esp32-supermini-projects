@@ -122,14 +122,26 @@ static void sendBeacon() {
     sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
   }
 
+  // §5: the header is always clear (relay/dedup read it keyless); a POS payload
+  // on a keyed channel is AES-CCM sealed with a 4-byte MIC. Presence-only, a
+  // keyless channel, or a seal failure -> clear beacon.
   uint8_t out[WM_BEACON_V2_MAX];
-  size_t n = wm_beacon_build_v2_clear(out, chanHash, gNodeId, pid, posValid,
-                                      lat, lon, sats);
+  size_t n = 0;
+  bool enc = false;
+  if (posValid && home && home->key_len > 0) {
+    n = wm_beacon_build_v2_enc(out, chanHash, gNodeId, pid, lat, lon, sats,
+                               home->expanded_key, home->key_len);
+    enc = (n > 0);
+  }
+  if (!enc)
+    n = wm_beacon_build_v2_clear(out, chanHash, gNodeId, pid, posValid,
+                                 lat, lon, sats);
 
   int16_t st = gRadio.transmit(out, n);
   if (st == RADIOLIB_ERR_NONE) {
-    char ex[20];
-    snprintf(ex, sizeof(ex), "beacon ch=%u", (unsigned)chanHash);
+    char ex[24];
+    snprintf(ex, sizeof(ex), "beacon ch=%u%s", (unsigned)chanHash,
+             enc ? " enc" : "");
     logEvent("tx", "lrp", gNodeId, (long)(pid & 0xFFFF), NAN, NAN, ex);
     gTxSeq++;
   } else {
@@ -202,6 +214,22 @@ static void handleRx() {
   if (d != WM_RX_ACCEPT) { // DROP_SELF
     startRx();
     return;
+  }
+
+  // Step 5 (§6): AEAD-open an encrypted beacon before trusting it. A bad MIC /
+  // wrong key (tamper, or a hash-collision foreign channel) -> DROP, with no
+  // plaintext exposed. The gateway thus only ever forwards verified plaintext
+  // (the MIC is stripped — never reaches the app). The clear-header relay/dedup
+  // path above is unaffected, so the keyless Tier-3 relay still re-floods this.
+  if (b.flags & WM_BFLAG_ENCRYPTED) {
+    const wm_channel_t *ch = wm_config_channel_by_hash(&gCfg, b.chan_hash);
+    if (!ch || wm_beacon_open(&b, ch->expanded_key, ch->key_len) != 0) {
+      char ex[24];
+      snprintf(ex, sizeof(ex), "bad_mic ch=%u", (unsigned)b.chan_hash);
+      logEvent("drop", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+      startRx();
+      return;
+    }
   }
 
   // Accepted: a beacon from a group we belong to.

@@ -78,6 +78,27 @@ size_t wm_beacon_build_v2_clear(uint8_t *buf, uint8_t chan_hash, uint32_t src_id
                                 uint32_t packet_id, bool pos_valid,
                                 int32_t lat_i, int32_t lon_i, uint8_t sats);
 
+/* Build an ENCRYPTED + MIC'd v2 POS beacon (flags = POS|ENCRYPTED|HASMIC, §5):
+ * the 12-byte header stays CLEAR (relays/dedup read it keyless); the 10-byte POS
+ * payload is AES-CCM sealed and a 4-byte AEAD tag (MIC) is appended -> 26 bytes.
+ * The tag authenticates the clear header (AAD) + payload, so an outsider cannot
+ * bit-flip a latitude undetected. key is the channel's expanded key (16 or 32 B,
+ * §4); the nonce is derived deterministically from the clear header so any
+ * key-holder reconstructs it. Writes to buf (>= WM_BEACON_V2_MAX); returns bytes
+ * written (26), or 0 if key_len is not 16/32 (caller falls back to clear). */
+size_t wm_beacon_build_v2_enc(uint8_t *buf, uint8_t chan_hash, uint32_t src_id,
+                              uint32_t packet_id, int32_t lat_i, int32_t lon_i,
+                              uint8_t sats, const uint8_t *key, size_t key_len);
+
+/* AEAD-open a parsed ENCRYPTED beacon (§6 step 5): verify the MIC over the clear
+ * header (AAD) and decrypt the POS payload under the channel key. On success
+ * fills lat_i/lon_i/sats and sets has_pos. Returns 0 on success; -1 on a bad MIC
+ * / wrong key / malformed shape (has_pos stays false and NO plaintext is exposed
+ * -> the caller DROPs). Only meaningful when b->flags has ENCRYPTED set (parse
+ * deliberately leaves has_pos=false for encrypted frames so a pre-open read
+ * never trusts ciphertext as a position). */
+int wm_beacon_open(wm_beacon_t *b, const uint8_t *key, size_t key_len);
+
 typedef enum {
     WM_RX_ACCEPT = 0,            /* passes steps 1-3 (phase 2 then AEAD-opens) */
     WM_RX_DROP_SELF,             /* srcNodeID == self */
