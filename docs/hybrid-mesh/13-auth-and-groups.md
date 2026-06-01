@@ -471,6 +471,41 @@ Build on top of Phase G / Phase 5, incrementally:
   leak; a bit-flipped ciphertext → **MIC verification fails → DROP** (the integrity
   guarantee from §5), not silent acceptance.
 
+### Status (as built — 2026-06-01, `waymesh-node` only)
+
+Steps §9.1–§9.3 are implemented in `waymesh-node` (the XR2 / ESP32-C3 Tier-1
+gateway). Verification so far:
+
+- **Host-verified (CI, `pio test -e native`):** channel hash + PSK/default-key
+  expansion vs upstream-generated vectors; AES-CCM AEAD (RFC 3610 / FIPS-197);
+  the Meshtastic AES-CTR byte-compat KAT (§7.3, vs the pinned `CryptoEngine`);
+  the reboot-safe `packetId` reserve-ahead soak (§8); the v2 beacon codec
+  (POS + TEXT, round-trip + tamper-detect); and the `Channel` / `AdminMessage`
+  proto wire layout (decoded from hand-built upstream-format buffers).
+- **Single-device on-air (XR2 + host BLE, `tools/ble_l2_test.py`):** the
+  `want_config` handshake + channel advertise decode cleanly in the **stock
+  Meshtastic protobuf stack** (`LongFast`/`psk=01` → upstream `Channel{PRIMARY}`);
+  v2 encrypted POS beacons + monotonic reboot-safe `packetId` on-air; and the
+  **app→OTA text write path end-to-end** — a CTR-encrypted channel text written
+  over BLE is decrypted byte-compatibly and re-flooded as a v2 TEXT beacon.
+
+- **Deferred — needs a 2-device bench (the v2/auth code must first be ported
+  from `waymesh-node` to the `waymesh-8285` Tier-2/3 relay/originator firmware):**
+  - **Group filter on-air (§9.1 gate):** two groups on one band ignore each
+    other; a `relay-all` relay carries both; a `relay-known` relay drops foreign.
+  - **Crypto round-trip (§9.2 gate):** originator encrypts → a **keyless** relay
+    re-floods verbatim → a *second* key-holder decrypts + renders; a wrong-key
+    node drops on the MIC.
+  - **Heard text in the app chat:** a TEXT beacon from another node surfaced as a
+    `MeshPacket{TEXT_MESSAGE_APP}` on the right channel (the read half of §7.3).
+  - **Live app admin flow (§8.1):** whether the stock app drives `set_channel`
+    via this `AdminMessage` path, the 1-based `get_channel_request` indexing, and
+    the `session_passkey` handshake — byte-compat is unverified without the phone
+    app driving an edit; the proto layout + apply logic are host-tested only.
+
+  Until the 8285 port lands these stay host-tested / single-device only; see
+  `roadmaps/esp32-supermini-projects.md` for the porting task.
+
 ## 11 — Resolved decisions
 
 The earlier open questions are now decided (rationale inline above):
