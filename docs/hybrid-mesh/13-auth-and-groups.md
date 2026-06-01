@@ -23,7 +23,7 @@ plus a bespoke MIC for auth.
 
 - ➖ The Meshtastic app **cannot see or manage** our groups or keys. Group
   identity is invisible to the very client we reuse — we'd have to build key/group
-  provisioning ourselves (QR/URL/UI), which is exactly the custom-UU we're
+  provisioning ourselves (QR/URL/UI), which is exactly the custom UI we're
   avoiding.
 - ➖ A custom MIC is a new crypto surface to design, test, and get right.
 - ➕ Smallest possible wire bytes; no dependency on Meshtastic's crypto details.
@@ -62,7 +62,8 @@ means inheriting exactly this security posture:
 | **Group identity / filtering** | ✅ yes | channel hash byte; foreign groups are dropped |
 | **Confidentiality** | ✅ yes | AES-CTR with the PSK; only members read positions/text |
 | **Group membership "auth"** | ✅ yes (implicit) | only a key-holder can produce a packet that decrypts sanely |
-| **Per-node authentication** | ❌ **no** | any group member can forge any other node's `srcNodeID` |
+| **Tamper / integrity (vs outsiders)** | ✅ yes | 4-byte MIC over header+payload (§5), default-on — detects bit-flips/forgery by non-members. (Beyond stock Meshtastic, which omits it.) |
+| **Per-node authentication** | ❌ **no** | any group *member* (key-holder) can still forge another node's `srcNodeID` — the MIC is a group key, not a per-node signature |
 | **Replay protection** | ⚠️ partial | the dedup seen-set drops exact replays within its window only |
 
 This is the same posture as stock Meshtastic channels: **possessing the key = being
@@ -84,7 +85,7 @@ v2 header (12 B):
  byte 0     : magic     = 0x57 ('W')        gates RX (unchanged)
  byte 1     : version   = 2
  byte 2     : chanHash  (u8)                 group identity / filter (Meshtastic channel hash)
- byte 3     : flags     (u8)                 bit0 POS valid, bit1 ENCRYPTED, bit2 has-MIC (rsvd), bits3-7 rsvd=0
+ byte 3     : flags     (u8)                 bit0 POS valid, bit1 ENCRYPTED, bit2 HAS-MIC, bits3-7 rsvd=0
  byte 4-7   : srcNodeID (u32, LE)            originator (relay identity + nonce material)
  byte 8-11  : packetId  (u32, LE)            dedup MessageID + AES-CTR nonce material
 
@@ -93,6 +94,9 @@ payload (POS, 10 B when present), AES-CTR-encrypted in place when flags.ENCRYPTE
  byte 4-7   : lon_i (i32, 1e-7 deg)
  byte 8     : sats (u8)
  byte 9     : payload-flags (u8, rsvd=0)
+
+MIC tail (4 B, present when flags.HAS-MIC):
+ byte 0-3   : AEAD tag (AES-CCM) over header[1..] as AAD + payload (§5)
 ```
 
 Key changes from `v1`:
@@ -104,14 +108,20 @@ Key changes from `v1`:
    `(srcNodeID:32, packetId:32)`. A 32-bit id is needed as a CTR nonce that won't
    wrap over a node's lifetime (a 16-bit `seq` wraps in ~minutes-to-hours at beacon
    cadence → nonce reuse → CTR keystream reuse, a real break). Generate `packetId`
-   as a per-node monotonic counter seeded from a random base at boot.
+   as a **reboot-safe** monotonic counter (NVS reserve-ahead, §8) so it never
+   repeats under one key, even across crashes.
 3. **`flags.ENCRYPTED`:** when set, the payload is AES-CTR ciphertext (§5). The
    header (magic..packetId) is **always plaintext** — relays and the dedup path
    read it without the key (§6).
+4. **`flags.HAS-MIC` + 4-byte MIC tail (default-on for encrypted beacons):** the
+   AEAD tag authenticating the header + payload (§5). Detects tampering/forgery by
+   non-members; **stripped at the gateway**, so it costs nothing on the
+   Meshtastic-app side (§7).
 
-**Byte budget:** v2 POS beacon = 12 (header) + 10 (payload) = **22 B** (vs v1's
-18 B). At SF9/BW812 that's still well under ~20 ms ToA
-([05 §airtime](05-protocol.md)) — the 4 extra bytes are negligible.
+**Byte budget:** v2 POS beacon = 12 (header) + 10 (payload) + 4 (MIC) = **26 B**
+(vs v1's 18 B). At SF9/BW812 that's still well under ~20 ms ToA
+([05 §airtime](05-protocol.md)) — the +8 B over v1 is negligible. (A clear,
+MIC-less presence beacon is just the 12-B header.)
 
 **Migration:** `version` gates parsing exactly as v1 did. A v2 receiver still
 parses v0/v1 (no `chanHash`, treat as the "open"/default group); a v1-only
@@ -137,6 +147,12 @@ where xorHash(buf) = buf[0] ^ buf[1] ^ ... ^ buf[n-1]   (single byte)
   cheap *filter*, exactly as in Meshtastic. Final authority is whether the payload
   **decrypts** under a configured channel's key (§5). Collisions just cost a failed
   decrypt attempt.
+- **Always provision explicit, non-empty channel names.** Meshtastic hashes the
+  primary channel's *effective* name, and an empty name is substituted with a
+  **preset-derived name** (`LongFast`, …), coupling `chanHash` to the LoRa preset we
+  advertise. A non-empty name makes `chanHash` depend only on the `(name, psk)`
+  bytes we control — removing that coupling and the main source of hash mismatches
+  with the app (Q1).
 
 A node is provisioned with **one or more channels** (name + PSK). Its set of
 accepted `chanHash`es is derived from those. The "open" default group is the
@@ -145,34 +161,57 @@ selectable mode, not the only mode.
 
 ## 5 — Encryption / MIC
 
-Reuse Meshtastic's payload crypto so the gateway↔app boundary is a straight
-passthrough of plaintext (read path needs no crypto on the app side — the gateway
-decrypts, just like a real radio,
-[11 §Channels & crypto](11-mobile-gateway-meshtastic-compat.md)).
+**What must match Meshtastic is narrow.** The app never sees our OTA ciphertext —
+the gateway always decrypts an inbound beacon and hands the app a *plaintext*
+`MeshPacket.decoded` (just like a real radio,
+[11 §Channels & crypto](11-mobile-gateway-meshtastic-compat.md)). So the only crypto
+that must be byte-compatible with Meshtastic is **(a)** the channel hash and
+**(b)** the PSK/default-key expansion (both app-facing, §4), plus **(c)** on the TX
+path only, decrypting the phone's Meshtastic-CTR-encrypted `MeshPacket` (§7.3). **The
+cipher protecting our own OTA payload is ours to choose** — it never reaches the app
+— so pick the simplest sound AEAD rather than re-deriving Meshtastic's
+*unauthenticated* CTR.
 
-- **Cipher:** AES-CTR, key = the channel's expanded PSK (AES-128 or -256 by key
-  length). Encrypt **only the payload**, in place; the header stays plaintext.
-- **Nonce (16 B CTR initial block)** — construct from header fields so it's unique
-  per (key, message) and reconstructable by any receiver (verify against
-  Meshtastic's `CryptoEngine::initNonce`):
-  ```
-  bytes 0-3  : packetId (u32 LE)
-  bytes 4-7  : 0
-  bytes 8-11 : srcNodeID (u32 LE)
-  bytes 12-15: 0
-  ```
-  This is why §3 widens to a 32-bit `packetId`: nonce uniqueness depends on it not
-  wrapping under a fixed key.
-- **MIC:** stock Meshtastic channel packets carry **no MIC** (CTR has no integrity
-  tag — group membership is the only "auth"). To match Meshtastic and the §2 model,
-  **ship v2 with no MIC** (`flags.has-MIC = 0`, reserved). The bit and a 4-byte
-  truncated-CMAC tail are reserved for the optional later "integrity track" so the
-  byte layout doesn't change when/if it lands.
+- **Cipher: AES-CCM (AEAD), key = the channel's expanded PSK** (AES-128/-256 by key
+  length). One primitive gives confidentiality **and** integrity: encrypt the
+  payload, authenticate `header[1..]` (version through `packetId`) as AAD, and emit a
+  **4-byte tag** = the MIC tail (§3), flagged by `flags.HAS-MIC`. The C3 has an AES
+  peripheral; software CCM on the 8285 originator is cheap at ~10 B / beacon cadence.
+  *(Acceptable alternative if a CCM impl is inconvenient: AES-CTR + encrypt-then-MAC
+  with a 4-byte truncated AES-CMAC under a separate PSK-derived subkey — same wire
+  layout, two passes instead of one.)*
+- **Nonce (Q4):** derive a unique-per-(key, message) nonce from `packetId` +
+  `srcNodeID`. Uniqueness rests on the **reboot-safe 32-bit `packetId`** (§3, §8)
+  never repeating under one key. This layout is **ours** (not Meshtastic's — this
+  payload never goes to the app); just keep it deterministic so any key-holder
+  reconstructs it from the clear header.
+- **MIC = the AEAD tag, default-on for encrypted beacons.** Stock Meshtastic channel
+  packets carry *no* integrity tag, leaving them malleable: an outsider with **no
+  key** can bit-flip ciphertext to tweak a known plaintext field (e.g. nudge a
+  latitude bit) undetected. Because this radio broadcasts physical **location**,
+  closing that is worth 4 bytes. The receiver/gateway verifies the tag *before*
+  trusting the plaintext; a bad tag → DROP.
+  - **No app-compat cost.** The tag lives only on our OTA frame; the gateway verifies
+    and **strips** it before mapping to the app (§7) — so adding the integrity
+    Meshtastic lacks costs nothing on the client side.
+  - **It is a *group* MAC, not a per-node signature** — it stops outsider
+    tampering/forgery, not a key-holding insider spoofing another `srcNodeID` (§2).
+    Per-node signatures stay deferred (§9).
 
-PRESENCE/no-position beacons (header only) are sent in clear (`flags.ENCRYPTED=0`):
-there's nothing secret in "node X is alive," and it keeps liveness cheap. Make this
-a per-channel policy knob (some deployments may want even presence hidden → then
-encrypt an empty/padded payload).
+**Presence vs position (Q3).** Default policy: the **header is always clear** (it
+must be — `chanHash`/`srcNodeID`/`packetId` drive keyless relay + dedup), and only
+the **position payload** is encrypted+MIC'd. The secret is *where you are*, not
+*that you exist* — and bare liveness already leaks via the clear header, so
+encrypting an empty presence payload buys almost nothing. A header-only presence
+beacon therefore ships clear and MIC-less (12 B).
+
+For deployments that need traffic-analysis resistance, offer a per-channel
+**stealth** policy: replace `chanHash`/`srcNodeID` with rotating pseudonyms (e.g.
+truncated `HMAC(psk, epoch)`) so outsiders can't track a node or confirm group
+membership over time. **State the trade plainly: stealth breaks keyless relay** —
+relays then need the key to dedup/filter, forcing `relay-known` only. You cannot
+have both cheap keyless relay *and* header privacy; it is a conscious per-channel
+choice, not the default.
 
 ## 6 — RX acceptance & relay (the algorithm changes)
 
@@ -188,14 +227,16 @@ Current guard is `CRC ok && len>=8 && magic==0x57 && srcId!=self`. Add, in order
 2. srcNodeID != self                                            (as today)
 3. chanHash ∈ myAcceptedHashes        --- ELSE DROP (foreign group)   <-- NEW
 4. dedup: (srcNodeID, packetId) not in seen-set                 (as today, wider key)
-5. if flags.ENCRYPTED: AES-CTR decrypt payload under the channel
-      whose hash matches; if no configured channel decrypts to a
-      sane payload -> DROP                                       <-- NEW
-6. accept: log, upsert peer, feed bleGattOnPeer(...)            (as today)
+5. if flags.HAS-MIC: verify the 4-byte AEAD tag under the matching
+      channel key; bad tag -> DROP (tamper / foreign)           <-- NEW
+6. if flags.ENCRYPTED: AEAD-decrypt the payload under that channel;
+      if no configured channel verifies/decrypts -> DROP        <-- NEW
+7. accept: log, upsert peer, feed bleGattOnPeer(...)            (as today)
 ```
 
 Step 3 is the **group filter** ("share spectrum without merging",
-[04 §GroupID](04-architecture.md)). Step 5 is the implicit membership check.
+[04 §GroupID](04-architecture.md)). Steps 5–6 are the integrity + implicit
+membership check.
 
 ### Managed-flood relay — Tier-3 dumb relay (`waymesh-8285` `main.cpp:265-310`, `-DWAYMESH_RELAY=1`)
 
@@ -210,9 +251,10 @@ The relay re-floods **verbatim** and must keep working **without the key**
     `chanHash` verbatim — it can't read payloads anyway, so it carries foreign
     groups blindly. This preserves today's behavior and is the right default for a
     "dumb relay."
-- **No decryption, no re-encryption** at the relay — `raw[]` is re-sent byte-for-byte
-  (`relaySchedule`/`relayService` unchanged), so `srcNodeID`/`packetId`/ciphertext
-  are preserved and the gateway still attributes presence to the originator.
+- **No decryption, re-encryption, or MIC check** at the relay — `raw[]` (header +
+  ciphertext + MIC tail) is re-sent byte-for-byte (`relaySchedule`/`relayService`
+  unchanged), so `srcNodeID`/`packetId`/ciphertext/MIC are preserved and the gateway
+  still attributes presence to the originator and verifies the MIC end-to-end.
 
 **ESP8285 crypto note:** only the **originator** (a Tier-2 8285 that beacons its own
 position) needs AES, and only on its own ~10-byte payload at beacon cadence —
@@ -236,9 +278,9 @@ The gateway is the crypto boundary. Changes layer onto the existing handshake
 3. **Write path (app → OTA):** the stubbed `ToRadio{packet}` TX path
    (`ble_gatt.cpp:336-338`) becomes: the phone sends `MeshPacket.encrypted` on a
    channel → gateway decrypts with that channel's PSK (it advertised it) → recovers
-   text → **re-encrypts into a v2 TEXT beacon** under the same channel's key+hash →
-   floods onto LoRa. (Implements [09 Phase G](09-poc-roadmap.md) increment 2 with
-   real channel crypto instead of "any PSK".)
+   text → **re-encrypts and MACs into a v2 TEXT beacon** under the same channel's
+   key+hash → floods onto LoRa. (Implements [09 Phase G](09-poc-roadmap.md)
+   increment 2 with real channel crypto instead of "any PSK".)
 4. **Bonding:** pair the OTA channel-PSK story with BLE bonding/PIN
    ([11 §BLE GATT](11-mobile-gateway-meshtastic-compat.md), currently open/no-bond,
    `ble_gatt.cpp:368`) so the *link* to the phone is also protected, not just the
@@ -246,9 +288,21 @@ The gateway is the crypto boundary. Changes layer onto the existing handshake
 
 ## 8 — Provisioning
 
-- **Per-node config:** a channel list `[(name, psk, index)]`, plus the relay policy
-  (`relay-known` | `relay-all`). Source it from a build-time config / NVS — no
-  cloud, no account ([01 non-goals](01-vision-and-requirements.md)).
+- **Per-node config:** a channel list `[(name, psk, index)]` (explicit non-empty
+  names, §4), plus the relay policy (`relay-known` | `relay-all`). Source it from a
+  build-time config / NVS — no cloud, no account
+  ([01 non-goals](01-vision-and-requirements.md)).
+- **Channels per node (Q2):** beacon presence/GPS on **one home channel** (a node
+  belongs to one group) — multi-TX-channel is N× airtime on a shared band.
+  *Accepting* and *relaying* multiple channels is cheap (header filter), and the
+  **gateway** may bridge up to Meshtastic's max (**8**) channels to the app. So
+  multi-channel lives on RX/gateway; the air stays single-home.
+- **`packetId` counter (Q4):** a reboot-safe monotonic counter — persist a
+  high-water *ceiling* to NVS **before** using a block of IDs (reserve ~1024 at a
+  time); resume at the ceiling on boot. A crash mid-block wastes ≤1 block but
+  **never reuses** a nonce. Wear ≈ one NVS write per 1024 beacons (~hours of
+  runtime). On fresh/corrupt NVS, seed the base from the hardware RNG (`esp_random`
+  on the C3; RNG register on the 8285), then reserve-ahead.
 - **Sharing:** since channels are Meshtastic channels, a group is shared with the
   **standard Meshtastic channel QR/URL** out of the app — zero custom tooling.
 - **Default:** ship the Meshtastic default channel (`psk={0x01}`) so an
@@ -263,44 +317,69 @@ Build on top of Phase G / Phase 5, incrementally:
    acceptance step 3 + relay policy. Positions still in clear. *Proves* spectrum
    sharing / group separation cheaply. **Gate:** two groups on one band ignore each
    other; a `relay-all` relay still carries both.
-2. **Channel encryption.** Add AES-CTR (§5) + the 32-bit `packetId` nonce; gateway
-   decrypts on read. **Gate:** only key-holders see positions/text; the app shows
-   them on the right channel; relay still works without the key.
+2. **Channel encryption + MIC.** Add AES-CTR + the default-on 4-byte MIC (§5) over
+   the reboot-safe `packetId` nonce (§8); gateway verifies/strips/decrypts on read.
+   **Gate:** only key-holders see positions/text; tampered/foreign frames are
+   dropped on the MIC; the app shows them on the right channel; relay still works
+   without the key.
 3. **TX with channel crypto.** Wire the gateway write path (§7.3). **Gate:** phone
    text round-trips on a chosen channel over multi-hop LoRa.
-4. **(Optional, later) per-node integrity track.** Only if the threat model demands
-   it — the reserved `has-MIC` bit + tag, or a per-node signature (§2).
+4. **(Deferred) per-node signatures.** *Only* if a real threat needs non-repudiation
+   between group members — an asymmetric per-node signature (§2). Expensive (a 64-B
+   Ed25519 sig triples beacon airtime) and needs a key-trust story we don't want, so
+   confine it to low-rate, high-value messages (a signed command / role-change),
+   never per-position beacons — mirroring how Meshtastic limits PKC to DMs/admin.
+   Not built until demanded.
 
 ## 10 — Test / verification plan
 
-- **Vectors:** unit-test `chanHash` and AES-CTR encrypt/decrypt against **known
-  Meshtastic test vectors** (default key + a named channel) so our bytes match the
-  app exactly. This is the single highest-value check — get it green before any RF.
+- **Vectors (Q1):** the app-facing bits — `chanHash` + PSK/default-key expansion —
+  must match **upstream**: assert them against vectors **generated from the
+  `meshtastic` CLI at the pinned version** (a channel URL → hash), checked into
+  `test/` and run in CI (generate-*with*, don't copy-*from* — upstream is GPL-3.0).
+  Our OTA **AEAD** is internal, so test it against our own known-answer vectors
+  (encrypt→decrypt round-trip + tamper-detect). This is the single highest-value
+  check — get it green before any RF.
 - **Group filter (bench):** two XR2s on channel A, one on channel B → A-nodes drop
   B's beacons (step 3); a `relay-all` 8285 still re-floods both (`relay==rx`);
   a `relay-known` 8285 on A drops B.
 - **Crypto round-trip:** XR2(A) encrypts → 8285 relay (no key) re-floods verbatim →
   XR2(B, has key) decrypts → renders in the stock Meshtastic app on channel A.
   Reuse the verified Tier-2→Tier-1→app chain ([09 Phase H](09-poc-roadmap.md)).
-- **Nonce-uniqueness soak:** run a node past where a 16-bit seq would have wrapped;
-  confirm `packetId` never repeats under one key (no CTR reuse).
-- **Negative:** wrong-key node fails to decrypt and drops (no plaintext leak);
-  bit-flipped ciphertext → garbage payload dropped by the sanity check (documents
-  the no-MIC limitation from §2).
+- **Nonce-uniqueness soak (Q4):** run a node past where a 16-bit seq would have
+  wrapped, **and across forced reboots/crashes**, confirming `packetId` never
+  repeats under one key (no CTR reuse) — exercises the NVS reserve-ahead (§8).
+- **Negative:** a wrong-key node fails the MIC/decrypt and drops with no plaintext
+  leak; a bit-flipped ciphertext → **MIC verification fails → DROP** (the integrity
+  guarantee from §5), not silent acceptance.
 
-## 11 — Open questions
+## 11 — Resolved decisions
 
-- Exact `chanHash` / nonce / default-key-expansion bytes vs the **current**
-  Meshtastic source (pin a commit alongside the pinned `firmware_version`,
-  [11](11-mobile-gateway-meshtastic-compat.md)).
-- Multi-channel on one node: how many channels to support OTA vs just at the
-  gateway; per-channel beacon cadence.
-- Whether presence (header-only) should ever be encrypted/padded for traffic
-  analysis resistance, or always clear (§5).
-- `packetId` persistence across reboot (NVS counter vs random reseed) to guarantee
-  no nonce reuse after a crash under the same key.
-- Whether the optional per-node integrity/signature track (§2, §9.4) is ever worth
-  the bytes/CPU for our threat model.
+The earlier open questions are now decided (rationale inline above):
+
+1. **Meshtastic byte-compat (Q1):** pin `protobufs` at the commit matching the
+   reported `firmware_version`; **generate** known-answer vectors from the upstream
+   `meshtastic` CLI at that version and assert them in CI (§10). Always use
+   **explicit, non-empty channel names** to avoid the preset-derived-name hash
+   coupling (§4).
+2. **Multi-channel (Q2):** one **home** TX channel per node; multi-channel on RX +
+   at the gateway (up to 8) — the air stays single-home (§8).
+3. **Presence privacy (Q3):** clear header + encrypted position by default; an
+   optional per-channel **stealth** mode (rotating pseudonyms) for traffic-analysis
+   resistance, at the documented cost of keyless relay (§5).
+4. **Nonce safety (Q4):** `packetId` = NVS **reserve-ahead** monotonic counter
+   (crash-safe, no extra wire bytes), HW-RNG seed only on corrupt NVS (§8).
+5. **Integrity vs signatures (Q5):** **default-on 4-byte MIC** (cheap, closes
+   outsider tampering, gateway-internal → no app-compat cost, §5); **per-node
+   signatures deferred** indefinitely as too expensive for broadcast beacons (§9.4).
+
+### Still open (narrow)
+
+- The exact pinned upstream commit hash (set it when implementation starts).
+- Per-channel beacon **cadence** values — an airtime-tuning question for P3/P9, not
+  a protocol one.
+- `packetId` reserve-ahead **block size** (1024 is a starting point; tune against
+  flash wear on the actual NVS partition).
 
 ## Sources
 
