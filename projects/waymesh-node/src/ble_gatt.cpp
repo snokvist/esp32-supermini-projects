@@ -17,6 +17,16 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 // Pinned firmware version reported in DeviceMetadata. This is the field the
 // Meshtastic app gates feature/protocol compatibility on, so it is a deliberate
 // knob — bump it (and re-test) when chasing app/protobuf changes.
+//
+// Pinned upstream for byte-compatibility (auth/group work, docs/hybrid-mesh/13):
+//   meshtastic/firmware  v2.6.4.b89355f  b89355ffa60b3893417004b07e7b96f04b17022c
+//   meshtastic/protobufs v2.6.4          f00e96f12da48abfa9a992f8b5546fd75a370250
+// Channel hash + PSK/default-key expansion validated against this ref in
+// lib/waymesh_crypto (test/test_channel_hash). AdminMessage field numbers
+// locked for the runtime channel-set path (§8.1, lands later): ADMIN_APP
+// portnum=6; AdminMessage.set_channel=33, get_channel_request=1,
+// get_channel_response=2, session_passkey=101 (bytes, top-level, 300 s expiry);
+// ChannelSettings{psk=2,name=3,id=4}; Channel{index=1,settings=2,role=3}.
 #define WAYMESH_FW_VERSION "2.6.4.waymesh"
 #define WAYMESH_HW_MODEL   255u  // HardwareModel.PRIVATE_HW — non-Meshtastic hardware
 #define WAYMESH_ROLE       0u    // Config.DeviceConfig.Role.CLIENT
