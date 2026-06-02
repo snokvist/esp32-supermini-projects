@@ -111,7 +111,14 @@ static void sendBeacon() {
   const wm_channel_t *home = wm_config_home(&gCfg);
   uint8_t chanHash = (home && home->hash >= 0) ? (uint8_t)home->hash
                                                : WM_OPEN_GROUP_HASH;
-  uint32_t pid = wm_config_next_packet_id(&gCfg);
+  uint32_t pid;
+  if (wm_config_next_packet_id(&gCfg, &pid) != 0) {
+    // Ceiling persist failed — can't guarantee a unique CCM nonce across a
+    // reboot (§8). Skip this beacon rather than risk reusing a packetId.
+    logEvent("error", "lrp", gNodeId, -1, NAN, NAN, "pktid_persist_fail");
+    startRx();
+    return;
+  }
 
   bool posValid = gGps.location.isValid();
   int32_t lat = 0, lon = 0;
@@ -173,7 +180,11 @@ static void serviceAppText() {
   const wm_channel_t *ch = wm_config_channel_by_hash(&gCfg, chanHash);
   if (!ch || ch->key_len == 0) return;  // unknown / keyless channel -> drop
 
-  uint32_t pid = wm_config_next_packet_id(&gCfg);
+  uint32_t pid;
+  if (wm_config_next_packet_id(&gCfg, &pid) != 0) {
+    logEvent("error", "lrp", gNodeId, -1, NAN, NAN, "pktid_persist_fail");
+    return;  // ceiling persist failed — drop rather than risk nonce reuse (§8)
+  }
   uint8_t out[WM_BEACON_FRAME_MAX];
   size_t n = wm_beacon_build_v2_text(out, chanHash, gNodeId, pid, text,
                                      (size_t)len, ch->expanded_key, ch->key_len);

@@ -1,8 +1,16 @@
 /* AES block cipher (FIPS-197), encrypt-only, runtime 128/256-bit key.
  * Own implementation from the spec; KAT-validated in test/test_ccm. */
 #include "aes.h"
+#include "waymesh_crypto.h"
 
 #include <string.h>
+
+/* Compiler-barrier secure wipe (volatile so the dead store can't be elided). */
+void wm_secure_zero(void *p, size_t n)
+{
+    volatile uint8_t *vp = (volatile uint8_t *)p;
+    while (n--) *vp++ = 0;
+}
 
 /* FIPS-197 §5.1.1 S-box */
 static const uint8_t SBOX[256] = {

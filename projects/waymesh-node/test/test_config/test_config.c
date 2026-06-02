@@ -15,6 +15,7 @@ typedef struct {
     uint32_t prev_pid; int prev_pid_set;
     uint8_t blob[1024]; size_t blob_len; int blob_set;
     uint32_t seed;
+    int fail_pid_put;   /* when set, put_u32(wm.pid) returns -1 (commit failure) */
 } mock_flash;
 
 static int mf_get_u32(void *ctx, const char *key, uint32_t *out) {
@@ -25,6 +26,7 @@ static int mf_get_u32(void *ctx, const char *key, uint32_t *out) {
 static int mf_put_u32(void *ctx, const char *key, uint32_t v) {
     mock_flash *m = ctx;
     if (strcmp(key, WM_KEY_PID) != 0) return -1;
+    if (m->fail_pid_put) return -1;   /* simulate a flash commit failure */
     m->prev_pid = m->pid; m->prev_pid_set = m->pid_set;
     m->pid = v; m->pid_set = 1; return 0;
 }
@@ -124,8 +126,9 @@ static void test_pktid_fresh_seed(void)
     wm_store_t s = mock_store(&m);
     wm_config_t cfg;
     wm_config_init(&cfg, &s);
-    uint32_t a = wm_config_next_packet_id(&cfg);
-    uint32_t b = wm_config_next_packet_id(&cfg);
+    uint32_t a, b;
+    TEST_ASSERT_EQUAL_INT(0, wm_config_next_packet_id(&cfg, &a));
+    TEST_ASSERT_EQUAL_INT(0, wm_config_next_packet_id(&cfg, &b));
     TEST_ASSERT_EQUAL_UINT32(0xABCD0000, a);
     TEST_ASSERT_EQUAL_UINT32(0xABCD0001, b);
     /* the ceiling was persisted ahead of use */
@@ -166,7 +169,8 @@ static void test_pktid_reboot_no_reuse_soak(void)
          * crossing block boundaries -> more reserve-ahead writes) */
         uint32_t n = 200 + (lcg(&rngst) % 2500);
         for (uint32_t i = 0; i < n; i++) {
-            uint32_t id = wm_config_next_packet_id(&cfg);
+            uint32_t id;
+            TEST_ASSERT_EQUAL_INT(0, wm_config_next_packet_id(&cfg, &id));
             if (!have_prev) { first = id; have_prev = 1; }
             else {
                 /* strictly increasing across the whole run == no reuse */
@@ -183,6 +187,40 @@ static void test_pktid_reboot_no_reuse_soak(void)
     TEST_ASSERT_TRUE(span < total + (uint64_t)reboots * 2 * WM_PKTID_BLOCK);
 }
 
+/* H1 regression: when the ceiling persist FAILS (flash commit error, distinct
+ * from a power-loss-after-success), next_packet_id must REFUSE to issue an id
+ * at/above the committed ceiling — otherwise a reboot re-issues it (nonce reuse,
+ * §8). It must recover cleanly once the persist works again. */
+static void test_pktid_persist_fail_refuses(void)
+{
+    mock_flash m = {0}; m.seed = 0x5000;
+    wm_store_t s = mock_store(&m);
+    wm_config_t cfg;
+    TEST_ASSERT_EQUAL_INT(0, wm_config_init(&cfg, &s)); /* ceiling=0x5000+BLOCK */
+
+    /* Drain the reserved block: every id stays strictly below the ceiling. */
+    uint32_t id = 0, last = 0;
+    for (uint32_t i = 0; i < WM_PKTID_BLOCK; i++) {
+        TEST_ASSERT_EQUAL_INT(0, wm_config_next_packet_id(&cfg, &id));
+        last = id;
+    }
+    TEST_ASSERT_EQUAL_UINT32(0x5000 + WM_PKTID_BLOCK - 1, last);
+
+    /* The next id needs a fresh reserve; make that commit fail. */
+    m.fail_pid_put = 1;
+    uint32_t sentinel = 0xDEADBEEF;
+    id = sentinel;
+    TEST_ASSERT_EQUAL_INT(-1, wm_config_next_packet_id(&cfg, &id)); /* refused */
+    TEST_ASSERT_EQUAL_UINT32(sentinel, id);  /* *out_id untouched on failure */
+    /* Refuses repeatedly while the flash stays broken — never hands one out. */
+    TEST_ASSERT_EQUAL_INT(-1, wm_config_next_packet_id(&cfg, &id));
+
+    /* Flash recovers: it issues again, strictly above the last good id. */
+    m.fail_pid_put = 0;
+    TEST_ASSERT_EQUAL_INT(0, wm_config_next_packet_id(&cfg, &id));
+    TEST_ASSERT_TRUE_MESSAGE(id > last, "reissued an id at/below old ceiling");
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -191,5 +229,6 @@ int main(void)
     RUN_TEST(test_persist_roundtrip);
     RUN_TEST(test_pktid_fresh_seed);
     RUN_TEST(test_pktid_reboot_no_reuse_soak);
+    RUN_TEST(test_pktid_persist_fail_refuses);
     return UNITY_END();
 }

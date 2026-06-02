@@ -71,10 +71,9 @@ Env matrix (all share the same SX1280 RF params + managed-flood relay):
 | `bayck_portal` | ✅ | ✅ | ❌ | bench: stable UART0 console + serial-`c` |
 | `*_gpstest` | ✅ | ✅ | ✅ | + 1 Hz GPS debug line |
 
-The production envs were cut over from the legacy v0/v1 PoC to **v2/auth** (group
-filter + AES-CCM + WiFi provisioning) — see [v2/auth on-air](#v2auth-on-air--dwaymesh_v21)
-below. The v0/v1 path is retained in `main.cpp` (`#if !WAYMESH_V2`); drop
-`-DWAYMESH_V2` to rebuild it (note: a v1 build no longer interops with the v2 XR2).
+The firmware is **v2/auth only** (group filter + AES-CCM + WiFi provisioning) —
+see [v2/auth on-air](#v2auth-on-air) below. The legacy v0/v1 packed-struct PoC
+path has been removed; v2 interoperates with the (v2) XR2.
 
 ESP8266 produces a single image. Flash over the UART pads (GPIO1 TX / GPIO3 RX,
 GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle). Both
@@ -92,6 +91,13 @@ flashing, do a clean power-cycle — not `--after soft_reset`:** a soft reset le
 the SX1280 latched and `begin()` returns **-2 (CHIP_NOT_FOUND)**. The radio comes
 up fine on a real power-on. (The bootloader probe is finicky; retry the connect a
 couple of times.)
+
+> **Flash mode (DOUT).** `[env:esp8285_sx1280]` pins `board_build.flash_mode = dout`
+> because the BetaFPV Nano gates its PA/LNA on **GPIO9/GPIO10**, which are the
+> flash SDIO pins (SD_DATA2/3) and are only free as GPIO in 2-bit (DIO/DOUT)
+> flash mode. The `firmware.bin` header carries this, so the `write_flash` above
+> inherits it — do **not** override with `--flash_mode qio`, or the PA control
+> lines will collide with the flash bus.
 
 Serial logs are CSV on UART0 @115200 (same schema as `waymesh-node`):
 `ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra` (role `poc0`).
@@ -220,16 +226,14 @@ pio run -e bayck_portal      # config-portal build (GPS off → stable UART0 con
   (radio sleep, beacon/relay stopped) while the AP is up; the node reboots on Save
   or after 3 min idle to resume relaying. The LED fast-blinks while the AP is up.
 
-The `bayck_portal` env now **also** enables the v2/auth on-air codec
-(`-DWAYMESH_V2=1`, below) — it both provisions *and* uses the store it fills, so it
-is the full Tier-2/3 relay + originator verification build.
+The `bayck_portal` env is the GPS-off bench twin — it both provisions *and* uses
+the store it fills, so it is the full Tier-2/3 relay + originator verification build.
 
-## v2/auth on-air (`-DWAYMESH_V2=1`)
+## v2/auth on-air
 
-The legacy `bayck_7pwm` / `betafpv_nano` builds emit the v0/v1 packed-struct beacon
-(`Beacon`). `-DWAYMESH_V2=1` switches the RF path to the **v2/auth wire codec** —
-the host-tested `waymesh-node/lib/waymesh_beacon` (doc 13 §3/§5/§6) — matching the
-XR2 (`waymesh-node`, already v2):
+All envs use the **v2/auth wire codec** — the host-tested
+`waymesh-node/lib/waymesh_beacon` (doc 13 §3/§5/§6) — matching the XR2
+(`waymesh-node`, also v2):
 
 - **Origination:** TX a v2 beacon on the home `chanHash` with a reboot-safe 32-bit
   `packetId`. A position on a **keyed** channel is **AES-CCM-sealed + 4-byte MIC**;
@@ -246,14 +250,12 @@ The on-air `tx`/`rx` CSV now carries the channel: `… beacon ch=<hash>` (`enc` 
 `text` suffixes when applicable), and group/MIC rejects log `drop foreign_group` /
 `drop bad_mic`.
 
-> **Non-backward-compatible cutover (done):** the production envs `bayck_7pwm` /
-> `betafpv_nano` now ship `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1` (+ GPS). v2 frames
-> do **not** interop with a v1 peer, but the XR2 is already v2, so this *restores*
-> 8285↔XR2 interop; only legacy v1-only firmware is dropped. The GPS↔portal UART0
-> share is resolved in `checkPortalTrigger`: the serial-`c` fallback only reads UART0
-> while the console owns it (GPS in `DEBUG`), so it never steals NMEA bytes — the
-> GPIO0 long-press is unaffected. The v0/v1 path is retained in `main.cpp`
-> (`#if !WAYMESH_V2`); drop `-DWAYMESH_V2` to rebuild it.
+> **v2-only (legacy removed):** the production envs `bayck_7pwm` / `betafpv_nano`
+> ship `-DWAYMESH_WIFI_CONFIG=1` (+ GPS) and the always-on v2/auth codec. v2 frames
+> do **not** interop with the old v1 PoC, but the XR2 is v2, so 8285↔XR2 interop
+> holds. The GPS↔portal UART0 share is resolved in `checkPortalTrigger`: the
+> serial-`c` fallback only reads UART0 while the console owns it (GPS in `DEBUG`),
+> so it never steals NMEA bytes — the GPIO0 long-press is unaffected.
 
 ## Pin map
 

@@ -184,10 +184,13 @@ static Peer *peerSlot(uint32_t nodeId) {
 // Each Meshtastic client read pops one serialized FromRadio frame; the client
 // reads until it gets an empty frame, then waits for the next FromNum notify.
 static const size_t kFrameMax = 384;  // > meshtastic_FromRadio_size (333)
-// The whole handshake (my_info + metadata + self + every peer + complete) is
-// enqueued atomically on the BLE task before the first read, so the ring must
-// hold kMaxPeers + ~4 overhead frames at once.
-static const int kQDepth = 24;
+// The whole handshake is enqueued atomically on the BLE task before the first
+// read, so the ring must hold the worst case at once:
+//   my_info(1) + metadata(1) + one FromRadio{channel} per channel (WM_MAX_CHANNELS)
+//   + self NodeInfo(1) + one NodeInfo per peer (kMaxPeers) + config_complete_id(1).
+// The earlier "kMaxPeers + ~4" forgot the per-channel frames (worst case 28),
+// so a multi-channel node could drop ConfigComplete and wedge the client.
+static const int kQDepth = 2 + WM_MAX_CHANNELS + 1 + kMaxPeers + 1 + 2;  // +2 margin
 struct FrameQ {
   uint8_t buf[kFrameMax];
   uint16_t len;
@@ -404,10 +407,15 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   }
 
   // 5) config_complete_id — echoes the nonce; the client treats this as "done".
+  // This terminal frame MUST land or the client never finishes its handshake, so
+  // check the enqueue (the queue is sized to fit the whole sequence; this guards
+  // against a sizing regression rather than expected overflow).
   fr = meshtastic_FromRadio_init_zero;
   fr.which_payload_variant = meshtastic_FromRadio_config_complete_id_tag;
   fr.payload_variant.config_complete_id = wantConfigId;
-  enqueueFromRadio(&fr);
+  if (!enqueueFromRadio(&fr))
+    Serial.println("# BLE handshake: ConfigComplete frame DROPPED — client will "
+                   "hang (kQDepth too small?)");
 
   Serial.printf("# BLE handshake queued (%d chan(s) + self + %d peer(s)) for "
                 "want_config_id=%u\n",
@@ -619,6 +627,14 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
       case meshtastic_ToRadio_want_config_id_tag:
         Serial.printf("# BLE ToRadio want_config_id=%u\n",
                       (unsigned)tr.payload_variant.want_config_id);
+        // The client retries want_config if it didn't see ConfigComplete. Flush
+        // any prior/partial handshake first so a retry starts a CLEAN dump rather
+        // than stacking another ~28 frames onto a still-draining queue (which
+        // would overflow it and drop the terminal frame → permanent wedge).
+        portENTER_CRITICAL(&gQMux);
+        gQHead = gQTail = gQCount = 0;
+        gFromNumDirty = false;
+        portEXIT_CRITICAL(&gQMux);
         queueConfigSequence(tr.payload_variant.want_config_id);
         break;
       case meshtastic_ToRadio_disconnect_tag:

@@ -46,5 +46,9 @@ int wm_meshtastic_ctr(const uint8_t *key, size_t key_len,
         for (int i = WM_AES_BLOCK - 1; i >= WM_AES_BLOCK - 4; i--)
             if (++ctr[i] != 0) break;
     }
+    /* Wipe the round-key schedule + keystream/counter scratch. */
+    wm_secure_zero(&ctx, sizeof ctx);
+    wm_secure_zero(ks, sizeof ks);
+    wm_secure_zero(ctr, sizeof ctr);
     return 0;
 }
