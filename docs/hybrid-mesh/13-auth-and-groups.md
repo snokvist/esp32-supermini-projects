@@ -587,6 +587,17 @@ All four §6 behaviors are now device-verified on-air. The wrong-key MIC drop is
 only item not exercised on the bench (not practically stageable without a hash
 collision) — host-tested in `test_beacon`/`test_ccm`.
 
+**Production cutover (done).** With the bench verification green, the production envs
+`bayck_7pwm` / `betafpv_nano` now ship `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1`
+alongside `-DWAYMESH_GPS=1` — the full v2/auth relay + GPS originator with the WiFi
+provisioning portal. The earlier **GPS↔portal UART0 share** concern is resolved in
+`checkPortalTrigger`: the serial-`c` fallback reads UART0 only while the console
+owns it (GPS in `DEBUG`, i.e. before NMEA lock or after a no-GPS revert), so it never
+steals the GPS's NMEA bytes; the GPIO0 long-press trigger is independent of UART0 and
+always works. `bayck_portal` is retained as the GPS-off bench twin (stable console).
+Builds: `bayck_7pwm` / `betafpv_nano` (+`*_gpstest`) Flash ~44.6%, RAM ~41%. The
+v0/v1 path stays in `main.cpp` (`#if !WAYMESH_V2`) as a flag-toggled legacy build.
+
 ## 11 — Resolved decisions
 
 The earlier open questions are now decided (rationale inline above):

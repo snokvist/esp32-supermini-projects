@@ -57,9 +57,24 @@ relay (below) is built on top.
 ## Build & flash
 
 ```bash
-pio run -e bayck_7pwm        # BayckRC 7PWM (plain SX1280)
-pio run -e betafpv_nano      # BetaFPV Nano RX (SX1280 + PA/LNA)
+pio run -e bayck_7pwm        # BayckRC 7PWM — PRODUCTION (v2/auth + relay + GPS + portal)
+pio run -e betafpv_nano      # BetaFPV Nano RX — PRODUCTION (same + external PA/LNA)
+pio run -e bayck_portal      # bench twin of bayck_7pwm with GPS OFF (stable console)
 ```
+
+Env matrix (all share the same SX1280 RF params + managed-flood relay):
+
+| Env | v2/auth | WiFi portal | GPS | Notes |
+|---|:--:|:--:|:--:|---|
+| `bayck_7pwm` | ✅ | ✅ | ✅ | BayckRC production |
+| `betafpv_nano` | ✅ | ✅ | ✅ | + external PA/LNA |
+| `bayck_portal` | ✅ | ✅ | ❌ | bench: stable UART0 console + serial-`c` |
+| `*_gpstest` | ✅ | ✅ | ✅ | + 1 Hz GPS debug line |
+
+The production envs were cut over from the legacy v0/v1 PoC to **v2/auth** (group
+filter + AES-CCM + WiFi provisioning) — see [v2/auth on-air](#v2auth-on-air--dwaymesh_v21)
+below. The v0/v1 path is retained in `main.cpp` (`#if !WAYMESH_V2`); drop
+`-DWAYMESH_V2` to rebuild it (note: a v1 build no longer interops with the v2 XR2).
 
 ESP8266 produces a single image. Flash over the UART pads (GPIO1 TX / GPIO3 RX,
 GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle). Both
@@ -185,9 +200,16 @@ shared `waymesh-node/lib/waymesh_config` (pulled in via `lib_extra_dirs`).
 pio run -e bayck_portal      # config-portal build (GPS off → stable UART0 console)
 ```
 
-- **Enter config mode:** long-press the **GPIO0** button ~5 s (GPIO0 is the boot
-  strap, free as an input after boot), **or** send **`c`** on the serial console
-  (bench fallback for a board with no tactile button).
+- **Enter config mode (primary):** long-press **GPIO0** for ~5 s **at runtime**.
+  GPIO0 is the boot strap (idle HIGH, pull → LOW); on these bare ELRS RX boards it's
+  the **PWM-ch1 header pin** (unused here), not a dedicated tactile button — so
+  "the button" = grounding that pin for 5 s while the firmware runs. ⚠️ Grounding
+  GPIO0 at **power-on/reset** enters the bootloader (download mode) instead; the
+  long-press only opens the portal once the firmware is already running.
+- **Enter config mode (fallback):** send **`c`** on the serial console (for a board
+  with no accessible pin). On a GPS build UART0 is time-shared with NMEA, so `c`
+  only fires while the console owns the line (before NMEA lock / after a no-GPS
+  revert); the **GPIO0 long-press always works** regardless.
 - **Connect:** join WiFi **`Waymesh_XXXX`** (XXXX = low chip-ID, matches the C3 BLE
   name), WPA2 password **`waymesh-setup`** (override with `-DWM_PORTAL_PASS=...`),
   browse to **`http://10.0.0.1/`**.
@@ -224,12 +246,14 @@ The on-air `tx`/`rx` CSV now carries the channel: `… beacon ch=<hash>` (`enc` 
 `text` suffixes when applicable), and group/MIC rejects log `drop foreign_group` /
 `drop bad_mic`.
 
-> **Non-backward-compatible cutover:** v2 frames do **not** interop with a v1 peer.
-> The XR2 is already v2, so this *restores* 8285↔XR2 interop; only legacy v1-only
-> 8285 firmware is dropped. `bayck_7pwm` / `betafpv_nano` stay v1 for now (no
-> `-DWAYMESH_V2`) — byte-for-byte the verified PoC. **Production cutover** = fold
-> `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1` into them, which must also resolve the
-> GPS↔portal UART0 share (the portal build keeps GPS off to dodge it).
+> **Non-backward-compatible cutover (done):** the production envs `bayck_7pwm` /
+> `betafpv_nano` now ship `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1` (+ GPS). v2 frames
+> do **not** interop with a v1 peer, but the XR2 is already v2, so this *restores*
+> 8285↔XR2 interop; only legacy v1-only firmware is dropped. The GPS↔portal UART0
+> share is resolved in `checkPortalTrigger`: the serial-`c` fallback only reads UART0
+> while the console owns it (GPS in `DEBUG`), so it never steals NMEA bytes — the
+> GPIO0 long-press is unaffected. The v0/v1 path is retained in `main.cpp`
+> (`#if !WAYMESH_V2`); drop `-DWAYMESH_V2` to rebuild it.
 
 ## Pin map
 

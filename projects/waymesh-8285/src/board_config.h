@@ -192,12 +192,18 @@
 // policy into wm_config over WiFi — the BLE-less twin of the C3's app channel-set
 // (doc 13 §8.4). The Phase-B v2/auth port lands on top of the store this fills.
 //
-// Entry: long-press the GPIO0 button (~5 s) — GPIO0 is the boot strap, free as a
-// normal INPUT_PULLUP after boot (idle HIGH; press -> LOW). It is PWM-ch1, unused
-// in this build. The portal build ALSO enters on a serial 'c' so a board without a
-// tactile button can be provisioned on the bench. WiFi and the SX1280 are both
-// 2.4 GHz, so LoRa is suspended (radio sleep) while the AP is up, then the node
-// reboots to reload config cleanly (§8.4 RF coexistence).
+// Entry (PRIMARY): long-press GPIO0 for ~5 s at RUNTIME — GPIO0 is the boot strap,
+// free as a normal INPUT_PULLUP after boot (idle HIGH; pull -> LOW). On these bare
+// ELRS RX boards GPIO0 is the PWM-ch1 header pin (unused in this build), not a
+// dedicated tactile button, so "the button" = grounding that pin for 5 s while the
+// firmware runs. CAVEAT: grounding GPIO0 at power-on/RESET enters the ESP8266
+// bootloader (download mode) instead — the long-press only triggers the portal once
+// the firmware is already running.
+// Entry (FALLBACK): a serial 'c' on the console, for a board with no accessible pin.
+// On a GPS build UART0 is time-shared with NMEA, so 'c' only fires while the console
+// owns the line (see checkPortalTrigger); the GPIO0 long-press always works.
+// WiFi and the SX1280 are both 2.4 GHz, so LoRa is suspended (radio sleep) while the
+// AP is up, then the node reboots to reload config cleanly (§8.4 RF coexistence).
 #if WAYMESH_WIFI_CONFIG
 #ifndef PIN_PORTAL_BTN
 #define PIN_PORTAL_BTN 0          // GPIO0 boot strap, read as button after boot

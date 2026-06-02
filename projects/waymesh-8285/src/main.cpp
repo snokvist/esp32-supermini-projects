@@ -589,7 +589,17 @@ static void enterConfigMode() {
 // Watch for the config-mode trigger: a serial 'c' (bench, button-less) or a
 // ~5 s GPIO0 long-press. Called from loop() only while NOT already in config mode.
 static void checkPortalTrigger() {
-  if (Serial.available()) {
+  // Serial 'c' is the button-less bench fallback. On a GPS build UART0 is
+  // TIME-SHARED with NMEA — gpsService() drains it in PROBE/GPS modes — so read it
+  // for the trigger ONLY while the console still owns the line (GPS in DEBUG: before
+  // NMEA lock, or after a no-GPS revert). Otherwise we would steal the GPS's bytes.
+  // The GPIO0 long-press always works regardless of who owns UART0.
+#if WAYMESH_GPS
+  const bool consoleOwnsUart = (gSerMode == GPS_SER_DEBUG);
+#else
+  const bool consoleOwnsUart = true;
+#endif
+  if (consoleOwnsUart && Serial.available()) {
     int c = Serial.read();
     if (c == 'c' || c == 'C') { enterConfigMode(); return; }
   }
