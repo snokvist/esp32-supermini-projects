@@ -198,10 +198,38 @@ pio run -e bayck_portal      # config-portal build (GPS off → stable UART0 con
   (radio sleep, beacon/relay stopped) while the AP is up; the node reboots on Save
   or after 3 min idle to resume relaying. The LED fast-blinks while the AP is up.
 
-The Phase-B v2/auth port (on-air `chanHash` group filter, `relay-known`, AES-CCM
-beacon origination) lands **on top of** the store this portal provisions; until
-then this build still relays the legacy v0/v1 beacon (the portal is additive). Fold
-`-DWAYMESH_WIFI_CONFIG` into `bayck_7pwm` once the portal is verified.
+The `bayck_portal` env now **also** enables the v2/auth on-air codec
+(`-DWAYMESH_V2=1`, below) — it both provisions *and* uses the store it fills, so it
+is the full Tier-2/3 relay + originator verification build.
+
+## v2/auth on-air (`-DWAYMESH_V2=1`)
+
+The legacy `bayck_7pwm` / `betafpv_nano` builds emit the v0/v1 packed-struct beacon
+(`Beacon`). `-DWAYMESH_V2=1` switches the RF path to the **v2/auth wire codec** —
+the host-tested `waymesh-node/lib/waymesh_beacon` (doc 13 §3/§5/§6) — matching the
+XR2 (`waymesh-node`, already v2):
+
+- **Origination:** TX a v2 beacon on the home `chanHash` with a reboot-safe 32-bit
+  `packetId`. A position on a **keyed** channel is **AES-CCM-sealed + 4-byte MIC**;
+  the 12-byte header stays **clear** so a keyless relay re-floods it verbatim.
+  (`bayck_portal` has GPS off → it sends the clear presence header.)
+- **RX (§6):** parse → drop self → dedup on `(srcId, packetId)` → **group filter**
+  (`chanHash` ∈ our accepted set, else `drop foreign_group`) → **AEAD-open** an
+  encrypted member-group frame (bad MIC / wrong key → `drop bad_mic`, no plaintext).
+- **Relay (keyless):** the managed flood re-floods **verbatim** governed by the relay
+  policy read off the **clear** `chanHash` — `relay-all` carries every group blindly,
+  `relay-known` only configured hashes. No key is ever needed to filter or forward.
+
+The on-air `tx`/`rx` CSV now carries the channel: `… beacon ch=<hash>` (`enc` /
+`text` suffixes when applicable), and group/MIC rejects log `drop foreign_group` /
+`drop bad_mic`.
+
+> **Non-backward-compatible cutover:** v2 frames do **not** interop with a v1 peer.
+> The XR2 is already v2, so this *restores* 8285↔XR2 interop; only legacy v1-only
+> 8285 firmware is dropped. `bayck_7pwm` / `betafpv_nano` stay v1 for now (no
+> `-DWAYMESH_V2`) — byte-for-byte the verified PoC. **Production cutover** = fold
+> `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1` into them, which must also resolve the
+> GPS↔portal UART0 share (the portal build keeps GPS off to dodge it).
 
 ## Pin map
 

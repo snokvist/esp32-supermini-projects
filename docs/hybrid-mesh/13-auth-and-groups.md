@@ -525,12 +525,40 @@ portal)** is implemented in `waymesh-8285` (`bayck_portal` env) and
   recomputed 8→31) **persisted across a power-cycle**; LoRa was suspended (radio
   asleep) while the AP was up and resumed on reboot.
 
-**Still pending — Phase B (the v2/auth on-air port):** the v2 beacon codec, the
-clear-header `chanHash` group filter + `relay-known` enforcement, and AES-CCM
-beacon origination must still be ported into the 8285 RX / relay / TX path. Until
-then `bayck_portal` provisions the store but still relays the legacy v0/v1 beacon
-(the portal is additive). Phase B unblocks the 2-device bench items above (the
-§9.1 / §9.2 gates).
+### Status (8285 port — 2026-06-02): v2/auth on-air landed (Phase B, §3/§5/§6)
+
+**Phase B is implemented** in `waymesh-8285` behind a new `-DWAYMESH_V2=1` flag and
+enabled on the `bayck_portal` env (relay + portal + v2 — the full Tier-2/3
+verification build). The XR2's v2/auth on-air stack (`waymesh-node/src/main.cpp`) is
+now mirrored on the 8285, driven by the store the step-6 portal provisions:
+
+- **v2 codec into the build** — `bayck_portal` pulls in `waymesh_beacon` (+ its
+  `waymesh_crypto` AES/CCM) via the same `lib_extra_dirs` + chain+ LDF; the config
+  store now compiles under a `WM_HAVE_CONFIG = (WAYMESH_WIFI_CONFIG || WAYMESH_V2)`
+  umbrella (both the portal and v2 need it).
+- **RX acceptance (§6)** — `wm_beacon_parse` → `wm_beacon_accept` (drop self /
+  foreign group on the clear `chanHash`) → `wm_beacon_open` (AEAD-verify+decrypt a
+  member-group frame; bad MIC / wrong key → `drop bad_mic`, no plaintext).
+- **Keyless managed-flood relay (§6)** — dedup widened to the 32-bit `(srcId,
+  packetId)` MessageID; `wm_beacon_should_relay` gates the verbatim re-flood on the
+  **clear** header (`relay-all` carries foreign groups blindly, `relay-known` only
+  configured hashes) — **no key at the relay**.
+- **AES-CCM origination** — `sendBeacon` TXes a clear-header v2 beacon on the home
+  `chanHash` with a reboot-safe `wm_config_next_packet_id`; a position on a keyed
+  channel is sealed (`wm_beacon_build_v2_enc`), else clear.
+- **v0/v1 → v2 cutover** — the non-backward-compatible step, gated behind the flag.
+  `bayck_7pwm` / `betafpv_nano` stay legacy v1 (Flash 38.1% — byte-for-byte the
+  verified PoC; the relay-infra MessageID widening is a compile-time no-op for v1),
+  so the flip isn't silent. Production cutover (folding `V2`+`WIFI_CONFIG` into them)
+  must also resolve the GPS↔portal UART0 share — deferred.
+
+**Build-verified:** `bayck_portal` (v2) builds clean (RAM 40.5% / Flash 44.1%),
+`bayck_7pwm` (v1) unchanged, `waymesh-node` host tests **36/36**.
+
+**Still pending — the 2-device bench (§9.1 / §9.2, task #11):** on-air group filter,
+the crypto round-trip through a keyless relay, the wrong-key MIC drop, and the bayck
+`begin()` retry log all need a live XR2 ↔ 8285 pair — single-device only proves v2
+origination (the `tx … beacon ch=<hash>` line). That is the remaining gate.
 
 ## 11 — Resolved decisions
 
