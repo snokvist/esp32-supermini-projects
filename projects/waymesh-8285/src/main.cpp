@@ -33,13 +33,31 @@
 
 #include "board_config.h"
 
+// ---- Build composition ------------------------------------------------------
+// The wm_config store (channels/relay/packetId + EEPROM backend) is needed by BOTH
+// the WiFi portal (provisioning, doc 13 §8.4) and the v2/auth on-air path
+// (chanHash/keys/packetId, §3/§5/§6) — hence the WM_HAVE_CONFIG umbrella. WAYMESH_V2
+// selects the v2/auth codec on-air (vs the legacy v0/v1 packed-struct PoC path).
+#if !defined(WAYMESH_V2)
+#define WAYMESH_V2 0
+#endif
+#if !defined(WAYMESH_WIFI_CONFIG)
+#define WAYMESH_WIFI_CONFIG 0
+#endif
+#define WM_HAVE_CONFIG (WAYMESH_WIFI_CONFIG || WAYMESH_V2)
+
 #if WAYMESH_GPS
 #include <TinyGPSPlus.h>  // vendor-neutral NMEA parser (fed from UART0)
 #endif
 
-#if WAYMESH_WIFI_CONFIG
+#if WM_HAVE_CONFIG
 #include "waymesh_config.h"     // portable channel/relay/packetId store (doc 13 §8)
 #include "wm_store_eeprom.h"    // ESP8266 EEPROM backend for wm_store_t
+#endif
+#if WAYMESH_V2
+#include "wm_beacon.h"          // v2/auth wire codec + RX/relay decisions (§3/§6)
+#endif
+#if WAYMESH_WIFI_CONFIG
 #include "wm_portal.h"          // SoftAP + captive web form (doc 13 §8.4)
 #endif
 
@@ -48,10 +66,12 @@
 // LR11x0 on the XR2, just a different RadioLib class.
 static SX1280 gRadio = new Module(PIN_LORA_NSS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LORA_BUSY);
 
-// ---- Loopback beacon packet -------------------------------------------------
-// BYTE-IDENTICAL to waymesh-node (XR2). v1 carries an optional GPS position; on
-// this PoC #0 build there is no GPS, so we send v1 with flags=0 (no position) —
-// still a valid beacon the XR2 maps to a peer NodeInfo (sans Position).
+// ---- Loopback beacon packet (v0/v1 legacy) ----------------------------------
+// BYTE-IDENTICAL to the as-built waymesh-node PoC. Compiled ONLY in legacy
+// (non-WAYMESH_V2) builds; the v2/auth path uses the host-tested wm_beacon codec.
+// v1 carries an optional GPS position; with no GPS we send v1 with flags=0 (no
+// position) — still a valid beacon the XR2 maps to a peer NodeInfo (sans Position).
+#if !WAYMESH_V2
 static const uint8_t WM_MAGIC = 0x57;  // 'W'
 static const uint8_t WM_VERSION = 1;
 static const uint8_t BEACON_FLAG_POS = 0x01;  // lat_i/lon_i valid
@@ -68,14 +88,34 @@ struct __attribute__((packed)) Beacon {
   uint8_t flags;   // BEACON_FLAG_*
 };
 static const size_t BEACON_V0_SIZE = 8;  // magic+version+srcId+seq
+#endif
+
+// ---- Relay MessageID width + verbatim-rebroadcast buffer --------------------
+// The managed-flood relay below is version-agnostic; only the MessageID width and
+// the raw[] frame size differ. v2 dedups on the 32-bit packetId and re-floods
+// frames up to a v2 TEXT beacon; v1 dedups on the 16-bit seq and re-floods the
+// packed Beacon. For v1 these are IDENTICAL to the as-built types, so the legacy
+// relay binary is unchanged.
+#if WAYMESH_V2
+typedef uint32_t wm_msgid_t;
+#define WM_RELAY_RAW_MAX WM_BEACON_FRAME_MAX
+#else
+typedef uint16_t wm_msgid_t;
+#define WM_RELAY_RAW_MAX sizeof(Beacon)
+#endif
 
 // ---- State ------------------------------------------------------------------
 static uint32_t gNodeId = 0;
 static uint16_t gTxSeq = 0;
 static uint32_t gRxCount = 0;
 static uint32_t gRxBadCount = 0;
+#if WAYMESH_V2
+static uint32_t gLastRxId = 0;        // last accepted packetId (single-peer PDR)
+static bool gHaveLastRxId = false;
+#else
 static uint16_t gLastRxSeq = 0;
 static bool gHaveLastRxSeq = false;
+#endif
 static uint32_t gRxSeqGaps = 0;
 
 static unsigned long gLastBeaconMs = 0;
@@ -85,10 +125,13 @@ static bool gLedOn = false;
 static volatile bool gRxFlag = false;
 static bool gRadioOk = false;
 
-// ---- WiFi config portal state (-DWAYMESH_WIFI_CONFIG) -----------------------
-#if WAYMESH_WIFI_CONFIG
+// ---- Config store (channels/relay/packetId; portal + v2/auth share it) ------
+#if WM_HAVE_CONFIG
 static wm_config_t gCfg;
 static wm_store_t gStore;
+#endif
+// ---- WiFi config portal state (-DWAYMESH_WIFI_CONFIG) -----------------------
+#if WAYMESH_WIFI_CONFIG
 static bool gConfigMode = false;
 static unsigned long gBtnDownMs = 0;    // GPIO0 press start (0 = released)
 static unsigned long gPortalBlinkMs = 0;
@@ -151,7 +194,7 @@ static void startRx() {
 // Dedup seen-set: a small ring of recent MessageIDs = (srcId:32, seq:16). Linear
 // scan (RELAY_SEEN_SET_SIZE is tiny); insert overwrites the oldest slot. This is
 // the low-mem dedup the Tier-3 "dumb relay" needs (a few hundred bytes total).
-struct SeenEntry { uint32_t srcId; uint16_t seq; bool valid; };
+struct SeenEntry { uint32_t srcId; wm_msgid_t id; bool valid; };
 static SeenEntry gSeen[RELAY_SEEN_SET_SIZE];
 static uint8_t gSeenHead = 0;
 
@@ -160,10 +203,10 @@ static uint8_t gSeenHead = 0;
 struct PendingRelay {
   bool active;
   uint32_t srcId;
-  uint16_t seq;
+  wm_msgid_t id;
   unsigned long dueMs;
   uint8_t len;
-  uint8_t raw[sizeof(Beacon)];
+  uint8_t raw[WM_RELAY_RAW_MAX];
 };
 static PendingRelay gPending[RELAY_PENDING_SLOTS];
 
@@ -171,24 +214,24 @@ static uint32_t gRelayTx = 0;          // beacons we rebroadcast
 static uint32_t gRelaySuppressed = 0;  // pending rebroadcasts cancelled (overhear)
 static uint32_t gRelayDropFull = 0;    // new msgs dropped (no free pending slot)
 
-static bool seenContains(uint32_t srcId, uint16_t seq) {
+static bool seenContains(uint32_t srcId, wm_msgid_t id) {
   for (uint8_t i = 0; i < RELAY_SEEN_SET_SIZE; i++)
-    if (gSeen[i].valid && gSeen[i].srcId == srcId && gSeen[i].seq == seq)
+    if (gSeen[i].valid && gSeen[i].srcId == srcId && gSeen[i].id == id)
       return true;
   return false;
 }
-static void seenAdd(uint32_t srcId, uint16_t seq) {
+static void seenAdd(uint32_t srcId, wm_msgid_t id) {
   gSeen[gSeenHead].srcId = srcId;
-  gSeen[gSeenHead].seq = seq;
+  gSeen[gSeenHead].id = id;
   gSeen[gSeenHead].valid = true;
   gSeenHead = (uint8_t)((gSeenHead + 1) % RELAY_SEEN_SET_SIZE);
 }
 
 // Overhear suppression: drop any pending rebroadcast of this MessageID because
 // someone else already put it on the air. Returns true if one was cancelled.
-static bool relaySuppress(uint32_t srcId, uint16_t seq) {
+static bool relaySuppress(uint32_t srcId, wm_msgid_t id) {
   for (uint8_t i = 0; i < RELAY_PENDING_SLOTS; i++)
-    if (gPending[i].active && gPending[i].srcId == srcId && gPending[i].seq == seq) {
+    if (gPending[i].active && gPending[i].srcId == srcId && gPending[i].id == id) {
       gPending[i].active = false;
       return true;
     }
@@ -199,7 +242,7 @@ static bool relaySuppress(uint32_t srcId, uint16_t seq) {
 // weaker-SNR receiver waits longer, so the best-placed relay transmits first and
 // suppresses the rest. Drops on a full queue (the seen-set still recorded it).
 static void relaySchedule(const uint8_t *raw, uint8_t len, uint32_t srcId,
-                          uint16_t seq, float snr) {
+                          wm_msgid_t id, float snr) {
   for (uint8_t i = 0; i < RELAY_PENDING_SLOTS; i++) {
     if (!gPending[i].active) {
       float s = isnan(snr) ? RELAY_SNR_REF_DB : snr;
@@ -209,7 +252,7 @@ static void relaySchedule(const uint8_t *raw, uint8_t len, uint32_t srcId,
       d += (long)random(RELAY_DELAY_JITTER_MS + 1);
       gPending[i].active = true;
       gPending[i].srcId = srcId;
-      gPending[i].seq = seq;
+      gPending[i].id = id;
       gPending[i].len = len;
       memcpy(gPending[i].raw, raw, len);
       gPending[i].dueMs = millis() + (unsigned long)d;
@@ -228,7 +271,7 @@ static void relayService() {
     int16_t st = gRadio.transmit(gPending[i].raw, gPending[i].len);
     if (st == RADIOLIB_ERR_NONE) {
       gRelayTx++;
-      logEvent("relay", "lrp", gPending[i].srcId, gPending[i].seq, NAN, NAN, "fwd");
+      logEvent("relay", "lrp", gPending[i].srcId, (long)gPending[i].id, NAN, NAN, "fwd");
     } else {
       char buf[20];
       snprintf(buf, sizeof(buf), "relay_err=%d", st);
@@ -243,6 +286,151 @@ static void relayService() {
 }
 #endif  // WAYMESH_RELAY
 
+#if WAYMESH_V2
+// ---- v2/auth origination + RX (doc 13 §3/§5/§6) -----------------------------
+// Mirrors waymesh-node/src/main.cpp: TX a clear-header v2 beacon on our home
+// chanHash (AES-CCM-sealed POS when the channel is keyed and a fix is fresh), and
+// on RX apply the §6 acceptance steps alongside the keyless managed-flood relay.
+static void sendBeacon() {
+  const wm_channel_t *home = wm_config_home(&gCfg);
+  uint8_t chanHash = (home && home->hash >= 0) ? (uint8_t)home->hash
+                                               : WM_OPEN_GROUP_HASH;
+  uint32_t pid = wm_config_next_packet_id(&gCfg);
+
+  bool posValid = false;
+  int32_t lat = 0, lon = 0;
+  uint8_t sats = 0;
+#if WAYMESH_GPS
+  if (gGps.location.isValid() && gGps.location.age() < GPS_FIX_MAX_AGE_MS) {
+    lat = (int32_t)lround(gGps.location.lat() * 1e7);
+    lon = (int32_t)lround(gGps.location.lng() * 1e7);
+    sats = gGps.satellites.isValid() ? (uint8_t)gGps.satellites.value() : 0;
+    posValid = true;
+  }
+#endif
+
+  // §5: the 12-byte header is always clear (relay/dedup read it keyless); a POS
+  // payload on a keyed channel is AES-CCM sealed + a 4-byte MIC. Presence-only, a
+  // keyless channel, or a seal failure -> clear beacon.
+  uint8_t out[WM_BEACON_V2_MAX];
+  size_t n = 0;
+  bool enc = false;
+  if (posValid && home && home->key_len > 0) {
+    n = wm_beacon_build_v2_enc(out, chanHash, gNodeId, pid, lat, lon, sats,
+                               home->expanded_key, home->key_len);
+    enc = (n > 0);
+  }
+  if (!enc)
+    n = wm_beacon_build_v2_clear(out, chanHash, gNodeId, pid, posValid,
+                                 lat, lon, sats);
+
+  int16_t st = gRadio.transmit(out, n);
+  if (st == RADIOLIB_ERR_NONE) {
+    char ex[24];
+    snprintf(ex, sizeof(ex), "beacon ch=%u%s", (unsigned)chanHash, enc ? " enc" : "");
+    logEvent("tx", "lrp", gNodeId, (long)(pid & 0xFFFF), NAN, NAN, ex);
+    gTxSeq++;
+  } else {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "tx_err=%d", st);
+    logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
+  }
+  // transmit() leaves the radio in standby; the shared DIO1 ISR also fires on
+  // TxDone — drop the phantom flag before re-arming RX (same fix as the XR2 fw).
+  gRxFlag = false;
+  startRx();
+}
+
+static void handleRx() {
+  // Buffer fits the largest v2 frame (a TEXT beacon: header + text + MIC).
+  uint8_t raw[WM_BEACON_FRAME_MAX];
+  memset(raw, 0, sizeof(raw));
+  size_t plen = gRadio.getPacketLength();
+  if (plen > sizeof(raw)) plen = sizeof(raw);
+  int16_t st = gRadio.readData(raw, plen);
+  if (st != RADIOLIB_ERR_NONE) {
+    gRxBadCount++;
+    char buf[20];
+    snprintf(buf, sizeof(buf), "rx_err=%d", st);
+    logEvent("error", "lrp", 0, -1, NAN, NAN, buf);
+    startRx();
+    return;
+  }
+
+  wm_beacon_t b;
+  if (wm_beacon_parse(raw, plen, &b) != 0) {
+    startRx();  // not a recognized Waymesh beacon — ignore quietly (magic gate)
+    return;
+  }
+
+  float rssi = gRadio.getRSSI();
+  float snr = gRadio.getSNR();
+
+  // §6 step 2: never relay or count our own beacons.
+  wm_rx_decision_t d = wm_beacon_accept(&b, gNodeId, &gCfg);
+  if (d == WM_RX_DROP_SELF) { startRx(); return; }
+
+#if WAYMESH_RELAY
+  // §6 relay: dedup on the wider (srcId, packetId) MessageID across ALL groups —
+  // a relay-all relay carries foreign traffic blindly, so it must dedup it too.
+  if (seenContains(b.src_id, (wm_msgid_t)b.packet_id)) {
+    if (relaySuppress(b.src_id, (wm_msgid_t)b.packet_id)) gRelaySuppressed++;
+    startRx();
+    return;
+  }
+  seenAdd(b.src_id, (wm_msgid_t)b.packet_id);
+  // Keyless verbatim re-flood, governed by the relay policy on the CLEAR chanHash
+  // header — no key needed to filter or forward (the whole point of §6).
+  if (wm_beacon_should_relay(&b, &gCfg))
+    relaySchedule(raw, (uint8_t)plen, b.src_id, (wm_msgid_t)b.packet_id, snr);
+#endif
+
+  // §6 step 3: acceptance group filter. The relay above already carried a foreign
+  // group if relay-all; we just don't count/open it.
+  if (d == WM_RX_DROP_FOREIGN_GROUP) {
+    char ex[24];
+    snprintf(ex, sizeof(ex), "foreign_group ch=%u", (unsigned)b.chan_hash);
+    logEvent("drop", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+    startRx();
+    return;
+  }
+
+  // §6 step 5: AEAD-open an encrypted member-group beacon; a bad MIC / wrong key
+  // -> DROP with no plaintext exposed. The 8285 relay has no gateway, so an opened
+  // frame is verified + counted only (nothing is forwarded to an app).
+  uint8_t ptext[WM_BEACON_TEXT_MAX];
+  size_t ptext_len = 0;
+  if (b.flags & WM_BFLAG_ENCRYPTED) {
+    const wm_channel_t *ch = wm_config_channel_by_hash(&gCfg, b.chan_hash);
+    if (!ch || wm_beacon_open(&b, ch->expanded_key, ch->key_len, ptext,
+                              sizeof(ptext), &ptext_len) != 0) {
+      char ex[24];
+      snprintf(ex, sizeof(ex), "bad_mic ch=%u", (unsigned)b.chan_hash);
+      logEvent("drop", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+      startRx();
+      return;
+    }
+  }
+
+  // §6 step 6: accept a beacon from a group we belong to.
+  gRxCount++;
+  if (gHaveLastRxId) {
+    // Forward gap on a single peer's packetId; ignore reserve-ahead block skips /
+    // reboots / reordering (best-effort single-peer PDR, matches the XR2).
+    int32_t delta = (int32_t)(b.packet_id - (gLastRxId + 1));
+    if (delta > 0 && delta < (int32_t)WM_PKTID_BLOCK) gRxSeqGaps += (uint32_t)delta;
+  }
+  gLastRxId = b.packet_id;
+  gHaveLastRxId = true;
+  bool isText = (b.flags & WM_BFLAG_TEXT) && ptext_len > 0;
+  char ex[24];
+  snprintf(ex, sizeof(ex), "beacon ch=%u%s", (unsigned)b.chan_hash,
+           isText ? " text" : "");
+  logEvent("rx", "lrp", b.src_id, (long)(b.packet_id & 0xFFFF), rssi, snr, ex);
+  startRx();
+}
+
+#else  // !WAYMESH_V2 — legacy v0/v1 packed-struct PoC path
 static void sendBeacon() {
   Beacon b;
   memset(&b, 0, sizeof(b));
@@ -324,6 +512,7 @@ static void handleRx() {
   }
   startRx();
 }
+#endif  // WAYMESH_V2
 
 static void printStatus() {
   uint32_t expected = gRxCount + gRxSeqGaps;
@@ -472,21 +661,24 @@ void setup() {
 #endif
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
 
-#if WAYMESH_WIFI_CONFIG
+#if WM_HAVE_CONFIG
   // Load the channel/relay/packetId store (EEPROM), seeding the LongFast/psk=01
-  // default (chanHash 8) on fresh flash. The WiFi portal writes this same store.
-  pinMode(PIN_PORTAL_BTN, INPUT_PULLUP);
+  // default (chanHash 8) on fresh flash. The WiFi portal writes this same store;
+  // the v2/auth path TXes/filters on its home chanHash + reboot-safe packetId.
   wm_store_eeprom_begin(&gStore);
   wm_config_init(&gCfg, &gStore);
   {
     const wm_channel_t *home = wm_config_home(&gCfg);
-    Serial.printf("# config: home '%s' idx=%d chanHash=%d psk_len=%d relay=%s "
-                  "(GPIO%d long-press ~%lus or serial 'c' -> WiFi setup)\n",
+    Serial.printf("# config: home '%s' idx=%d chanHash=%d psk_len=%d relay=%s\n",
                   home ? home->name : "(none)", home ? home->index : 0,
                   home ? home->hash : -1, home ? home->psk_len : 0,
-                  gCfg.relay_policy == WM_RELAY_KNOWN ? "known" : "all",
-                  PIN_PORTAL_BTN, (unsigned long)(WM_PORTAL_BTN_MS / 1000));
+                  gCfg.relay_policy == WM_RELAY_KNOWN ? "known" : "all");
   }
+#endif
+#if WAYMESH_WIFI_CONFIG
+  pinMode(PIN_PORTAL_BTN, INPUT_PULLUP);
+  Serial.printf("# portal: GPIO%d long-press ~%lus or serial 'c' -> WiFi setup\n",
+                PIN_PORTAL_BTN, (unsigned long)(WM_PORTAL_BTN_MS / 1000));
 #endif
 
   // ESP8266 hardware SPI is on fixed pins (SCK14/MISO12/MOSI13) — no args.
