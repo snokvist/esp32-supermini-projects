@@ -553,12 +553,34 @@ now mirrored on the 8285, driven by the store the step-6 portal provisions:
   must also resolve the GPS↔portal UART0 share — deferred.
 
 **Build-verified:** `bayck_portal` (v2) builds clean (RAM 40.5% / Flash 44.1%),
-`bayck_7pwm` (v1) unchanged, `waymesh-node` host tests **36/36**.
+`bayck_7pwm` (v1) unchanged (Flash 38.1%, byte-for-byte), `waymesh-node` host
+tests **36/36**.
 
-**Still pending — the 2-device bench (§9.1 / §9.2, task #11):** on-air group filter,
-the crypto round-trip through a keyless relay, the wrong-key MIC drop, and the bayck
-`begin()` retry log all need a live XR2 ↔ 8285 pair — single-device only proves v2
-origination (the `tx … beacon ch=<hash>` line). That is the remaining gate.
+**Device-verified on a multi-node bench (2026-06-02, BayckRC `006D2929`):** flashed
+`bayck_portal` and observed, live, against two on-air peers — the v2 XR2 `B17506DC`
+(32-bit reserve-ahead `packetId` ~150 M) and a second node `00E0029B`:
+
+- **v2 origination** — `tx … beacon ch=31` then, after a portal re-provision to the
+  default channel, `tx … beacon ch=8` (the v2 header carries the home `chanHash`;
+  the `packetId` is the reboot-safe counter).
+- **Group filter, both directions (§6 step 3)** — on `chanHash 31` the node logged
+  `drop … foreign_group ch=8` for the ch-8 peers; re-provisioned to `chanHash 8` it
+  switched to `rx … beacon ch=8` (accept) for the same peers. Two groups shared the
+  band and ignored each other, then merged on a matching hash.
+- **Keyless relay, both policies (§6)** — `relay-known` re-flooded **nothing** while
+  hearing foreign ch-8 traffic (`relay=0`); `relay-all` re-flooded both peers
+  **verbatim** keyed on the wide 32-bit `(srcId, packetId)` MessageID (`relay=20`,
+  `pdr=100%`, `supp=0 qfull=0`, `badcrc=0`). All decisions made off the **clear**
+  header — no key at the relay.
+- **8285 ↔ XR2 interop restored under v2** — the PoC #0 gate, now group-filtered.
+
+**Still pending (task #11):** the **on-air AEAD round-trip** — every peer this
+session sent a *clear* presence beacon (GPS off all round; no app channel-text), so
+`wm_beacon_open` wasn't exercised on the air (no `bad_mic`, no `enc`/`text` frames).
+The encrypt→decrypt + bad-MIC paths are host-tested (`test_beacon`/`test_ccm`); the
+natural on-air trigger is a GPS fix or a Meshtastic app channel-text flooded by the
+XR2 gateway (an encrypted v2 TEXT beacon our node would AEAD-open → `rx … ch=8 text`).
+The wrong-key MIC drop isn't practically stageable on-air (needs a hash collision).
 
 ## 11 — Resolved decisions
 
