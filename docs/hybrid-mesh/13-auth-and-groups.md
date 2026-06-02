@@ -574,13 +574,18 @@ tests **36/36**.
   header — no key at the relay.
 - **8285 ↔ XR2 interop restored under v2** — the PoC #0 gate, now group-filtered.
 
-**Still pending (task #11):** the **on-air AEAD round-trip** — every peer this
-session sent a *clear* presence beacon (GPS off all round; no app channel-text), so
-`wm_beacon_open` wasn't exercised on the air (no `bad_mic`, no `enc`/`text` frames).
-The encrypt→decrypt + bad-MIC paths are host-tested (`test_beacon`/`test_ccm`); the
-natural on-air trigger is a GPS fix or a Meshtastic app channel-text flooded by the
-XR2 gateway (an encrypted v2 TEXT beacon our node would AEAD-open → `rx … ch=8 text`).
-The wrong-key MIC drop isn't practically stageable on-air (needs a hash collision).
+- **On-air AEAD round-trip (§5/§6 step 5)** — a Meshtastic app channel-text ("Test")
+  sent to the XR2 was sealed as an encrypted v2 **TEXT** beacon (AES-CCM + 4-byte
+  MIC) and flooded; the 8285, holding the same LongFast open key, logged
+  `rx … beacon ch=8 text` — `wm_beacon_open` verified the MIC over the clear header
+  and decrypted the payload (the `text` flag survived the round-trip; a wrong key
+  would have logged `bad_mic`). In the **same loop** it also re-flooded the frame
+  verbatim (`relay … fwd`) **without the key** — crypto end-to-end, relay key-free,
+  exactly as designed.
+
+All four §6 behaviors are now device-verified on-air. The wrong-key MIC drop is the
+only item not exercised on the bench (not practically stageable without a hash
+collision) — host-tested in `test_beacon`/`test_ccm`.
 
 ## 11 — Resolved decisions
 
