@@ -37,6 +37,12 @@
 #include <TinyGPSPlus.h>  // vendor-neutral NMEA parser (fed from UART0)
 #endif
 
+#if WAYMESH_WIFI_CONFIG
+#include "waymesh_config.h"     // portable channel/relay/packetId store (doc 13 §8)
+#include "wm_store_eeprom.h"    // ESP8266 EEPROM backend for wm_store_t
+#include "wm_portal.h"          // SoftAP + captive web form (doc 13 §8.4)
+#endif
+
 // ---- Radio ------------------------------------------------------------------
 // SX128x Module pin order: (NSS/CS, IRQ/DIO1, RESET, BUSY) — same order as the
 // LR11x0 on the XR2, just a different RadioLib class.
@@ -78,6 +84,15 @@ static bool gLedOn = false;
 
 static volatile bool gRxFlag = false;
 static bool gRadioOk = false;
+
+// ---- WiFi config portal state (-DWAYMESH_WIFI_CONFIG) -----------------------
+#if WAYMESH_WIFI_CONFIG
+static wm_config_t gCfg;
+static wm_store_t gStore;
+static bool gConfigMode = false;
+static unsigned long gBtnDownMs = 0;    // GPIO0 press start (0 = released)
+static unsigned long gPortalBlinkMs = 0;
+#endif
 
 // ---- GPS / UART0 time-share -------------------------------------------------
 #if WAYMESH_GPS
@@ -369,6 +384,52 @@ static void gpsService() {
 }
 #endif  // WAYMESH_GPS
 
+// ---- WiFi config portal (-DWAYMESH_WIFI_CONFIG) -----------------------------
+#if WAYMESH_WIFI_CONFIG
+// Suspend LoRa (both radios are 2.4 GHz) and bring the SoftAP + web form up.
+static void enterConfigMode() {
+  Serial.println("# portal: entering config mode (suspending LoRa)");
+  if (gRadioOk) gRadio.sleep();
+  ledWrite(true);
+  if (!wmPortalBegin(&gCfg, gNodeId))
+    Serial.println("# portal: softAP start FAILED");
+  gConfigMode = true;
+  gPortalBlinkMs = millis();
+}
+
+// Watch for the config-mode trigger: a serial 'c' (bench, button-less) or a
+// ~5 s GPIO0 long-press. Called from loop() only while NOT already in config mode.
+static void checkPortalTrigger() {
+  if (Serial.available()) {
+    int c = Serial.read();
+    if (c == 'c' || c == 'C') { enterConfigMode(); return; }
+  }
+  const bool pressed = (digitalRead(PIN_PORTAL_BTN) == LOW);
+  const unsigned long now = millis();
+  if (pressed) {
+    if (gBtnDownMs == 0) gBtnDownMs = now;
+    else if (now - gBtnDownMs >= WM_PORTAL_BTN_MS) { gBtnDownMs = 0; enterConfigMode(); }
+  } else {
+    gBtnDownMs = 0;
+  }
+}
+
+// Pump the portal; fast-blink the LED to signal "AP up". On Save or idle timeout
+// the node reboots — the cleanest way to resume LoRa after WiFi held the 2.4 GHz
+// front-end (avoids a half-woken SX1280). Returns nothing; reboots in place.
+static void serviceConfigMode() {
+  const unsigned long now = millis();
+  if (now - gPortalBlinkMs >= 150) { gPortalBlinkMs = now; gLedOn = !gLedOn; ledWrite(gLedOn); }
+  if (!wmPortalService()) {
+    Serial.println(wmPortalRebootRequested() ? "# portal: saved -> rebooting"
+                                             : "# portal: idle timeout -> rebooting");
+    wmPortalEnd();
+    delay(50);
+    ESP.restart();
+  }
+}
+#endif  // WAYMESH_WIFI_CONFIG
+
 // ---- Setup / loop -----------------------------------------------------------
 void setup() {
   Serial.begin(115200);
@@ -410,6 +471,23 @@ void setup() {
                 PIN_LORA_RXEN, PIN_LORA_TXEN);
 #endif
   Serial.println("ts_ms,nodeId,role,event,plane,srcId,seq,rssi,snr,lat,lon,extra");
+
+#if WAYMESH_WIFI_CONFIG
+  // Load the channel/relay/packetId store (EEPROM), seeding the LongFast/psk=01
+  // default (chanHash 8) on fresh flash. The WiFi portal writes this same store.
+  pinMode(PIN_PORTAL_BTN, INPUT_PULLUP);
+  wm_store_eeprom_begin(&gStore);
+  wm_config_init(&gCfg, &gStore);
+  {
+    const wm_channel_t *home = wm_config_home(&gCfg);
+    Serial.printf("# config: home '%s' idx=%d chanHash=%d psk_len=%d relay=%s "
+                  "(GPIO%d long-press ~%lus or serial 'c' -> WiFi setup)\n",
+                  home ? home->name : "(none)", home ? home->index : 0,
+                  home ? home->hash : -1, home ? home->psk_len : 0,
+                  gCfg.relay_policy == WM_RELAY_KNOWN ? "known" : "all",
+                  PIN_PORTAL_BTN, (unsigned long)(WM_PORTAL_BTN_MS / 1000));
+  }
+#endif
 
   // ESP8266 hardware SPI is on fixed pins (SCK14/MISO12/MOSI13) — no args.
   SPI.begin();
@@ -453,6 +531,10 @@ void setup() {
 }
 
 void loop() {
+#if WAYMESH_WIFI_CONFIG
+  if (gConfigMode) { serviceConfigMode(); return; }  // AP up: LoRa suspended
+  checkPortalTrigger();                              // GPIO0 long-press / serial 'c'
+#endif
   if (gRadioOk) {
     if (gRxFlag) {
       gRxFlag = false;

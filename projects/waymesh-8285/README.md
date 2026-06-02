@@ -170,6 +170,39 @@ full pending queue.
 - *Not yet on hardware:* overhear suppression and multi-hop reach-extension need a
   2nd relay / 3rd node (`supp`/`qfull` correctly stayed 0 on the 2-node bench).
 
+## WiFi config portal (`bayck_portal`, `-DWAYMESH_WIFI_CONFIG=1`)
+
+The 8285 is **WiFi-only (no BLE)**, so it cannot be provisioned from the Meshtastic
+app the way the C3 (`waymesh-node`) is. Instead it runs an **ELRS-style SoftAP +
+captive web portal** (doc 13 §8.4): the home channel (name + PSK) and the relay
+policy (`relay-all` | `relay-known`) are set over WiFi and written to the **same
+`wm_config` store** the C3 fills over BLE — the C3 over BLE, the 8285 over WiFi,
+both ending at one store. Here the store is **ESP8266 EEPROM emulation**
+(`src/wm_store_eeprom.cpp`); the portable channel/relay/`packetId` logic is the
+shared `waymesh-node/lib/waymesh_config` (pulled in via `lib_extra_dirs`).
+
+```bash
+pio run -e bayck_portal      # config-portal build (GPS off → stable UART0 console)
+```
+
+- **Enter config mode:** long-press the **GPIO0** button ~5 s (GPIO0 is the boot
+  strap, free as an input after boot), **or** send **`c`** on the serial console
+  (bench fallback for a board with no tactile button).
+- **Connect:** join WiFi **`Waymesh_XXXX`** (XXXX = low chip-ID, matches the C3 BLE
+  name), WPA2 password **`waymesh-setup`** (override with `-DWM_PORTAL_PASS=...`),
+  browse to **`http://10.0.0.1/`**.
+- **Set:** channel name, index (0–7), PSK (`default` = the open key → chanHash 8;
+  `32`/`64` hex = AES-128/256; blank = no crypto), relay policy. **Save** recomputes
+  `chanHash`/key, persists to EEPROM, and **reboots** to reload cleanly.
+- **RF coexistence:** WiFi and the SX1280 are both 2.4 GHz, so **LoRa is suspended**
+  (radio sleep, beacon/relay stopped) while the AP is up; the node reboots on Save
+  or after 3 min idle to resume relaying. The LED fast-blinks while the AP is up.
+
+The Phase-B v2/auth port (on-air `chanHash` group filter, `relay-known`, AES-CCM
+beacon origination) lands **on top of** the store this portal provisions; until
+then this build still relays the legacy v0/v1 beacon (the portal is additive). Fold
+`-DWAYMESH_WIFI_CONFIG` into `bayck_7pwm` once the portal is verified.
+
 ## Pin map
 
 Both boards are ESP8285 + SX1280 and share the radio/LED/UART pins below (the

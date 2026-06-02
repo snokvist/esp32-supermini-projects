@@ -186,3 +186,23 @@
 #define RELAY_DELAY_JITTER_MS 15    // tie-break jitter added to each delay
 #endif
 #endif  // WAYMESH_RELAY
+
+// ---- WiFi config portal (Tier 2/3, -DWAYMESH_WIFI_CONFIG=1) ------------------
+// ELRS-style SoftAP + captive web portal that provisions the home channel + relay
+// policy into wm_config over WiFi — the BLE-less twin of the C3's app channel-set
+// (doc 13 §8.4). The Phase-B v2/auth port lands on top of the store this fills.
+//
+// Entry: long-press the GPIO0 button (~5 s) — GPIO0 is the boot strap, free as a
+// normal INPUT_PULLUP after boot (idle HIGH; press -> LOW). It is PWM-ch1, unused
+// in this build. The portal build ALSO enters on a serial 'c' so a board without a
+// tactile button can be provisioned on the bench. WiFi and the SX1280 are both
+// 2.4 GHz, so LoRa is suspended (radio sleep) while the AP is up, then the node
+// reboots to reload config cleanly (§8.4 RF coexistence).
+#if WAYMESH_WIFI_CONFIG
+#ifndef PIN_PORTAL_BTN
+#define PIN_PORTAL_BTN 0          // GPIO0 boot strap, read as button after boot
+#endif
+#ifndef WM_PORTAL_BTN_MS
+#define WM_PORTAL_BTN_MS 5000     // long-press duration to enter config mode
+#endif
+#endif  // WAYMESH_WIFI_CONFIG
