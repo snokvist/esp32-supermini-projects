@@ -57,9 +57,24 @@ relay (below) is built on top.
 ## Build & flash
 
 ```bash
-pio run -e bayck_7pwm        # BayckRC 7PWM (plain SX1280)
-pio run -e betafpv_nano      # BetaFPV Nano RX (SX1280 + PA/LNA)
+pio run -e bayck_7pwm        # BayckRC 7PWM — PRODUCTION (v2/auth + relay + GPS + portal)
+pio run -e betafpv_nano      # BetaFPV Nano RX — PRODUCTION (same + external PA/LNA)
+pio run -e bayck_portal      # bench twin of bayck_7pwm with GPS OFF (stable console)
 ```
+
+Env matrix (all share the same SX1280 RF params + managed-flood relay):
+
+| Env | v2/auth | WiFi portal | GPS | Notes |
+|---|:--:|:--:|:--:|---|
+| `bayck_7pwm` | ✅ | ✅ | ✅ | BayckRC production |
+| `betafpv_nano` | ✅ | ✅ | ✅ | + external PA/LNA |
+| `bayck_portal` | ✅ | ✅ | ❌ | bench: stable UART0 console + serial-`c` |
+| `*_gpstest` | ✅ | ✅ | ✅ | + 1 Hz GPS debug line |
+
+The production envs were cut over from the legacy v0/v1 PoC to **v2/auth** (group
+filter + AES-CCM + WiFi provisioning) — see [v2/auth on-air](#v2auth-on-air--dwaymesh_v21)
+below. The v0/v1 path is retained in `main.cpp` (`#if !WAYMESH_V2`); drop
+`-DWAYMESH_V2` to rebuild it (note: a v1 build no longer interops with the v2 XR2).
 
 ESP8266 produces a single image. Flash over the UART pads (GPIO1 TX / GPIO3 RX,
 GND, 3V3) with the board in download mode (hold GPIO0 low + power-cycle). Both
@@ -169,6 +184,76 @@ full pending queue.
   hears its own beacons relayed back at **100% relay PDR** (`relayback == tx`).
 - *Not yet on hardware:* overhear suppression and multi-hop reach-extension need a
   2nd relay / 3rd node (`supp`/`qfull` correctly stayed 0 on the 2-node bench).
+
+## WiFi config portal (`bayck_portal`, `-DWAYMESH_WIFI_CONFIG=1`)
+
+The 8285 is **WiFi-only (no BLE)**, so it cannot be provisioned from the Meshtastic
+app the way the C3 (`waymesh-node`) is. Instead it runs an **ELRS-style SoftAP +
+captive web portal** (doc 13 §8.4): the home channel (name + PSK) and the relay
+policy (`relay-all` | `relay-known`) are set over WiFi and written to the **same
+`wm_config` store** the C3 fills over BLE — the C3 over BLE, the 8285 over WiFi,
+both ending at one store. Here the store is **ESP8266 EEPROM emulation**
+(`src/wm_store_eeprom.cpp`); the portable channel/relay/`packetId` logic is the
+shared `waymesh-node/lib/waymesh_config` (pulled in via `lib_extra_dirs`).
+
+```bash
+pio run -e bayck_portal      # config-portal build (GPS off → stable UART0 console)
+```
+
+- **Enter config mode (primary):** long-press **GPIO0** for ~5 s **at runtime**.
+  GPIO0 is the boot strap (idle HIGH, pull → LOW); on these bare ELRS RX boards it's
+  the **PWM-ch1 header pin** (unused here), not a dedicated tactile button — so
+  "the button" = grounding that pin for 5 s while the firmware runs. ⚠️ Grounding
+  GPIO0 at **power-on/reset** enters the bootloader (download mode) instead; the
+  long-press only opens the portal once the firmware is already running.
+- **Enter config mode (fallback):** send **`c`** on the serial console (for a board
+  with no accessible pin). On a GPS build UART0 is time-shared with NMEA, so `c`
+  only fires while the console owns the line (before NMEA lock / after a no-GPS
+  revert); the **GPIO0 long-press always works** regardless.
+- **Connect:** join WiFi **`Waymesh_XXXX`** (XXXX = low chip-ID, matches the C3 BLE
+  name), WPA2 password **`waymesh-setup`** (override with `-DWM_PORTAL_PASS=...`),
+  browse to **`http://10.0.0.1/`**.
+- **Set:** channel name, index (0–7), PSK (`default` = the open key → chanHash 8;
+  `32`/`64` hex = AES-128/256; blank = no crypto), relay policy. **Save** recomputes
+  `chanHash`/key, persists to EEPROM, and **reboots** to reload cleanly.
+- **RF coexistence:** WiFi and the SX1280 are both 2.4 GHz, so **LoRa is suspended**
+  (radio sleep, beacon/relay stopped) while the AP is up; the node reboots on Save
+  or after 3 min idle to resume relaying. The LED fast-blinks while the AP is up.
+
+The `bayck_portal` env now **also** enables the v2/auth on-air codec
+(`-DWAYMESH_V2=1`, below) — it both provisions *and* uses the store it fills, so it
+is the full Tier-2/3 relay + originator verification build.
+
+## v2/auth on-air (`-DWAYMESH_V2=1`)
+
+The legacy `bayck_7pwm` / `betafpv_nano` builds emit the v0/v1 packed-struct beacon
+(`Beacon`). `-DWAYMESH_V2=1` switches the RF path to the **v2/auth wire codec** —
+the host-tested `waymesh-node/lib/waymesh_beacon` (doc 13 §3/§5/§6) — matching the
+XR2 (`waymesh-node`, already v2):
+
+- **Origination:** TX a v2 beacon on the home `chanHash` with a reboot-safe 32-bit
+  `packetId`. A position on a **keyed** channel is **AES-CCM-sealed + 4-byte MIC**;
+  the 12-byte header stays **clear** so a keyless relay re-floods it verbatim.
+  (`bayck_portal` has GPS off → it sends the clear presence header.)
+- **RX (§6):** parse → drop self → dedup on `(srcId, packetId)` → **group filter**
+  (`chanHash` ∈ our accepted set, else `drop foreign_group`) → **AEAD-open** an
+  encrypted member-group frame (bad MIC / wrong key → `drop bad_mic`, no plaintext).
+- **Relay (keyless):** the managed flood re-floods **verbatim** governed by the relay
+  policy read off the **clear** `chanHash` — `relay-all` carries every group blindly,
+  `relay-known` only configured hashes. No key is ever needed to filter or forward.
+
+The on-air `tx`/`rx` CSV now carries the channel: `… beacon ch=<hash>` (`enc` /
+`text` suffixes when applicable), and group/MIC rejects log `drop foreign_group` /
+`drop bad_mic`.
+
+> **Non-backward-compatible cutover (done):** the production envs `bayck_7pwm` /
+> `betafpv_nano` now ship `-DWAYMESH_V2=1 -DWAYMESH_WIFI_CONFIG=1` (+ GPS). v2 frames
+> do **not** interop with a v1 peer, but the XR2 is already v2, so this *restores*
+> 8285↔XR2 interop; only legacy v1-only firmware is dropped. The GPS↔portal UART0
+> share is resolved in `checkPortalTrigger`: the serial-`c` fallback only reads UART0
+> while the console owns it (GPS in `DEBUG`), so it never steals NMEA bytes — the
+> GPIO0 long-press is unaffected. The v0/v1 path is retained in `main.cpp`
+> (`#if !WAYMESH_V2`); drop `-DWAYMESH_V2` to rebuild it.
 
 ## Pin map
 

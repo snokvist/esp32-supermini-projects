@@ -17,12 +17,28 @@ static const char *FROMNUM_UUID   = "ed9da18c-a800-4f66-a670-aa7547e34453"; // r
 // Pinned firmware version reported in DeviceMetadata. This is the field the
 // Meshtastic app gates feature/protocol compatibility on, so it is a deliberate
 // knob — bump it (and re-test) when chasing app/protobuf changes.
+//
+// Pinned upstream for byte-compatibility (auth/group work, docs/hybrid-mesh/13):
+//   meshtastic/firmware  v2.6.4.b89355f  b89355ffa60b3893417004b07e7b96f04b17022c
+//   meshtastic/protobufs v2.6.4          f00e96f12da48abfa9a992f8b5546fd75a370250
+// Channel hash + PSK/default-key expansion validated against this ref in
+// lib/waymesh_crypto (test/test_channel_hash). AdminMessage field numbers
+// locked for the runtime channel-set path (§8.1, lands later): ADMIN_APP
+// portnum=6; AdminMessage.set_channel=33, get_channel_request=1,
+// get_channel_response=2, session_passkey=101 (bytes, top-level, 300 s expiry);
+// ChannelSettings{psk=2,name=3,id=4}; Channel{index=1,settings=2,role=3}.
 #define WAYMESH_FW_VERSION "2.6.4.waymesh"
 #define WAYMESH_HW_MODEL   255u  // HardwareModel.PRIVATE_HW — non-Meshtastic hardware
 #define WAYMESH_ROLE       0u    // Config.DeviceConfig.Role.CLIENT
 #define MESH_LOC_INTERNAL  2u    // Position.LocSource.LOC_INTERNAL
+#define MESH_PORTNUM_TEXT 1u     // PortNum.TEXT_MESSAGE_APP
 #define MESH_PORTNUM_POSITION 3u // PortNum.POSITION_APP
+#define MESH_PORTNUM_ADMIN 6u    // PortNum.ADMIN_APP
 #define MESH_BROADCAST_ADDR 0xFFFFFFFFu
+#define WM_TEXT_MAX 180          // mirrors WM_BEACON_TEXT_MAX (the OTA text cap)
+#define MESH_CHANNEL_ROLE_DISABLED  0u
+#define MESH_CHANNEL_ROLE_PRIMARY   1u
+#define MESH_CHANNEL_ROLE_SECONDARY 2u
 
 static_assert(sizeof(WAYMESH_FW_VERSION) <= 24,
               "WAYMESH_FW_VERSION must fit DeviceMetadata.firmware_version[24]");
@@ -38,6 +54,88 @@ static volatile bool gBleConnected = false;
 // main loop task (bleGattSetPosition).
 static volatile bool gConfigDone = false;
 static uint32_t gFromNumVal = 0;
+
+// --- provisioned channel set (advertised to the app; read-only this phase) ---
+// Set once from main after wm_config_init; process-lifetime pointer. Read on the
+// BLE host task (handshake) and the main loop task (peer hash->index); both are
+// reads with no concurrent writer in this phase, so no lock is needed.
+static const wm_config_t *gCfgRef = nullptr;
+
+// Meshtastic channel index for our home (TX) channel — the primary the app
+// shows our own node + same-group peers on. 0 (primary) before channels load.
+static uint8_t homeChannelIndex() {
+  if (gCfgRef && gCfgRef->channel_count)
+    return gCfgRef->channels[gCfgRef->home_slot].index;
+  return 0;
+}
+
+// Map a heard chanHash to its Meshtastic channel index (the table position the
+// app knows). Falls back to 0 (primary) if not a configured channel — accepted
+// frames always resolve, but a relayed/edge frame degrades gracefully.
+static uint8_t channelIndexForHash(uint8_t hash) {
+  if (gCfgRef) {
+    const wm_channel_t *c = wm_config_channel_by_hash(gCfgRef, hash);
+    if (c) return c->index;
+  }
+  return 0;
+}
+
+// The configured channel at a Meshtastic channel index (NULL if none).
+static const wm_channel_t *channelByIndex(uint8_t idx) {
+  if (!gCfgRef) return nullptr;
+  for (uint8_t i = 0; i < gCfgRef->channel_count; i++)
+    if (gCfgRef->channels[i].index == idx) return &gCfgRef->channels[i];
+  return nullptr;
+}
+
+// --- app -> OTA outbound text ring (write path, §7.3) ------------------------
+// onWrite() (BLE host task) decrypts the phone's channel text and pushes
+// {chanHash, text} here; the main loop drains it (bleGattPopAppText) and builds
+// + transmits a v2 TEXT beacon — keeping the radio + packetId/NVS on one task.
+struct AppText {
+  uint8_t chanHash;
+  uint16_t len;
+  uint8_t buf[WM_TEXT_MAX];
+};
+static const int kTxDepth = 4;
+static AppText gTx[kTxDepth];
+static int gTxHead = 0, gTxTail = 0, gTxCount = 0;
+static portMUX_TYPE gTxMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void appTextPush(uint8_t chanHash, const uint8_t *text, size_t len) {
+  if (len == 0 || len > WM_TEXT_MAX) return;
+  portENTER_CRITICAL(&gTxMux);
+  if (gTxCount < kTxDepth) {
+    AppText &t = gTx[gTxTail];
+    t.chanHash = chanHash;
+    t.len = (uint16_t)len;
+    memcpy(t.buf, text, len);
+    gTxTail = (gTxTail + 1) % kTxDepth;
+    gTxCount++;
+  }
+  portEXIT_CRITICAL(&gTxMux);
+}
+
+// --- admin: runtime set_channel (§8.1) --------------------------------------
+// The node issues an 8-byte session passkey in a get_channel_response; the app
+// echoes it in set_channel, which we accept only if it matches within 300 s
+// (mirrors upstream AdminMessage session semantics). An applied set_channel is
+// queued to the main loop (it owns NVS) which persists it and reboots so the new
+// channel set loads + re-advertises cleanly (no cross-task gCfg mutation race).
+extern "C" uint32_t esp_random(void);
+static uint8_t gPasskey[8];
+static bool gPasskeyValid = false;
+static unsigned long gPasskeyIssuedMs = 0;
+static const unsigned long kPasskeyTtlMs = 300000;  // 300 s
+
+struct PendingChan {
+  bool active;
+  uint8_t index, role, psk_len;
+  uint8_t psk[WM_PSK_MAX];
+  char name[WM_CHAN_NAME_MAX];
+};
+static PendingChan gPendingChan;
+static portMUX_TYPE gAdminMux = portMUX_INITIALIZER_UNLOCKED;
 
 // --- self identity / latest GPS fix + epoch (fed from main.cpp) --------------
 static uint32_t gNodeId = 0;
@@ -62,6 +160,7 @@ struct Peer {
   bool posValid;
   float snr;
   uint32_t lastHeardEpoch;
+  uint8_t chanHash;          // group the peer was heard on -> NodeInfo.channel
   unsigned long lastEmitMs;  // 0 = not yet emitted this connection
   bool used;
 };
@@ -158,11 +257,13 @@ static bool enqueueFromRadio(meshtastic_FromRadio *fr) {
 // Fill a FromRadio{node_info} for one node (self or peer). snr 0 for self.
 static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
                                bool posValid, int32_t latI, int32_t lonI,
-                               uint32_t sats, float snr, uint32_t lastHeard) {
+                               uint32_t sats, float snr, uint32_t lastHeard,
+                               uint8_t channelIdx) {
   *fr = meshtastic_FromRadio_init_zero;
   fr->which_payload_variant = meshtastic_FromRadio_node_info_tag;
   meshtastic_NodeInfo &ni = fr->payload_variant.node_info;
   ni.num = nodeId;
+  ni.channel = channelIdx;  // the group the app shows this node on (§7)
   ni.has_user = true;
   snprintf(ni.user.id, sizeof(ni.user.id), "!%08x", (unsigned)nodeId);
   snprintf(ni.user.long_name, sizeof(ni.user.long_name), "Waymesh_%04X",
@@ -193,7 +294,8 @@ static void buildNodeInfoFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
 // dump stays bare NodeInfo, matching how real firmware downloads the node DB.
 static bool buildPositionPacketFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
                                      int32_t latI, int32_t lonI, uint32_t sats,
-                                     float snr, uint32_t epoch) {
+                                     float snr, uint32_t epoch,
+                                     uint8_t channelIdx) {
   meshtastic_Position pos = meshtastic_Position_init_zero;
   pos.latitude_i = latI;
   pos.longitude_i = lonI;
@@ -206,6 +308,7 @@ static bool buildPositionPacketFrame(meshtastic_FromRadio *fr, uint32_t nodeId,
   meshtastic_MeshPacket &mp = fr->payload_variant.packet;
   mp.from = nodeId;
   mp.to = MESH_BROADCAST_ADDR;
+  mp.channel = channelIdx;  // the channel the app renders this position on (§7)
   mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
   meshtastic_Data &d = mp.payload_variant.decoded;
   d.portnum = MESH_PORTNUM_POSITION;
@@ -246,6 +349,32 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   md.hw_model = WAYMESH_HW_MODEL;
   enqueueFromRadio(&fr);
 
+  // 2b) Advertise the provisioned channel set (§7): one FromRadio{channel} per
+  // channel so the app adopts our groups. psk is the STORED Meshtastic PSK (not
+  // the expanded key) so the app derives the same hash + key we use (§4).
+  int chans = 0;
+  if (gCfgRef) {
+    for (uint8_t i = 0; i < gCfgRef->channel_count; i++) {
+      const wm_channel_t *c = &gCfgRef->channels[i];
+      fr = meshtastic_FromRadio_init_zero;
+      fr.which_payload_variant = meshtastic_FromRadio_channel_tag;
+      meshtastic_Channel &ch = fr.payload_variant.channel;
+      ch.index = c->index;
+      ch.role = (i == gCfgRef->home_slot) ? MESH_CHANNEL_ROLE_PRIMARY
+                                          : MESH_CHANNEL_ROLE_SECONDARY;
+      ch.has_settings = true;
+      size_t pk = c->psk_len <= sizeof(ch.settings.psk.bytes)
+                      ? c->psk_len
+                      : sizeof(ch.settings.psk.bytes);
+      memcpy(ch.settings.psk.bytes, c->psk, pk);
+      ch.settings.psk.size = (pb_size_t)pk;
+      snprintf(ch.settings.name, sizeof(ch.settings.name), "%s", c->name);
+      ch.settings.id = 0;  // app derives the channel from name+psk; id unused
+      enqueueFromRadio(&fr);
+      chans++;
+    }
+  }
+
   // 3) Self NodeInfo (with the live GPS position, if we have a fix).
   int32_t latI, lonI;
   uint32_t sats, epoch;
@@ -253,7 +382,8 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   portENTER_CRITICAL(&gPosMux);
   latI = gLatI; lonI = gLonI; sats = gSats; posValid = gPosValid; epoch = gEpoch;
   portEXIT_CRITICAL(&gPosMux);
-  buildNodeInfoFrame(&fr, gNodeId, posValid, latI, lonI, sats, 0.0f, epoch);
+  buildNodeInfoFrame(&fr, gNodeId, posValid, latI, lonI, sats, 0.0f, epoch,
+                     homeChannelIndex());
   enqueueFromRadio(&fr);
 
   // 4) One NodeInfo per peer heard over LoRa (snapshot each under the DB lock,
@@ -268,7 +398,7 @@ static void queueConfigSequence(uint32_t wantConfigId) {
     portEXIT_CRITICAL(&gDbMux);
     if (!used) continue;
     buildNodeInfoFrame(&fr, p.nodeId, p.posValid, p.latI, p.lonI, p.sats, p.snr,
-                       p.lastHeardEpoch);
+                       p.lastHeardEpoch, channelIndexForHash(p.chanHash));
     enqueueFromRadio(&fr);
     peers++;
   }
@@ -279,9 +409,9 @@ static void queueConfigSequence(uint32_t wantConfigId) {
   fr.payload_variant.config_complete_id = wantConfigId;
   enqueueFromRadio(&fr);
 
-  Serial.printf("# BLE handshake queued (self + %d peer(s)) for "
+  Serial.printf("# BLE handshake queued (%d chan(s) + self + %d peer(s)) for "
                 "want_config_id=%u\n",
-                peers, (unsigned)wantConfigId);
+                chans, peers, (unsigned)wantConfigId);
 
   // Open the live-emit gate now that the client has its config dump. Stamp the
   // self emit-gate so the first live self update waits a full interval after the
@@ -313,6 +443,167 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
+static void issuePasskey(void) {
+  for (int i = 0; i < 8; i += 4) {
+    uint32_t r = esp_random();
+    memcpy(gPasskey + i, &r, 4);
+  }
+  gPasskeyValid = true;
+  gPasskeyIssuedMs = millis();
+}
+
+static bool passkeyOk(const uint8_t *pk, size_t len) {
+  if (!gPasskeyValid || len != sizeof(gPasskey)) return false;
+  if (millis() - gPasskeyIssuedMs > kPasskeyTtlMs) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < len; i++) diff |= (uint8_t)(pk[i] ^ gPasskey[i]);
+  return diff == 0;
+}
+
+// Fill a Channel proto from a configured channel — psk is the STORED Meshtastic
+// PSK so the app derives the same hash+key we use (§4), never the expanded key.
+static void fillChannel(meshtastic_Channel *ch, const wm_channel_t *c,
+                        uint8_t role) {
+  ch->index = c->index;
+  ch->role = role;
+  ch->has_settings = true;
+  size_t pk = c->psk_len <= sizeof(ch->settings.psk.bytes)
+                  ? c->psk_len : sizeof(ch->settings.psk.bytes);
+  memcpy(ch->settings.psk.bytes, c->psk, pk);
+  ch->settings.psk.size = (pb_size_t)pk;
+  snprintf(ch->settings.name, sizeof(ch->settings.name), "%s", c->name);
+  ch->settings.id = 0;
+}
+
+// Reply to a get_channel_request: an ADMIN MeshPacket carrying
+// AdminMessage{get_channel_response: Channel[idx], session_passkey}.
+static void sendAdminChannelResponse(uint8_t idx) {
+  meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+  am.which_payload_variant = meshtastic_AdminMessage_get_channel_response_tag;
+  const wm_channel_t *c = channelByIndex(idx);
+  if (c) {
+    uint8_t home = homeChannelIndex();
+    fillChannel(&am.payload_variant.get_channel_response, c,
+                idx == home ? MESH_CHANNEL_ROLE_PRIMARY
+                            : MESH_CHANNEL_ROLE_SECONDARY);
+  } else {
+    am.payload_variant.get_channel_response.index = idx;  // empty/disabled slot
+  }
+  issuePasskey();
+  memcpy(am.session_passkey.bytes, gPasskey, sizeof(gPasskey));
+  am.session_passkey.size = sizeof(gPasskey);
+
+  meshtastic_FromRadio fr = meshtastic_FromRadio_init_zero;
+  fr.which_payload_variant = meshtastic_FromRadio_packet_tag;
+  meshtastic_MeshPacket &mp = fr.payload_variant.packet;
+  mp.from = gNodeId;
+  mp.to = gNodeId;  // admin reply addressed to the local node
+  mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+  meshtastic_Data &d = mp.payload_variant.decoded;
+  d.portnum = MESH_PORTNUM_ADMIN;
+  pb_ostream_t os =
+      pb_ostream_from_buffer(d.payload.bytes, sizeof(d.payload.bytes));
+  if (!pb_encode(&os, meshtastic_AdminMessage_fields, &am)) return;
+  d.payload.size = (pb_size_t)os.bytes_written;
+  static uint32_t adminId = 0x60000000u;
+  mp.id = ++adminId;
+  enqueueFromRadio(&fr);
+  Serial.printf("# BLE admin get_channel(%u) -> response + passkey\n",
+                (unsigned)idx);
+}
+
+// Decode + handle an AdminMessage from the phone (Data.portnum == ADMIN_APP, §8.1).
+static void routeAdminMessage(const uint8_t *payload, size_t len) {
+  meshtastic_AdminMessage am = meshtastic_AdminMessage_init_zero;
+  pb_istream_t is = pb_istream_from_buffer(payload, len);
+  if (!pb_decode(&is, meshtastic_AdminMessage_fields, &am)) {
+    Serial.println("# BLE admin decode failed");
+    return;
+  }
+  switch (am.which_payload_variant) {
+    case meshtastic_AdminMessage_get_channel_request_tag: {
+      // upstream get_channel_request is 1-based (0 = none) -> 0-based index.
+      uint32_t req = am.payload_variant.get_channel_request;
+      sendAdminChannelResponse(req ? (uint8_t)(req - 1) : 0);
+      break;
+    }
+    case meshtastic_AdminMessage_set_channel_tag: {
+      if (!passkeyOk(am.session_passkey.bytes, am.session_passkey.size)) {
+        Serial.println("# BLE admin set_channel REJECTED (bad/expired passkey)");
+        break;
+      }
+      const meshtastic_Channel &ch = am.payload_variant.set_channel;
+      // Prepare everything OUTSIDE the critical section — snprintf can take
+      // newlib's reentrancy lock, which must never happen with a spinlock held
+      // (the same class of fault as the queue assert). Only plain stores inside.
+      char nm[WM_CHAN_NAME_MAX];
+      snprintf(nm, sizeof(nm), "%s", ch.settings.name);
+      size_t pk = ch.settings.psk.size <= WM_PSK_MAX ? ch.settings.psk.size
+                                                     : WM_PSK_MAX;
+      portENTER_CRITICAL(&gAdminMux);
+      gPendingChan.active = true;
+      gPendingChan.index = (uint8_t)ch.index;
+      gPendingChan.role = (uint8_t)ch.role;
+      memcpy(gPendingChan.psk, ch.settings.psk.bytes, pk);
+      gPendingChan.psk_len = (uint8_t)pk;
+      memcpy(gPendingChan.name, nm, sizeof(nm));
+      portEXIT_CRITICAL(&gAdminMux);
+      Serial.printf("# BLE admin set_channel idx=%u name='%s' role=%u -> queued\n",
+                    (unsigned)ch.index, ch.settings.name, (unsigned)ch.role);
+      break;
+    }
+    default:
+      Serial.printf("# BLE admin variant=%u (ignored)\n",
+                    (unsigned)am.which_payload_variant);
+      break;
+  }
+}
+
+// Route an inbound app MeshPacket (write path, §7.3): recover the channel text
+// — used as-is if the app sent it decoded, else CTR-decrypted byte-compatibly
+// with the stock Meshtastic channel cipher (constraint c) — and queue it for the
+// main loop to flood as a v2 TEXT beacon. NVS/radio stay on the main task. An
+// ADMIN_APP payload is handed to the AdminMessage handler instead (§8.1).
+static void routeAppPacket(const meshtastic_MeshPacket *mp) {
+  const wm_channel_t *ch = channelByIndex((uint8_t)mp->channel);
+  if (!ch || ch->hash < 0) {
+    Serial.printf("# BLE ToRadio packet: unknown channel %u\n",
+                  (unsigned)mp->channel);
+    return;
+  }
+  meshtastic_Data data = meshtastic_Data_init_zero;
+  bool have = false;
+  if (mp->which_payload_variant == meshtastic_MeshPacket_decoded_tag) {
+    data = mp->payload_variant.decoded;          // app handed us plaintext
+    have = true;
+  } else if (mp->which_payload_variant == meshtastic_MeshPacket_encrypted_tag &&
+             ch->key_len > 0) {
+    // from==0 means "this node"; use our id for the nonce, matching the app.
+    uint8_t scratch[256];
+    size_t n = mp->payload_variant.encrypted.size;
+    if (n > sizeof(scratch)) n = sizeof(scratch);
+    uint32_t from = mp->from ? mp->from : gNodeId;
+    if (wm_meshtastic_ctr(ch->expanded_key, ch->key_len, from, mp->id,
+                          mp->payload_variant.encrypted.bytes, n, scratch) == 0) {
+      pb_istream_t is = pb_istream_from_buffer(scratch, n);
+      have = pb_decode(&is, meshtastic_Data_fields, &data);
+      if (!have)
+        Serial.println("# BLE ToRadio: encrypted Data decode failed (wrong key?)");
+    }
+  }
+  if (!have) return;
+  if (data.portnum == MESH_PORTNUM_TEXT && data.payload.size > 0) {
+    appTextPush((uint8_t)ch->hash, data.payload.bytes, data.payload.size);
+    Serial.printf("# BLE app text -> channel %u (%u B), queued for LoRa\n",
+                  (unsigned)mp->channel, (unsigned)data.payload.size);
+  } else if (data.portnum == MESH_PORTNUM_ADMIN && data.payload.size > 0) {
+    routeAdminMessage(data.payload.bytes, data.payload.size);
+  } else {
+    Serial.printf("# BLE ToRadio packet portnum=%u ch=%u (not text/admin, "
+                  "ignored)\n", (unsigned)data.portnum, (unsigned)mp->channel);
+  }
+}
+
 class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c) override {
     std::string v = c->getValue();
@@ -334,8 +625,7 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
         Serial.println("# BLE ToRadio disconnect");
         break;
       case meshtastic_ToRadio_packet_tag:
-        // Layer 2 increment 2: decrypt with advertised PSK + flood onto LoRa.
-        Serial.println("# BLE ToRadio packet (TX) — not yet routed to mesh");
+        routeAppPacket(&tr.payload_variant.packet);
         break;
       default:
         Serial.printf("# BLE ToRadio variant=%u (ignored)\n",
@@ -347,7 +637,9 @@ class ToRadioCallbacks : public NimBLECharacteristicCallbacks {
 
 class FromRadioCallbacks : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic *c) override {
-    uint8_t out[kFrameMax];
+    // static: onRead only ever runs on the single NimBLE host task, so this
+    // 384 B stays off that task's (limited) stack — it was a stack regression.
+    static uint8_t out[kFrameMax];
     int n = qPop(out, sizeof(out));
     if (n >= 0) {
       c->setValue(out, n);
@@ -357,6 +649,8 @@ class FromRadioCallbacks : public NimBLECharacteristicCallbacks {
     }
   }
 };
+
+void bleGattSetChannels(const wm_config_t *cfg) { gCfgRef = cfg; }
 
 void bleGattBegin(uint32_t nodeId) {
   gNodeId = nodeId;
@@ -424,14 +718,15 @@ static void emitSelfNodeInfo(bool valid, int32_t latI, int32_t lonI,
   if (gSelfLastEmitMs != 0 && now - gSelfLastEmitMs < kPeerEmitMinMs) return;
   gSelfLastEmitMs = now;
   meshtastic_FromRadio fr;
-  buildNodeInfoFrame(&fr, gNodeId, valid, latI, lonI, sats, 0.0f, epoch);
+  uint8_t home = homeChannelIndex();
+  buildNodeInfoFrame(&fr, gNodeId, valid, latI, lonI, sats, 0.0f, epoch, home);
   enqueueFromRadio(&fr);
   // #2: the stock-style MeshPacket{POSITION} (supplementary; the NodeInfo above
   // is what the gateway app parses). ONLY with a real fix — a no-fix emit would
   // broadcast 0,0 and teleport the client to null island. Mirrors the per-peer
   // `if (snap.posValid && ...)` guard in bleGattOnPeer.
   if (valid && buildPositionPacketFrame(&fr, gNodeId, latI, lonI, sats, 0.0f,
-                                        epoch))
+                                        epoch, home))
     enqueueFromRadio(&fr);
   Serial.printf("# BLE self %08X -> NodeInfo%s (live)\n", (unsigned)gNodeId,
                 valid ? " + Position" : "");
@@ -481,7 +776,8 @@ void bleGattSetTime(uint32_t epoch) {
 }
 
 void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
-                   uint32_t sats_in_view, bool pos_valid, float snr) {
+                   uint32_t sats_in_view, bool pos_valid, float snr,
+                   uint8_t chan_hash) {
   uint32_t epoch;
   portENTER_CRITICAL(&gPosMux);
   epoch = gEpoch;
@@ -505,6 +801,7 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
   }
   p->snr = snr;
   p->lastHeardEpoch = epoch;
+  p->chanHash = chan_hash;
   unsigned long now = millis();
   // gConfigDone: like the self path, hold live peer emits until after this
   // connection's want_config handshake so we never queue a NodeInfo ahead of
@@ -519,16 +816,82 @@ void bleGattOnPeer(uint32_t node_id, int32_t lat_i, int32_t lon_i,
 
   if (emit) {
     meshtastic_FromRadio fr;
+    uint8_t chIdx = channelIndexForHash(snap.chanHash);
     buildNodeInfoFrame(&fr, snap.nodeId, snap.posValid, snap.latI, snap.lonI,
-                       snap.sats, snap.snr, snap.lastHeardEpoch);
+                       snap.sats, snap.snr, snap.lastHeardEpoch, chIdx);
     enqueueFromRadio(&fr);
     // #2: also the stock-style MeshPacket{POSITION} when we have a fix for this
     // peer (supplementary; the NodeInfo above is what the gateway app parses).
     if (snap.posValid &&
         buildPositionPacketFrame(&fr, snap.nodeId, snap.latI, snap.lonI,
-                                 snap.sats, snap.snr, snap.lastHeardEpoch))
+                                 snap.sats, snap.snr, snap.lastHeardEpoch, chIdx))
       enqueueFromRadio(&fr);
     Serial.printf("# BLE peer %08X -> NodeInfo%s (live)\n", (unsigned)node_id,
                   snap.posValid ? " + Position" : "");
   }
+}
+
+void bleGattOnText(uint32_t src_id, uint8_t chan_hash, const uint8_t *text,
+                   size_t len, float snr) {
+  if (!gBleConnected || !gConfigDone) return;  // hold until handshake completes
+  if (len == 0 || len > WM_TEXT_MAX) return;
+
+  meshtastic_FromRadio fr = meshtastic_FromRadio_init_zero;
+  fr.which_payload_variant = meshtastic_FromRadio_packet_tag;
+  meshtastic_MeshPacket &mp = fr.payload_variant.packet;
+  mp.from = src_id;
+  mp.to = MESH_BROADCAST_ADDR;
+  mp.channel = channelIndexForHash(chan_hash);
+  mp.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+  meshtastic_Data &d = mp.payload_variant.decoded;
+  d.portnum = MESH_PORTNUM_TEXT;
+  size_t n = len <= sizeof(d.payload.bytes) ? len : sizeof(d.payload.bytes);
+  memcpy(d.payload.bytes, text, n);
+  d.payload.size = (pb_size_t)n;
+  static uint32_t txtId = 0x40000000u;  // distinct id space from position packets
+  mp.id = ++txtId;
+  mp.rx_snr = snr;
+  enqueueFromRadio(&fr);
+  Serial.printf("# BLE text from %08X ch=%u (%u B) -> app\n", (unsigned)src_id,
+                (unsigned)mp.channel, (unsigned)n);
+}
+
+int bleGattPopAppText(uint8_t *chan_hash, uint8_t *out, size_t cap) {
+  int n = -1;
+  portENTER_CRITICAL(&gTxMux);
+  if (gTxCount > 0) {
+    AppText &t = gTx[gTxHead];
+    size_t len = t.len <= cap ? t.len : cap;
+    memcpy(out, t.buf, len);
+    *chan_hash = t.chanHash;
+    n = (int)len;
+    gTxHead = (gTxHead + 1) % kTxDepth;
+    gTxCount--;
+  }
+  portEXIT_CRITICAL(&gTxMux);
+  return n;
+}
+
+bool bleGattPopSetChannel(uint8_t *index, uint8_t *role, uint8_t *psk,
+                          size_t psk_cap, size_t *psk_len, char *name,
+                          size_t name_cap) {
+  bool got = false;
+  portENTER_CRITICAL(&gAdminMux);
+  if (gPendingChan.active) {
+    *index = gPendingChan.index;
+    *role = gPendingChan.role;
+    size_t pk = gPendingChan.psk_len <= psk_cap ? gPendingChan.psk_len : psk_cap;
+    memcpy(psk, gPendingChan.psk, pk);
+    *psk_len = pk;
+    size_t nl = 0;
+    while (nl + 1 < name_cap && gPendingChan.name[nl]) {
+      name[nl] = gPendingChan.name[nl];
+      nl++;
+    }
+    name[nl] = '\0';
+    gPendingChan.active = false;
+    got = true;
+  }
+  portEXIT_CRITICAL(&gAdminMux);
+  return got;
 }

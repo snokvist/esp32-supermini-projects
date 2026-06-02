@@ -1,0 +1,12 @@
+{
+  "name": "waymesh_crypto",
+  "version": "0.1.0",
+  "description": "Portable Waymesh v2 crypto core: Meshtastic-compatible channel hash + PSK expansion, and AES-CCM AEAD for the OTA payload. Pure C99, host/C3/8285.",
+  "keywords": ["waymesh", "meshtastic", "aes", "ccm", "crypto"],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcFilter": ["+<*.c>"]
+  }
+}
