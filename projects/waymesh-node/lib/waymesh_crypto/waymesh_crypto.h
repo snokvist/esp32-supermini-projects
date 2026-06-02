@@ -29,6 +29,13 @@
 extern "C" {
 #endif
 
+/* --- Utilities ------------------------------------------------------------ */
+
+/* Securely wipe a buffer so the compiler cannot optimise the clear away (used
+ * for transient key schedules / keystream so captured-device RAM doesn't retain
+ * key material). Portable stand-in for explicit_bzero(). */
+void wm_secure_zero(void *p, size_t n);
+
 /* --- Channel identity (Meshtastic-compatible) ----------------------------- */
 
 /* The famous Meshtastic default channel key (AES-128). A 1-byte PSK index of 1

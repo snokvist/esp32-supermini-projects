@@ -159,13 +159,23 @@
 // rebroadcast if the same MessageID is heard again). See
 // docs/hybrid-mesh/05-protocol.md §"Suppression & dedup state".
 //
-// NO hop-limit: the as-built beacon (v0/v1) carries no hop field, so the
-// seen-set alone bounds the flood — each node relays each MessageID = (srcId,
-// seq) at most once, and a node ignores its own srcId, so the flood terminates.
+// NO hop-limit: the v2 beacon carries no hop field, so the seen-set alone bounds
+// the flood — each node relays each MessageID = (srcId, packetId) at most once,
+// and a node ignores its own srcId, so the flood terminates.
 // A real decrementing hop-limit arrives with the LRP-header migration (05 §LRP).
 #if WAYMESH_RELAY
 #ifndef RELAY_SEEN_SET_SIZE
-#define RELAY_SEEN_SET_SIZE 32      // recent MessageIDs remembered (ring buffer)
+// Recent MessageIDs remembered for dedup. This is the SOLE loop-breaker (no
+// hop-limit yet), so it must not be flushable within one flood lifetime: a
+// re-arriving MessageID that has been evicted gets re-relayed. 128 entries
+// (~1.5 KB) + TTL eviction keeps a busy/contended mesh from flushing it.
+#define RELAY_SEEN_SET_SIZE 128
+#endif
+#ifndef RELAY_SEEN_TTL_MS
+// An entry older than this is "stale": eligible for eviction first, and treated
+// as not-seen so a much-later genuine repeat can still be relayed. Must be >>
+// the max multi-hop flood lifetime (a few x RELAY_DELAY_MAX_MS x hops).
+#define RELAY_SEEN_TTL_MS 60000UL
 #endif
 #ifndef RELAY_PENDING_SLOTS
 #define RELAY_PENDING_SLOTS 4       // rebroadcasts that can be in flight at once

@@ -76,5 +76,7 @@ int wm_chan_hash(const char *name, const uint8_t *psk, size_t psk_len)
     uint8_t key[WM_MAX_KEY_LEN];
     size_t klen = 0;
     if (wm_expand_psk(psk, psk_len, key, &klen) != 0) return -1;
-    return wm_chan_hash_expanded(name, key, klen);
+    int h = wm_chan_hash_expanded(name, key, klen);
+    wm_secure_zero(key, sizeof key);  /* don't leave the expanded key on the stack */
+    return h;
 }

@@ -108,11 +108,19 @@ static int pid_reserve(wm_config_t *cfg)
     return 0;
 }
 
-uint32_t wm_config_next_packet_id(wm_config_t *cfg)
+int wm_config_next_packet_id(wm_config_t *cfg, uint32_t *out_id)
 {
-    if (cfg->pid_next == cfg->pid_ceiling)
-        (void)pid_reserve(cfg); /* device backend must guarantee this write */
-    return cfg->pid_next++;
+    /* >= (not ==): if a prior reserve failed and pid_next ever overshot the
+     * committed ceiling, keep trying to re-establish it rather than running
+     * unbounded above an un-persisted high-water. */
+    if (cfg->pid_next >= cfg->pid_ceiling) {
+        if (pid_reserve(cfg) != 0)
+            return -1; /* persist failed — refuse to issue past the committed
+                        * ceiling (an unsynced reboot would re-issue it → nonce
+                        * reuse, §8). The caller skips originating the frame. */
+    }
+    *out_id = cfg->pid_next++;
+    return 0;
 }
 
 /* --- init / seeding ------------------------------------------------------- */
@@ -177,7 +185,9 @@ int wm_config_add_channel(wm_config_t *cfg, const char *name,
 
     wm_channel_t *c = &cfg->channels[slot];
     memset(c, 0, sizeof(*c));
-    memcpy(c->name, name, strlen(name));
+    size_t nlen = strlen(name);          /* < WM_CHAN_NAME_MAX (checked above) */
+    memcpy(c->name, name, nlen);
+    c->name[nlen] = '\0';                /* explicit NUL — don't lean on memset */
     if (psk_len) memcpy(c->psk, psk, psk_len);
     c->psk_len = (uint8_t)psk_len;
     c->index = index;

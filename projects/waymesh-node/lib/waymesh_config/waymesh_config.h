@@ -81,9 +81,13 @@ int wm_config_init(wm_config_t *cfg, const wm_store_t *store);
 
 /* Reboot-safe monotonic packetId (§8): never repeats under one key, even across
  * crashes — the high-water ceiling is persisted before a block of IDs is used.
- * A failed persist is a hard fault the device backend must handle (halt/reset);
- * see test_config for the crash/reboot non-reuse soak. */
-uint32_t wm_config_next_packet_id(wm_config_t *cfg);
+ * Writes *out_id and returns 0 on success. Returns -1 (without touching *out_id)
+ * if a fresh id cannot be SAFELY issued because the ceiling persist failed:
+ * issuing one anyway would hand out an id at/above the committed high-water,
+ * which an unsynced reboot would then re-issue → CCM nonce reuse. Callers MUST
+ * check the return and skip originating the frame on -1. See test_config for the
+ * crash/reboot non-reuse soak and the persist-failure refusal test. */
+int wm_config_next_packet_id(wm_config_t *cfg, uint32_t *out_id);
 
 /* Add/replace a channel (matched by Meshtastic index). Computes the derived
  * hash/key (§4) and persists the channel blob. name must be non-empty. The

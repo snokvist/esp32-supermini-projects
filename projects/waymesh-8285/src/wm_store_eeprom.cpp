@@ -13,11 +13,10 @@
 // One u32 write per packetId reserve-ahead; one blob write per channel-set — the
 // same write pattern documented for the C3 NVS backend.
 //
-// Compiled ONLY in -DWAYMESH_WIFI_CONFIG builds (chain+ LDF): the silent relay
-// firmware never pulls in waymesh_config / EEPROM.
+// Always compiled: the firmware is v2/auth-only, so the packetId high-water and
+// channel store are needed in every build (independent of the WiFi portal). The
+// portal merely writes the same store.
 // =============================================================================
-#if defined(WAYMESH_WIFI_CONFIG) && WAYMESH_WIFI_CONFIG
-
 #include "wm_store_eeprom.h"
 
 #include <Arduino.h>
@@ -81,6 +80,9 @@ static int ee_put_blob(void *ctx, const char *key, const void *data, size_t len)
     if (len > WM_EE_BLOB_MAX) return -1;
     const uint8_t *d = (const uint8_t *)data;
     for (size_t i = 0; i < len; i++) EEPROM.write(WM_EE_OFF_CHANS + i, d[i]);
+    // Zero the rest of the channel region: a shorter re-provision must not leave
+    // the previous (longer) channel's PSK/name readable in flash past chans_len.
+    for (size_t i = len; i < WM_EE_BLOB_MAX; i++) EEPROM.write(WM_EE_OFF_CHANS + i, 0);
     uint16_t l = (uint16_t)len;
     EEPROM.put(WM_EE_OFF_CHANLEN, l);
     set_magic();
@@ -104,5 +106,3 @@ void wm_store_eeprom_begin(wm_store_t *out) {
     out->rng = ee_rng;
     out->ctx = NULL;
 }
-
-#endif  // WAYMESH_WIFI_CONFIG

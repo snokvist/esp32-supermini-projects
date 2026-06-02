@@ -595,8 +595,17 @@ provisioning portal. The earlier **GPS↔portal UART0 share** concern is resolve
 owns it (GPS in `DEBUG`, i.e. before NMEA lock or after a no-GPS revert), so it never
 steals the GPS's NMEA bytes; the GPIO0 long-press trigger is independent of UART0 and
 always works. `bayck_portal` is retained as the GPS-off bench twin (stable console).
-Builds: `bayck_7pwm` / `betafpv_nano` (+`*_gpstest`) Flash ~44.6%, RAM ~41%. The
-v0/v1 path stays in `main.cpp` (`#if !WAYMESH_V2`) as a flag-toggled legacy build.
+Builds: `bayck_7pwm` / `betafpv_nano` (+`*_gpstest`) Flash ~44.6%, RAM ~41%.
+
+**Update (2026-06-02): legacy v0/v1 path removed.** The firmware is now v2-only —
+the `#if !WAYMESH_V2` packed-`Beacon` sendBeacon/handleRx, the `WAYMESH_V2` flag,
+and the `WM_HAVE_CONFIG = (WAYMESH_WIFI_CONFIG || WAYMESH_V2)` umbrella are all
+gone. The v2 codec + `wm_config` store are unconditionally compiled; the EEPROM
+backend was decoupled from `WAYMESH_WIFI_CONFIG` (packetId persistence is needed
+regardless of the portal), leaving `WAYMESH_WIFI_CONFIG` as the sole optional
+flag (the provisioning portal). The shared `wm_beacon` codec still *parses* an
+inbound v0/v1 frame as the open group on RX (§ Migration); only 8285 v1
+*origination* is gone.
 
 ## 11 — Resolved decisions
 

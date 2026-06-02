@@ -111,14 +111,16 @@ UART pads + GPIO0 (esptool).
   first flash). BUSY=GPIO5/RST=GPIO2 confirmed wired to the SX1280 on the BayckRC
   (not the PWMP7 "no-BUSY" layout). **Gate passed — the heterogeneous mesh is
   real.**
-- **Tier 2 — mid node (7PWM): GPS-over-remapped-PWM-UART + beacon + relay.**
-  *Outcome:* the 8285 reads GNSS on a SoftwareSerial mapped to a PWM-output GPIO
-  and beacons its v1 position; appears as a peer in the gateway. *Validates:* the
-  PWM-pin-as-UART PoC + a non-C3 GPS beacon. *Metric:* GPS fix over SoftSerial;
-  beacon PDR to the gateway.
+- **Tier 2 — mid node (7PWM): GPS-over-time-shared-UART0 + beacon + relay.**
+  *Outcome (as built):* the 8285 reads GNSS on hardware UART0, time-shared with
+  the debug console (DEBUG → PROBE → GPS, auto-reverting if no NMEA is heard) —
+  the earlier SoftwareSerial-on-a-PWM-pin plan was dropped — and beacons its
+  position; appears as a peer in the gateway. *Validates:* the UART0 time-share +
+  a non-C3 GPS beacon. *Metric:* GPS fix over UART0; beacon PDR to the gateway.
 - **Tier 3 — dumb relay (Nano): forward-only + suppression + low-mem dedup.**
-  *Outcome:* re-floods unseen beacons with hop-limit, overhear suppression, and a
-  small fixed-size seen-set (RAM-frugal dedup) — no GPS/BLE. *Validates:* managed
+  *Outcome:* re-floods unseen beacons with overhear suppression and a fixed-size
+  TTL seen-set (RAM-frugal dedup) — **no hop-limit yet, so the seen-set is the
+  sole loop-breaker** — no GPS/BLE. *Validates:* managed
   flood on the cheapest tier (P5's discipline on Tier-3 silicon). *Metric:*
   redundancy factor R, RAM footprint, no-storm under load.
   - **Relay primitive — device-verified (2026-05-24), `waymesh-8285` `bayck_7pwm`

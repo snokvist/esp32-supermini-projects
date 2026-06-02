@@ -146,6 +146,11 @@ int wm_ccm_seal(const uint8_t *key, size_t key_len,
 
     /* Encrypted MAC: U = T xor S0[0..tag_len-1] */
     for (size_t i = 0; i < tag_len; i++) tag_out[i] = T[i] ^ s0[i];
+
+    /* Wipe the round-key schedule + MAC/keystream scratch (captured-RAM hygiene). */
+    wm_secure_zero(&ctx, sizeof ctx);
+    wm_secure_zero(T, sizeof T);
+    wm_secure_zero(s0, sizeof s0);
     return 0;
 }
 
@@ -171,9 +176,14 @@ int wm_ccm_open(const uint8_t *key, size_t key_len,
     uint8_t diff = 0;
     for (size_t i = 0; i < tag_len; i++)
         diff |= (uint8_t)((T[i] ^ s0[i]) ^ tag[i]);
+    int rc = 0;
     if (diff != 0) {
         memset(pt_out, 0, ct_len); /* no plaintext leak on auth failure */
-        return -2;
+        rc = -2;
     }
-    return 0;
+    /* Wipe the round-key schedule + MAC/keystream scratch before returning. */
+    wm_secure_zero(&ctx, sizeof ctx);
+    wm_secure_zero(T, sizeof T);
+    wm_secure_zero(s0, sizeof s0);
+    return rc;
 }
