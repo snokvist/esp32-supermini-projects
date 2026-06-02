@@ -506,6 +506,32 @@ gateway). Verification so far:
   Until the 8285 port lands these stay host-tested / single-device only; see
   `roadmaps/esp32-supermini-projects.md` for the porting task.
 
+### Status (8285 port — 2026-06-02): WiFi config portal landed (step 6, §8.4)
+
+The 8285 port has begun with its provisioning lever. **Step 6 (§8.4 WiFi config
+portal)** is implemented in `waymesh-8285` (`bayck_portal` env) and
+**device-verified** on a BayckRC 7PWM (`006D2929`):
+
+- The portable `wm_config` store now runs on the 8285 over an **EEPROM-emulation
+  `wm_store_t`** backend (`src/wm_store_eeprom.cpp`), sharing the canonical
+  `waymesh_config` / `waymesh_crypto` libs from `waymesh-node` via `lib_extra_dirs`
+  (chain+ LDF keeps them out of the silent relay firmware — `bayck_7pwm` stays the
+  byte-for-byte verified PoC build).
+- An **ELRS-style SoftAP + captive web form** (`Waymesh_XXXX` @ `http://10.0.0.1`,
+  WPA2) sets the home channel (name + PSK) and relay policy and writes the **same
+  store the C3 fills over BLE** — the BLE-less twin of §8.1, both ending at one store.
+- **Verified on-device:** fresh EEPROM seeded the `LongFast`/psk=01 default
+  (chanHash 8, relay-all); a form edit to `WaymeshA` + relay-known (chanHash
+  recomputed 8→31) **persisted across a power-cycle**; LoRa was suspended (radio
+  asleep) while the AP was up and resumed on reboot.
+
+**Still pending — Phase B (the v2/auth on-air port):** the v2 beacon codec, the
+clear-header `chanHash` group filter + `relay-known` enforcement, and AES-CCM
+beacon origination must still be ported into the 8285 RX / relay / TX path. Until
+then `bayck_portal` provisions the store but still relays the legacy v0/v1 beacon
+(the portal is additive). Phase B unblocks the 2-device bench items above (the
+§9.1 / §9.2 gates).
+
 ## 11 — Resolved decisions
 
 The earlier open questions are now decided (rationale inline above):
