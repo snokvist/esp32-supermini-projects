@@ -534,6 +534,7 @@ void loop() {
 #if WAYMESH_WIFI_CONFIG
   if (gConfigMode) { serviceConfigMode(); return; }  // AP up: LoRa suspended
   checkPortalTrigger();                              // GPIO0 long-press / serial 'c'
+  if (gConfigMode) return;  // just entered this iteration -> skip RF (stay asleep)
 #endif
   if (gRadioOk) {
     if (gRxFlag) {
