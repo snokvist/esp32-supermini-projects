@@ -14,7 +14,6 @@
 #include <esp_system.h>
 #include <NimBLEDevice.h>
 #include <TinyGPSPlus.h>
-#include <esp_adc_cal.h>
 #include <driver/adc.h>
 
 #include <cstdlib>
@@ -2783,17 +2782,29 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
     error = "adc_enabled must be 0 or 1";
     return false;
   }
-  if (s.adcEnabled && !isSupportedGpio(s.adcPin)) {
-    error = "adc_pin out of range";
-    return false;
+  if (s.adcEnabled) {
+    if (s.adcPin > 4) {
+      error = "adc_pin must be GPIO 0..4 (ADC1 channels)";
+      return false;
+    }
+    if (isReservedOledPin(s.adcPin)) {
+      error = "adc_pin cannot use reserved OLED pin";
+      return false;
+    }
   }
   if (s.gpsEnabled > 1) {
     error = "gps_enabled must be 0 or 1";
     return false;
   }
-  if (s.gpsEnabled && !isSupportedGpio(s.gpsRxPin)) {
-    error = "gps_rx_pin out of range";
-    return false;
+  if (s.gpsEnabled) {
+    if (!isSupportedGpio(s.gpsRxPin)) {
+      error = "gps_rx_pin out of range";
+      return false;
+    }
+    if (isReservedOledPin(s.gpsRxPin)) {
+      error = "gps_rx_pin cannot use reserved OLED pin";
+      return false;
+    }
   }
   if (s.gpsCrsfTelemetryEnabled > 1) {
     error = "gps_crsf_telemetry must be 0 or 1";
@@ -3151,7 +3162,7 @@ void initAdc() {
     case 4: ch = ADC1_CHANNEL_4; break;
     default: return;
   }
-  adc1_config_channel_atten(ch, ADC_ATTEN_DB_11);
+  adc1_config_channel_atten(ch, ADC_ATTEN_DB_12);
   gAdcReady = true;
   gAdcRawSum = 0;
   gAdcSampleIndex = 0;
@@ -4381,9 +4392,6 @@ void setup() {
   if (gSettings.btEnabled) {
     btInit();
   }
-
-  initAdc();
-  initGpsSerial();
 
   const bool serialOk = (gSettings.crsfOutputTarget != 1);
   if (serialOk) {
