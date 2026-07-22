@@ -13,6 +13,8 @@
 #include <Wire.h>
 #include <esp_system.h>
 #include <NimBLEDevice.h>
+#include <TinyGPSPlus.h>
+#include <driver/adc.h>
 
 #include <cstdlib>
 
@@ -63,6 +65,18 @@
 #define SERVO_PWM_FREQUENCY_HZ 100
 #endif
 
+#ifndef ADC_INPUT_PIN
+#define ADC_INPUT_PIN 3
+#endif
+
+#ifndef GPS_UART_RX_PIN
+#define GPS_UART_RX_PIN 7
+#endif
+
+#ifndef GPS_UART_BAUD
+#define GPS_UART_BAUD 9600
+#endif
+
 #ifndef OLED_SDA_PIN
 #define OLED_SDA_PIN 4
 #endif
@@ -93,6 +107,14 @@ constexpr uint8_t kCrsfMaxFrameLength = 62;
 constexpr uint16_t kCrsfMinValue = 172;
 constexpr uint16_t kCrsfCenterValue = 992;
 constexpr uint16_t kCrsfMaxValue = 1811;
+
+constexpr uint8_t kCrsfFrameTypeGps = 0x02;
+constexpr uint8_t kCrsfGpsPayloadSize = 15;
+constexpr uint8_t kCrsfGpsPacketSize = 19;
+
+constexpr uint8_t kAdcSampleCount = 16;
+constexpr uint32_t kAdcReadIntervalMs = 100;
+constexpr uint32_t kGpsCrsfTelemetryIntervalMs = 200;
 
 constexpr uint8_t kServoCount = 3;
 constexpr uint8_t kMergeMaxChannels = 8;
@@ -129,7 +151,7 @@ constexpr uint16_t kBtScanWindowNormal   = 112;   // ~70% duty — leaves headro
 constexpr uint16_t kBtScanIntervalCoex   = 160;   // 100ms
 constexpr uint16_t kBtScanWindowCoex     = 80;    // ~50% duty
 
-constexpr uint16_t kSettingsVersion = 10;
+constexpr uint16_t kSettingsVersion = 11;
 constexpr uint8_t kDualColorYellowHeight = 16;
 constexpr uint8_t kFirstSupportedGpio = 0;
 constexpr uint8_t kLastLowSupportedGpio = 10;
@@ -468,6 +490,20 @@ const sections=[
 {name:'crsf_merge_count',label:'PPM channels to merge',type:'select',options:[['1','1'],['2','2'],['3','3 (Headtracker)'],['4','4'],['5','5'],['6','6'],['7','7'],['8','8 (EdgeTX Trainer)']]},
 ...Array.from({length:8},(_,i)=>({name:`crsf_merge_map_${i+1}`,label:`PPM CH${i+1} \u2192 output`,type:'select',options:chOpts}))
 ]},
+{title:'ADC Voltage', note:'Read analog voltage on an ADC-capable pin (GPIO 0-4). Use a voltage divider for inputs above 3.3V. R1=top, R2=bottom resistor (kohm*10, e.g. 100=10.0k).', fields:[
+{name:'adc_enabled',label:'ADC input',type:'select',options:[['0','Off'],['1','On']]},
+{name:'adc_pin',label:'ADC pin',type:'select',options:[['0','GPIO 0'],['1','GPIO 1'],['2','GPIO 2'],['3','GPIO 3 (default)'],['4','GPIO 4']]},
+{name:'adc_divider_r1',label:'Divider R1 (kohm*10)',type:'number'},
+{name:'adc_divider_r2',label:'Divider R2 (kohm*10)',type:'number'}
+]},
+{title:'GPS Input', note:'NMEA GPS module on a dedicated serial RX pin. GPS telemetry is sent as CRSF frame type 0x02 alongside RC channel data.', fields:[
+{name:'gps_enabled',label:'GPS input',type:'select',options:[['0','Off'],['1','On']]},
+{name:'gps_rx_pin',label:'GPS RX pin',type:'number'},
+{name:'gps_baud',label:'GPS baud rate',type:'select',options:[
+['4800','4800'],['9600','9600 (default)'],['19200','19200'],['38400','38400'],['57600','57600'],['115200','115200']
+]},
+{name:'gps_crsf_telemetry',label:'CRSF GPS telemetry output',type:'select',options:[['0','Off'],['1','On']]}
+]},
 {title:'Pins', advanced:true, note:'Valid configurable GPIOs are 0..10, 20, and 21. GPIO4/5 are reserved for the OLED. GPIO9 is the onboard BOOT button.', fields:[
 {name:'led_pin',label:'LED pin',type:'number'},
 {name:'ppm_input_pin',label:'PPM input pin',type:'number'},
@@ -518,7 +554,9 @@ const summaryFields=[
   {label:'PPM Rate', value:(s)=>`${s.ppm_health_label || '--'} / ${formatHz(s.ppm_window_hz)}`, sub:(s)=>`Timeout ${readField('signal_timeout_ms','--')} ms`},
   {label:'CRSF RX', value:(s)=>`${s.crsf_rx_health_label || '--'} / ${s.crsf_rx_health_label==='RXOK' ? formatHz(s.crsf_rx_rate_hz) : '--'}`, sub:(s)=>`${s.crsf_rx_packets ?? 0} pkts / ${(s.crsf_rx_invalid ?? 0)} bad`},
   {label:'Servos', value:(s)=>formatServoSummary(s.servo_us), sub:(s)=>{const me=readField('crsf_merge_enabled','0');if(me==='1'){const mc=parseInt(readField('crsf_merge_count','3'))||3;const chs=Array.from({length:mc},(_,i)=>'CH'+readField(`crsf_merge_map_${i+1}`,String(10+i)));return `MERGE ${chs.join('/')}`}const m1=readField('servo_map_1','1'),m2=readField('servo_map_2','2'),m3=readField('servo_map_3','3');return `CH${m1} / CH${m2} / CH${m3}`}},
-  {label:'Bluetooth', value:(s)=>s.bt_state||'--', sub:(s)=>s.bt_device ? `${s.bt_device} ${formatHz(s.bt_report_hz)}` : (readField('bt_enabled','0')==='1' ? 'Scanning...' : 'Disabled')}
+  {label:'Bluetooth', value:(s)=>s.bt_state||'--', sub:(s)=>s.bt_device ? `${s.bt_device} ${formatHz(s.bt_report_hz)}` : (readField('bt_enabled','0')==='1' ? 'Scanning...' : 'Disabled')},
+  {label:'ADC', value:(s)=>readField('adc_enabled','0')==='1' ? (s.adc_voltage!==undefined ? s.adc_voltage.toFixed(2)+' V' : '--') : 'Off', sub:(s)=>readField('adc_enabled','0')==='1' ? `Pin ${readField('adc_pin','3')} raw ${s.adc_raw??'--'}` : 'Disabled'},
+  {label:'GPS', value:(s)=>readField('gps_enabled','0')==='1' ? (s.gps_fix ? `Fix ${s.gps_sats} sats` : `No fix ${s.gps_sats??0} sats`) : 'Off', sub:(s)=>readField('gps_enabled','0')==='1' ? (s.gps_fix ? `${s.gps_lat?.toFixed(4)}, ${s.gps_lon?.toFixed(4)}` : `${s.gps_bytes??0} bytes rx`) : 'Disabled'}
 ];
 
 function readField(name,fallback=''){
@@ -795,6 +833,16 @@ struct RuntimeSettings {
   uint16_t btChannelInvert;  // bitmask: bit N = invert ch N
 
   uint8_t oledDualColor;  // 0=mono, 1=dual-color (yellow top 16px + blue)
+
+  uint8_t adcEnabled;
+  uint8_t adcPin;
+  uint16_t adcDividerR1;  // top resistor in kohm*10 (e.g. 100 = 10.0k)
+  uint16_t adcDividerR2;  // bottom resistor in kohm*10 (0 = no divider, raw 0-3.3V)
+
+  uint8_t gpsEnabled;
+  uint8_t gpsRxPin;
+  uint32_t gpsBaud;
+  uint8_t gpsCrsfTelemetryEnabled;
 };
 
 volatile uint16_t gIsrPpmMinChannelUs = 800;
@@ -929,6 +977,22 @@ int8_t gBtAxisSubIdx[6] = {-1, -1, -1, -1, -1, -1};
 int8_t gBtHatFieldIdx = -1;
 int8_t gBtHatSubIdx = -1;
 int8_t gBtButtonFieldIdx = -1;
+
+// --- ADC Voltage Readout ---
+bool gAdcReady = false;
+uint32_t gAdcRawSum = 0;
+uint8_t gAdcSampleIndex = 0;
+uint32_t gAdcSmoothedRaw = 0;
+float gAdcVoltage = 0.0f;
+uint32_t gLastAdcReadMs = 0;
+
+// --- GPS Subsystem ---
+TinyGPSPlus gGps;
+HardwareSerial gGpsSerial(0);
+bool gGpsSerialReady = false;
+uint32_t gGpsLastFixMs = 0;
+uint32_t gGpsLastCrsfTelemetryMs = 0;
+uint32_t gGpsByteCounter = 0;
 
 // Hat switch direction to X/Y (-1, 0, +1).  Index 8 = released.
 static const int8_t kHatToXY[9][2] = {
@@ -1608,6 +1672,16 @@ RuntimeSettings defaultSettings() {
   s.btChannelSource[11] = 11;  // CH12 -> Button 4
   s.btChannelInvert = 0;
   s.oledDualColor = 0;
+
+  s.adcEnabled = 0;
+  s.adcPin = ADC_INPUT_PIN;
+  s.adcDividerR1 = 0;
+  s.adcDividerR2 = 0;
+
+  s.gpsEnabled = 0;
+  s.gpsRxPin = GPS_UART_RX_PIN;
+  s.gpsBaud = GPS_UART_BAUD;
+  s.gpsCrsfTelemetryEnabled = 1;
   return s;
 }
 
@@ -2166,7 +2240,17 @@ void drawDebugConfigScreen(uint32_t nowMs) {
                     gSettings.servoPwmPins[2]);
   }
   gDisplay.setCursor(0, gContentStartY + s * 4);
-  gDisplay.print("short >pg  long exit");
+  if (gSettings.adcEnabled && gAdcReady) {
+    gDisplay.printf("ADC %.2fV", static_cast<double>(gAdcVoltage));
+  } else if (gSettings.gpsEnabled) {
+    if (gGps.location.isValid()) {
+      gDisplay.printf("GPS %dsat %.4f", gGps.satellites.value(), gGps.location.lat());
+    } else {
+      gDisplay.printf("GPS %dsat no fix", gGps.satellites.value());
+    }
+  } else {
+    gDisplay.print("short >pg  long exit");
+  }
 }
 
 void drawDebugRoutesScreen(uint32_t nowMs) {
@@ -2291,7 +2375,12 @@ void drawDebugRangesScreen(uint32_t nowMs) {
                     static_cast<unsigned long>(gSettings.crsfRxTimeoutMs));
   }
   gDisplay.setCursor(0, gContentStartY + s * 4);
-  gDisplay.printf("UART %lu  WiFi ch%u", static_cast<unsigned long>(gSettings.crsfUartBaud), gSettings.wifiChannel);
+  if (gSettings.adcEnabled || gSettings.gpsEnabled) {
+    if (gSettings.adcEnabled) gDisplay.printf("ADC:%.1fV ", static_cast<double>(gAdcVoltage));
+    if (gSettings.gpsEnabled) gDisplay.printf("GPS:%dsat", gGps.satellites.value());
+  } else {
+    gDisplay.printf("UART %lu  WiFi ch%u", static_cast<unsigned long>(gSettings.crsfUartBaud), gSettings.wifiChannel);
+  }
 }
 
 void refreshOledStatus(uint32_t nowMs) {
@@ -2425,6 +2514,16 @@ bool saveSettingsToNvs(const RuntimeSettings &s) {
   }
   ok &= (gPrefs.putUShort("bti", s.btChannelInvert) == sizeof(uint16_t));
   ok &= (gPrefs.putUChar("odc", s.oledDualColor) == sizeof(uint8_t));
+
+  ok &= (gPrefs.putUChar("ade", s.adcEnabled) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("adp", s.adcPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUShort("adr1", s.adcDividerR1) == sizeof(uint16_t));
+  ok &= (gPrefs.putUShort("adr2", s.adcDividerR2) == sizeof(uint16_t));
+
+  ok &= (gPrefs.putUChar("gpe", s.gpsEnabled) == sizeof(uint8_t));
+  ok &= (gPrefs.putUChar("gprx", s.gpsRxPin) == sizeof(uint8_t));
+  ok &= (gPrefs.putUInt("gpbd", s.gpsBaud) == sizeof(uint32_t));
+  ok &= (gPrefs.putUChar("gptl", s.gpsCrsfTelemetryEnabled) == sizeof(uint8_t));
   return ok;
 }
 
@@ -2435,7 +2534,7 @@ RuntimeSettings loadSettingsFromNvs() {
   }
 
   const uint16_t version = gPrefs.getUShort("ver", 0);
-  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != kSettingsVersion) {
+  if (version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != kSettingsVersion) {
     if (!saveSettingsToNvs(s)) {
       Serial.println("WARN: Failed to initialize settings in NVS");
     }
@@ -2497,6 +2596,16 @@ RuntimeSettings loadSettingsFromNvs() {
   s.btChannelInvert = gPrefs.getUShort("bti", s.btChannelInvert);
   s.oledDualColor = gPrefs.getUChar("odc", s.oledDualColor);
 
+  s.adcEnabled = gPrefs.getUChar("ade", s.adcEnabled);
+  s.adcPin = gPrefs.getUChar("adp", s.adcPin);
+  s.adcDividerR1 = gPrefs.getUShort("adr1", s.adcDividerR1);
+  s.adcDividerR2 = gPrefs.getUShort("adr2", s.adcDividerR2);
+
+  s.gpsEnabled = gPrefs.getUChar("gpe", s.gpsEnabled);
+  s.gpsRxPin = gPrefs.getUChar("gprx", s.gpsRxPin);
+  s.gpsBaud = gPrefs.getUInt("gpbd", s.gpsBaud);
+  s.gpsCrsfTelemetryEnabled = gPrefs.getUChar("gptl", s.gpsCrsfTelemetryEnabled);
+
   // Auto-clamp fallback values into the pulse range so upgrades from older
   // schema versions (which lacked per-channel fallback) never trip validation.
   for (uint8_t i = 0; i < kServoCount; ++i) {
@@ -2522,12 +2631,20 @@ RuntimeSettings loadSettingsFromNvs() {
 }
 
 bool pinListHasDuplicates(const RuntimeSettings &s) {
-  const uint8_t pins[] = {s.ledPin,          s.ppmInputPin,       s.modeButtonPin,
-                          s.crsfUartTxPin,   s.crsfUartRxPin,      s.servoPwmPins[0],
-                          s.servoPwmPins[1], s.servoPwmPins[2]};
-  constexpr size_t n = sizeof(pins) / sizeof(pins[0]);
-  for (size_t i = 0; i < n; ++i) {
-    for (size_t j = i + 1; j < n; ++j) {
+  uint8_t pins[10];
+  uint8_t count = 0;
+  pins[count++] = s.ledPin;
+  pins[count++] = s.ppmInputPin;
+  pins[count++] = s.modeButtonPin;
+  pins[count++] = s.crsfUartTxPin;
+  pins[count++] = s.crsfUartRxPin;
+  pins[count++] = s.servoPwmPins[0];
+  pins[count++] = s.servoPwmPins[1];
+  pins[count++] = s.servoPwmPins[2];
+  if (s.adcEnabled) pins[count++] = s.adcPin;
+  if (s.gpsEnabled) pins[count++] = s.gpsRxPin;
+  for (uint8_t i = 0; i < count; ++i) {
+    for (uint8_t j = i + 1; j < count; ++j) {
       if (pins[i] == pins[j]) {
         return true;
       }
@@ -2659,6 +2776,38 @@ bool validateSettings(const RuntimeSettings &s, String &error) {
   }
   if (s.oledDualColor > 1) {
     error = "oled_dual_color must be 0 or 1";
+    return false;
+  }
+  if (s.adcEnabled > 1) {
+    error = "adc_enabled must be 0 or 1";
+    return false;
+  }
+  if (s.adcEnabled) {
+    if (s.adcPin > 4) {
+      error = "adc_pin must be GPIO 0..4 (ADC1 channels)";
+      return false;
+    }
+    if (isReservedOledPin(s.adcPin)) {
+      error = "adc_pin cannot use reserved OLED pin";
+      return false;
+    }
+  }
+  if (s.gpsEnabled > 1) {
+    error = "gps_enabled must be 0 or 1";
+    return false;
+  }
+  if (s.gpsEnabled) {
+    if (!isSupportedGpio(s.gpsRxPin)) {
+      error = "gps_rx_pin out of range";
+      return false;
+    }
+    if (isReservedOledPin(s.gpsRxPin)) {
+      error = "gps_rx_pin cannot use reserved OLED pin";
+      return false;
+    }
+  }
+  if (s.gpsCrsfTelemetryEnabled > 1) {
+    error = "gps_crsf_telemetry must be 0 or 1";
     return false;
   }
   return true;
@@ -2999,6 +3148,121 @@ void sendPpmAsCrsfFrame(bool writeUsbSerial, bool writeHardwareUart) {
   uint8_t packet[kCrsfPacketSize] = {0};
   packCrsfRcPacket(channels, packet);
   writeCrsfPacket(packet, writeUsbSerial, writeHardwareUart);
+}
+
+void initAdc() {
+  if (!gSettings.adcEnabled) return;
+  adc1_config_width(ADC_WIDTH_BIT_12);
+  adc1_channel_t ch;
+  switch (gSettings.adcPin) {
+    case 0: ch = ADC1_CHANNEL_0; break;
+    case 1: ch = ADC1_CHANNEL_1; break;
+    case 2: ch = ADC1_CHANNEL_2; break;
+    case 3: ch = ADC1_CHANNEL_3; break;
+    case 4: ch = ADC1_CHANNEL_4; break;
+    default: return;
+  }
+  adc1_config_channel_atten(ch, ADC_ATTEN_DB_12);
+  gAdcReady = true;
+  gAdcRawSum = 0;
+  gAdcSampleIndex = 0;
+  gAdcSmoothedRaw = 0;
+  gAdcVoltage = 0.0f;
+}
+
+void readAdc(uint32_t nowMs) {
+  if (!gAdcReady) return;
+  if ((nowMs - gLastAdcReadMs) < kAdcReadIntervalMs) return;
+  gLastAdcReadMs = nowMs;
+
+  adc1_channel_t ch;
+  switch (gSettings.adcPin) {
+    case 0: ch = ADC1_CHANNEL_0; break;
+    case 1: ch = ADC1_CHANNEL_1; break;
+    case 2: ch = ADC1_CHANNEL_2; break;
+    case 3: ch = ADC1_CHANNEL_3; break;
+    case 4: ch = ADC1_CHANNEL_4; break;
+    default: return;
+  }
+
+  const int raw = adc1_get_raw(ch);
+  if (raw < 0) return;
+
+  if (gAdcSampleIndex < kAdcSampleCount) {
+    gAdcRawSum += static_cast<uint32_t>(raw);
+    gAdcSampleIndex++;
+  } else {
+    gAdcRawSum = gAdcRawSum - (gAdcRawSum / kAdcSampleCount) + static_cast<uint32_t>(raw);
+  }
+  gAdcSmoothedRaw = gAdcRawSum / ((gAdcSampleIndex < kAdcSampleCount) ? gAdcSampleIndex : kAdcSampleCount);
+
+  float pinVoltage = (static_cast<float>(gAdcSmoothedRaw) / 4095.0f) * 3.3f;
+  if (gSettings.adcDividerR1 > 0 && gSettings.adcDividerR2 > 0) {
+    pinVoltage = pinVoltage * static_cast<float>(gSettings.adcDividerR1 + gSettings.adcDividerR2)
+                 / static_cast<float>(gSettings.adcDividerR2);
+  }
+  gAdcVoltage = pinVoltage;
+}
+
+void processGpsInput() {
+  if (!gGpsSerialReady) return;
+  while (gGpsSerial.available() > 0) {
+    gGps.encode(gGpsSerial.read());
+    gGpsByteCounter++;
+  }
+  if (gGps.location.isUpdated()) {
+    gGpsLastFixMs = millis();
+  }
+}
+
+void packCrsfGpsPacket(uint8_t packet[kCrsfGpsPacketSize]) {
+  int32_t lat = static_cast<int32_t>(gGps.location.lat() * 1e7);
+  int32_t lon = static_cast<int32_t>(gGps.location.lng() * 1e7);
+  uint16_t speed = static_cast<uint16_t>(gGps.speed.kmph() * 10.0);
+  uint16_t heading = static_cast<uint16_t>(gGps.course.deg() * 100.0);
+  uint16_t altitude = static_cast<uint16_t>(gGps.altitude.meters() + 1000.0);
+  uint8_t sats = static_cast<uint8_t>(gGps.satellites.value());
+
+  lat = __builtin_bswap32(lat);
+  lon = __builtin_bswap32(lon);
+  speed = __builtin_bswap16(speed);
+  heading = __builtin_bswap16(heading);
+  altitude = __builtin_bswap16(altitude);
+
+  packet[0] = kCrsfAddress;
+  packet[1] = kCrsfGpsPayloadSize + 2;
+  packet[2] = kCrsfFrameTypeGps;
+  memcpy(&packet[3], &lat, 4);
+  memcpy(&packet[7], &lon, 4);
+  memcpy(&packet[11], &speed, 2);
+  memcpy(&packet[13], &heading, 2);
+  memcpy(&packet[15], &altitude, 2);
+  packet[17] = sats;
+  packet[18] = crc8DvbS2(&packet[2], kCrsfGpsPayloadSize + 1);
+}
+
+void sendGpsCrsfTelemetry(uint32_t nowMs) {
+  if (!gSettings.gpsEnabled || !gSettings.gpsCrsfTelemetryEnabled) return;
+  if (!gGps.location.isValid()) return;
+  if ((nowMs - gGpsLastCrsfTelemetryMs) < kGpsCrsfTelemetryIntervalMs) return;
+  gGpsLastCrsfTelemetryMs = nowMs;
+
+  const bool outputToUsb = (gSettings.crsfOutputTarget == 0 || gSettings.crsfOutputTarget == 2);
+  const bool outputToUart = (gSettings.crsfOutputTarget == 1 || gSettings.crsfOutputTarget == 2);
+
+  uint8_t packet[kCrsfGpsPacketSize] = {0};
+  packCrsfGpsPacket(packet);
+  if (outputToUsb) Serial.write(packet, kCrsfGpsPacketSize);
+  if (outputToUart && gCrsfUartReady) gCrsfUart.write(packet, kCrsfGpsPacketSize);
+}
+
+void initGpsSerial() {
+  if (!gSettings.gpsEnabled) return;
+  gGpsSerial.begin(gSettings.gpsBaud, SERIAL_8N1, gSettings.gpsRxPin, -1);
+  gGpsSerialReady = true;
+  gGpsByteCounter = 0;
+  gGpsLastFixMs = 0;
+  gGpsLastCrsfTelemetryMs = 0;
 }
 
 bool copyFrameFromIsr(uint32_t &invalidPulses) {
@@ -3355,6 +3619,15 @@ void applySettings(const RuntimeSettings &newSettings) {
     gLastCrsfRxWindowPacketCounter = gCrsfRxPacketCounter;
     gCrsfRxWindowHz = 0.0f;
   }
+
+  if (gGpsSerialReady) {
+    gGpsSerial.end();
+    gGpsSerialReady = false;
+  }
+  initGpsSerial();
+
+  gAdcReady = false;
+  initAdc();
 }
 
 bool parseUIntArgOptional(const char *name, uint32_t minValue, uint32_t maxValue, uint32_t &target, String &error) {
@@ -3438,6 +3711,16 @@ String settingsToJson() {
             String((gSettings.btChannelInvert & (1U << i)) ? 1 : 0);
   }
   json += ",\"oled_dual_color\":" + String(gSettings.oledDualColor);
+
+  json += ",\"adc_enabled\":" + String(gSettings.adcEnabled);
+  json += ",\"adc_pin\":" + String(gSettings.adcPin);
+  json += ",\"adc_divider_r1\":" + String(gSettings.adcDividerR1);
+  json += ",\"adc_divider_r2\":" + String(gSettings.adcDividerR2);
+
+  json += ",\"gps_enabled\":" + String(gSettings.gpsEnabled);
+  json += ",\"gps_rx_pin\":" + String(gSettings.gpsRxPin);
+  json += ",\"gps_baud\":" + String(gSettings.gpsBaud);
+  json += ",\"gps_crsf_telemetry\":" + String(gSettings.gpsCrsfTelemetryEnabled);
   json += "}";
   return json;
 }
@@ -3464,6 +3747,22 @@ String statusToJson() {
   json += ",\"bt_device\":\"" + String(gBtDeviceName) + "\"";
   json += ",\"bt_report_hz\":" + String(gBtReportRateHz, 1);
   json += ",\"led_pattern\":\"" + String(ledPatternLabel(gCurrentLedPattern)) + "\"";
+
+  if (gSettings.adcEnabled) {
+    json += ",\"adc_voltage\":" + String(gAdcVoltage, 2);
+    json += ",\"adc_raw\":" + String(gAdcSmoothedRaw);
+  }
+  if (gSettings.gpsEnabled) {
+    json += ",\"gps_fix\":" + String(gGps.location.isValid() ? 1 : 0);
+    json += ",\"gps_sats\":" + String(gGps.satellites.value());
+    if (gGps.location.isValid()) {
+      json += ",\"gps_lat\":" + String(gGps.location.lat(), 6);
+      json += ",\"gps_lon\":" + String(gGps.location.lng(), 6);
+      json += ",\"gps_alt\":" + String(gGps.altitude.meters(), 1);
+      json += ",\"gps_speed\":" + String(gGps.speed.kmph(), 1);
+    }
+    json += ",\"gps_bytes\":" + String(gGpsByteCounter);
+  }
   json += "}";
   return json;
 }
@@ -3767,6 +4066,62 @@ void handlePostSettings() {
     return;
   }
   candidate.oledDualColor = static_cast<uint8_t>(tmp);
+
+  tmp = candidate.adcEnabled;
+  if (!parseUIntArgOptional("adc_enabled", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.adcEnabled = static_cast<uint8_t>(tmp);
+
+  tmp = candidate.adcPin;
+  if (!parseUIntArgOptional("adc_pin", 0, 4, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.adcPin = clampU8(tmp);
+
+  tmp = candidate.adcDividerR1;
+  if (!parseUIntArgOptional("adc_divider_r1", 0, 10000, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.adcDividerR1 = static_cast<uint16_t>(tmp);
+
+  tmp = candidate.adcDividerR2;
+  if (!parseUIntArgOptional("adc_divider_r2", 0, 10000, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.adcDividerR2 = static_cast<uint16_t>(tmp);
+
+  tmp = candidate.gpsEnabled;
+  if (!parseUIntArgOptional("gps_enabled", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.gpsEnabled = static_cast<uint8_t>(tmp);
+
+  tmp = candidate.gpsRxPin;
+  if (!parseUIntArgOptional("gps_rx_pin", 0, 21, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.gpsRxPin = clampU8(tmp);
+
+  tmp = candidate.gpsBaud;
+  if (!parseUIntArgOptional("gps_baud", 4800, 115200, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.gpsBaud = tmp;
+
+  tmp = candidate.gpsCrsfTelemetryEnabled;
+  if (!parseUIntArgOptional("gps_crsf_telemetry", 0, 1, tmp, error)) {
+    gWeb.send(400, "text/plain", error);
+    return;
+  }
+  candidate.gpsCrsfTelemetryEnabled = static_cast<uint8_t>(tmp);
 
   uint8_t requestedLiveMode = outputModeToUint(gOutputMode);
   if (gOutputMode == OutputMode::kDebugConfig) {
@@ -4187,6 +4542,10 @@ void loop() {
       }
     }
   }
+
+  readAdc(millis());
+  processGpsInput();
+  sendGpsCrsfTelemetry(millis());
 
   updateLed();
   delay(1);
