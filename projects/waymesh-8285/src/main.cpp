@@ -612,8 +612,29 @@ void setup() {
 
   // SX128x LoRa begin(): freq, bw, sf, cr, power, preamble. NOTE: unlike the
   // LR11x0/SX126x begin(), SX128x takes NO sync-word and NO tcxo argument.
-  int16_t st = gRadio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
-                            LORA_POWER_DBM, LORA_PREAMBLE);
+  //
+  // Cold-boot resilience: on a true power-on the SX1280's 3V3 rail / 52 MHz
+  // crystal may not be ready when we first reach begin() (~300 ms after reset),
+  // so the SPI version read returns 0x00/0xFF and begin() fast-fails with
+  // CHIP_NOT_FOUND (-2). With a single attempt that left gRadioOk=false, the LED
+  // dark, and no TX until a manual power-cycle (the rail is settled the 2nd time;
+  // see README "begin() returns -2 on soft reset"). Retry a few times with a
+  // settle delay so a slow-ramping rail self-heals automatically. A warm boot
+  // succeeds on attempt 0 and breaks immediately, so the working path is
+  // unchanged (no added latency); the delay also helps even if RST isn't wired
+  // to the radio (some bayck PWM wirings route GPIO2 to a servo header).
+  const int kBeginTries = 5;
+  const int kBeginRetryMs = 200;
+  int16_t st = RADIOLIB_ERR_UNKNOWN;
+  for (int attempt = 0; attempt < kBeginTries; attempt++) {
+    st = gRadio.begin(LORA_FREQ_MHZ, LORA_BW_KHZ, LORA_SF, LORA_CR,
+                      LORA_POWER_DBM, LORA_PREAMBLE);
+    if (st == RADIOLIB_ERR_NONE) break;
+    Serial.printf("# radio begin() try %d/%d failed (st=%d); rail may still be "
+                  "ramping, retrying in %d ms\n",
+                  attempt + 1, kBeginTries, st, kBeginRetryMs);
+    delay(kBeginRetryMs);
+  }
   if (st == RADIOLIB_ERR_NONE) {
     // Force the interop-critical settings explicitly (the LR1121 side relies on
     // these exact values; see board_config.h):
